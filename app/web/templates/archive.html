@@ -1,0 +1,16 @@
+{% extends "base.html" %}
+{% block content %}
+  <h1 class="text-2xl font-bold">历史日报</h1>
+  {% if reports %}
+    <ul class="mt-6 divide-y divide-slate-200 bg-white rounded-xl border border-slate-200">
+      {% for item in reports %}
+        <li class="px-5 py-4 flex items-center justify-between">
+          <a href="/daily/{{ item.date }}" class="font-medium hover:text-blue-600">{{ item.date }}</a>
+          <span class="text-sm text-slate-500">{{ item.article_count }} 篇</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="mt-4 text-sm text-slate-500">还没有历史日报。</p>
+  {% endif %}
+{% endblock %}

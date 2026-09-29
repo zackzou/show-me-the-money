@@ -1,0 +1,10 @@
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+sqlalchemy>=2.0,<3.0
+apscheduler>=3.10,<4.0
+feedparser>=6.0,<7.0
+httpx>=0.27,<1.0
+jinja2>=3.1,<4.0
+pydantic>=2.7,<3.0
+pydantic-settings>=2.3,<3.0
+PyYAML>=6.0,<7.0

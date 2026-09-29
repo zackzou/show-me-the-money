@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block content %}
+  {% if report %}
+    <h1 class="text-2xl font-bold">日报 · {{ report.date }}</h1>
+    <p class="mt-1 text-sm text-slate-500">共 {{ report.article_count }} 篇相关文章</p>
+    <article class="mt-6 bg-white rounded-xl border border-slate-200 p-5">
+      <div class="whitespace-pre-wrap text-sm leading-7">{{ report.content_md }}</div>
+    </article>
+  {% else %}
+    <h1 class="text-2xl font-bold">{{ date }} 没有日报</h1>
+    <p class="mt-2 text-sm text-slate-500">换一天看看，或稍后再来。</p>
+  {% endif %}
+{% endblock %}

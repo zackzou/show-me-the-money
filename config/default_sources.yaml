@@ -1,0 +1,46 @@
+sources:
+  - name: Hacker News
+    url: https://news.ycombinator.com/rss
+    type: rss
+    lang: en
+    enabled: true
+  - name: TechCrunch
+    url: https://techcrunch.com/feed/
+    type: rss
+    lang: en
+    enabled: true
+  - name: The Verge
+    url: https://www.theverge.com/rss/index.xml
+    type: rss
+    lang: en
+    enabled: true
+  - name: Ars Technica
+    url: https://feeds.arstechnica.com/arstechnica/index
+    type: rss
+    lang: en
+    enabled: true
+  - name: MIT Technology Review
+    url: https://www.technologyreview.com/feed/
+    type: rss
+    lang: en
+    enabled: true
+  - name: Hugging Face Blog
+    url: https://huggingface.co/blog/feed.xml
+    type: rss
+    lang: en
+    enabled: true
+  - name: 机器之心
+    url: https://www.jiqizhixin.com/rss
+    type: rss
+    lang: zh
+    enabled: true
+  - name: 量子位
+    url: https://www.qbitai.com/feed
+    type: rss
+    lang: zh
+    enabled: true
+  - name: InfoQ AI
+    url: https://www.infoq.cn/feed/ai
+    type: rss
+    lang: zh
+    enabled: true

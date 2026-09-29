@@ -1,0 +1,27 @@
+schedule:
+  # 抓取与处理间隔（小时）
+  fetch_interval_hours: 2
+  # 日报生成时间 HH:MM
+  daily_report_time: "08:00"
+  # 清理时间 HH:MM
+  cleanup_time: "03:00"
+
+storage:
+  retention_days: 30
+  db_path: data/smtm.db
+  # 去重时比对的历史标题条数
+  dedup_recent_window: 500
+
+web:
+  host: 0.0.0.0
+  port: 8000
+
+llm:
+  timeout_seconds: 60
+  max_retries: 2
+  temperature: 0.3
+
+fetcher:
+  timeout_seconds: 15
+  max_retries: 2
+  user_agent: "ShowMeTheMoney/0.1 (+https://github.com/zackzou/show-me-the-money)"
