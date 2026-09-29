@@ -78,17 +78,27 @@ def _daily_trigger(hhmm: str) -> CronTrigger:
     return CronTrigger(hour=int(hour or 8), minute=int(minute or 0))
 
 
+def _fetch_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
+    """配了 fetch_cron 就按每天固定时刻跑，否则按小时轮询。"""
+    if settings.schedule.fetch_cron.strip():
+        return CronTrigger.from_crontab(settings.schedule.fetch_cron.strip(), timezone="Asia/Shanghai")
+    return IntervalTrigger(seconds=int(settings.schedule.fetch_interval_hours * 3600))
+
+
+def _process_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
+    if settings.schedule.process_cron.strip():
+        return CronTrigger.from_crontab(settings.schedule.process_cron.strip(), timezone="Asia/Shanghai")
+    return IntervalTrigger(seconds=int(settings.schedule.fetch_interval_hours * 3600))
+
+
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     """按配置装配四个任务（不启动）。"""
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
-    interval = IntervalTrigger(hours=settings.schedule.fetch_interval_hours)
-    scheduler.add_job(run_fetch_job, interval, args=[settings], id="fetch_job", replace_existing=True)
     scheduler.add_job(
-        run_process_job,
-        IntervalTrigger(hours=settings.schedule.fetch_interval_hours),
-        args=[settings],
-        id="process_job",
-        replace_existing=True,
+        run_fetch_job, _fetch_trigger(settings), args=[settings], id="fetch_job", replace_existing=True
+    )
+    scheduler.add_job(
+        run_process_job, _process_trigger(settings), args=[settings], id="process_job", replace_existing=True
     )
     scheduler.add_job(
         run_report_job,
@@ -114,8 +124,9 @@ def start_scheduler(settings: Settings, *, log_file: object | None = None) -> Ba
         return _scheduler
     _scheduler = build_scheduler(settings)
     _scheduler.start()
-    log.info("调度器已启动：抓取/处理每 %s 小时，日报 %s，清理 %s",
-             settings.schedule.fetch_interval_hours,
+    fetch_plan = settings.schedule.fetch_cron.strip() or f"每 {settings.schedule.fetch_interval_hours} 小时"
+    log.info("调度器已启动：抓取/处理 %s，日报 %s，清理 %s",
+             fetch_plan,
              settings.schedule.daily_report_time,
              settings.schedule.cleanup_time)
     return _scheduler

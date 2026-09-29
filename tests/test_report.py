@@ -10,7 +10,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.models import DailyReport
 from app.report.generator import generate_daily_report, render_markdown
-from app.scheduler import run_cleanup_job, run_report_job
+from app.scheduler import build_scheduler, run_cleanup_job, run_report_job
 from app.utils.text import now_local
 
 from .conftest import make_article
@@ -104,3 +104,26 @@ def test_cleanup_removes_expired_rows(seeded_db, settings: Settings):
 
     with session_scope() as session:
         assert session.query(DailyReport).count() == 0
+
+
+def test_scheduler_defaults_to_interval_triggers(settings: Settings):
+    jobs = {job.id: type(job.trigger).__name__ for job in build_scheduler(settings).get_jobs()}
+    assert jobs == {
+        "fetch_job": "IntervalTrigger",
+        "process_job": "IntervalTrigger",
+        "report_job": "CronTrigger",
+        "cleanup_job": "CronTrigger",
+    }
+
+
+def test_scheduler_switches_to_daily_cron_when_configured(settings: Settings):
+    settings.schedule.fetch_cron = "0 7 * * *"
+    settings.schedule.process_cron = "30 7 * * *"
+    scheduler = build_scheduler(settings)
+    jobs = {job.id: type(job.trigger).__name__ for job in scheduler.get_jobs()}
+    assert jobs["fetch_job"] == "CronTrigger"
+    assert jobs["process_job"] == "CronTrigger"
+    # 抓取每天 07:00、处理 07:30，日报仍在 08:00
+    assert "hour='7', minute='0'" in str(scheduler.get_job("fetch_job").trigger)
+    assert "hour='7', minute='30'" in str(scheduler.get_job("process_job").trigger)
+    assert "hour='8', minute='0'" in str(scheduler.get_job("report_job").trigger)

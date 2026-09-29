@@ -51,7 +51,7 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `config/default_sources.yaml` | 9 个默认信源（HN / TechCrunch / The Verge / Ars Technica / MIT TR / HF Blog / 机器之心 / 量子位 / InfoQ AI），单个源失败自动跳过 |
 | `config/default_topics.yaml` | 默认分类标签 |
 | `config/default_prompts.yaml` | 摘要 / 标签 / 相关度提示词，以及降级摘要长度 |
-| `config/settings.yaml` | 调度间隔、日报时间、保留天数、端口、超时与重试 |
+| `config/settings.yaml` | 调度、保留天数、端口、超时与重试。抓取默认按 `fetch_interval_hours` 轮询；想让它在每天固定时刻跑，就填 `fetch_cron` / `process_cron`（cron 表达式，如 `"0 7 * * *"`），留空则回到间隔触发 |
 
 环境变量 `CONFIG_DIR`、`DB_PATH`、`FETCH_ON_STARTUP` 可覆盖默认路径与行为。
 

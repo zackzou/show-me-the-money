@@ -75,6 +75,10 @@ class ScheduleSettings(BaseModel):
     fetch_interval_hours: float = 2.0
     daily_report_time: str = "08:00"
     cleanup_time: str = "03:00"
+    # 想按「每天固定时刻」跑（而不是按小时轮询）就填 cron 表达式，例如 "0 7 * * *"；
+    # 留空则退回 fetch_interval_hours 的间隔触发。
+    fetch_cron: str = ""
+    process_cron: str = ""
 
 
 class WebSettings(BaseModel):
