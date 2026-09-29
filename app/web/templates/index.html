@@ -2,11 +2,18 @@
 {% block content %}
   {% if report %}
     <p class="text-xs tracking-widest text-blue-600 font-semibold">LATEST REPORT</p>
-    <h1 class="mt-2 text-2xl font-bold">日报 · {{ report.date }}</h1>
-    <p class="mt-1 text-sm text-slate-500">共 {{ report.article_count }} 篇相关文章</p>
-    <article class="mt-6 bg-white rounded-xl border border-slate-200 p-5 prose prose-slate max-w-none">
-      <div class="whitespace-pre-wrap text-sm leading-7">{{ report.content_md }}</div>
-    </article>
+    <h1 class="mt-2 text-3xl font-bold tracking-tight">日报 · {{ report.date }}</h1>
+    <p class="mt-2 text-sm text-slate-500">
+      共 {{ report.article_count }} 篇与调研方向直接相关的报道 · 每 2 小时自动抓取与筛选，每天 08:00 出日报
+    </p>
+    {% if topics %}
+      <div class="mt-4 flex flex-wrap gap-2">
+        {% for t in topics %}
+          <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-3 py-1">调研方向：{{ t }}</span>
+        {% endfor %}
+      </div>
+    {% endif %}
+    {% include "_articles.html" %}
   {% else %}
     <h1 class="text-2xl font-bold">还没有日报</h1>
     <p class="mt-2 text-sm text-slate-500">系统正在按调度抓取与处理，日报生成后这里会自动更新。</p>

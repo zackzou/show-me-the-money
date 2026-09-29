@@ -36,7 +36,8 @@ REPORT_HTML_TEMPLATE = Template(
 {% endfor %}
 {% if not items %}<p>本日没有与调研方向相关的文章。</p>{% endif %}
 </body></html>
-"""
+""",
+    autoescape=True,
 )
 
 

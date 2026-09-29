@@ -13,7 +13,7 @@ from app.fetcher.dedup import is_duplicate
 from app.fetcher.rss import fetch_feed
 from app.models import Article, Source
 from app.utils.logger import get_logger
-from app.utils.text import now_local, strip_html, truncate
+from app.utils.text import now_local, strip_html, truncate, unescape_text
 
 log = get_logger(__name__)
 
@@ -66,7 +66,7 @@ def run_fetch_pipeline(
                 session.add(
                     Article(
                         source_id=source.id,
-                        title=title[:500],
+                        title=unescape_text(title)[:500],
                         link=link[:1000],
                         content=truncate(strip_html(str(item.get("content") or "")), MAX_CONTENT_CHARS),
                         published_at=item.get("published_at") or now_local(),

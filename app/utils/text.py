@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from html import unescape
 
 LOCAL_TZ = timezone(timedelta(hours=8))  # 北京时间
 
@@ -35,9 +36,15 @@ def strip_html(text: str | None) -> str:
     if not text:
         return ""
     plain = _TAG_RE.sub(" ", text)
-    for entity, char in (("&nbsp;", " "), ("&amp;", "&"), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", '"')):
-        plain = plain.replace(entity, char)
+    plain = unescape_text(plain)
     return _WS_RE.sub(" ", plain).strip()
+
+
+def unescape_text(text: str | None) -> str:
+    """把 feed 里残留的 HTML 实体（&mdash; &#8217; &amp; 等）还原成字符。"""
+    if not text:
+        return ""
+    return unescape(text)
 
 
 def truncate(text: str | None, limit: int) -> str:
