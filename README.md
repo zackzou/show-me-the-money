@@ -1,5 +1,7 @@
 # Show Me the Money
 
+[![GitHub Pages](https://img.shields.io/badge/在线演示-GitHub%20Pages-blue)](https://zackzou.github.io/show-me-the-money/)
+
 **只配两项，自动产出行业热点日报。** 你给出「大模型 API」和「调研方向」，项目自己去抓主流信源、按方向筛选、生成中文摘要与标签，每天 08:00 出一份可订阅的日报。
 
 - 用户只有两项必填配置：`LLM_API_*` + `RESEARCH_TOPIC`
