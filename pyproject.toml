@@ -20,8 +20,8 @@ dependencies = [
   "PyYAML>=6.0,<7.0",
 ]
 
-[tool.setuptools]
-packages = ["app"]
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [tool.ruff]
 line-length = 120

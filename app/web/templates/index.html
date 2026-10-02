@@ -4,7 +4,7 @@
     <p class="text-xs tracking-widest text-blue-600 font-semibold">LATEST REPORT</p>
     <h1 class="mt-2 text-3xl font-bold tracking-tight">日报 · {{ report.date }}</h1>
     <p class="mt-2 text-sm text-slate-500">
-      共 {{ report.article_count }} 篇与调研方向直接相关的报道 · 每 2 小时自动抓取与筛选，每天 08:00 出日报
+      共 {{ report.article_count }} 篇与调研方向直接相关的报道 · 每 2 小时自动抓取与筛选并刷新当天，每天 08:00 定稿前一日
     </p>
     {% if topics %}
       <div class="mt-4 flex flex-wrap gap-2">

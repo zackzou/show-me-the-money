@@ -6,7 +6,7 @@ from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Engine, create_engine, event
+from sqlalchemy import Engine, create_engine, event, select
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import SourceConfig
@@ -27,12 +27,21 @@ def _apply_sqlite_pragmas(engine: Engine) -> None:
         cursor.close()
 
 
+# 抓取与处理是两个独立任务，可能同时写 SQLite；默认 5 秒拿不到写锁就直接抛
+# "database is locked"，让整个抓取任务失败。放到 30 秒，让它排队而不是报错。
+SQLITE_BUSY_TIMEOUT_SECONDS = 30
+
+
 def init_db(db_file: Path | str) -> Engine:
     """建库建表，返回 Engine（同时设置为进程默认连接）。"""
     global _engine, _session_factory, _db_file
     path = Path(db_file)
     path.parent.mkdir(parents=True, exist_ok=True)
-    engine = create_engine(f"sqlite:///{path}", future=True, connect_args={"check_same_thread": False})
+    engine = create_engine(
+        f"sqlite:///{path}",
+        future=True,
+        connect_args={"check_same_thread": False, "timeout": SQLITE_BUSY_TIMEOUT_SECONDS},
+    )
     _apply_sqlite_pragmas(engine)
     Base.metadata.create_all(engine)
     _engine = engine
@@ -72,13 +81,17 @@ def session_scope() -> Iterator[Session]:
 
 
 def seed_sources(sources: Iterable[SourceConfig]) -> int:
-    """若 sources 表为空，导入默认信源池，返回导入条数。"""
+    """把配置里的信源同步进 ``sources`` 表，返回**新增**条数。
+
+    只按 url 做增量新增，不改已有记录 —— 这样升级项目后新增的信源会自动生效，
+    而用户手动关掉的信源（``enabled=0``）不会被配置文件覆盖回去。
+    """
+    added = 0
     with session_scope() as session:
-        existing = session.query(Source).count()
-        if existing:
-            return 0
-        created = 0
+        known = set(session.execute(select(Source.url)).scalars())
         for item in sources:
+            if item.url in known:
+                continue
             session.add(
                 Source(
                     name=item.name,
@@ -89,5 +102,6 @@ def seed_sources(sources: Iterable[SourceConfig]) -> int:
                     created_at=now_local(),
                 )
             )
-            created += 1
-        return created
+            known.add(item.url)
+            added += 1
+    return added

@@ -1,6 +1,8 @@
-"""抓取模块测试：RSS 解析、重试、去重、主流程。"""
+"""抓取模块测试：RSS 解析、重试、去重、时间窗过滤、主流程。"""
 
 from __future__ import annotations
+
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -11,6 +13,7 @@ from app.fetcher.dedup import is_duplicate
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.fetcher.rss import FetchError, fetch_feed, parse_feed
 from app.models import Article, Source
+from app.utils.text import now_local
 
 RSS_SAMPLE = """<?xml version="1.0" encoding="UTF-8"?>
 <rss version="2.0"><channel>
@@ -104,3 +107,106 @@ def test_run_fetch_pipeline_skips_failing_source(seeded_db):
     with session_scope() as session:
         assert session.query(Source).count() == 1
         assert session.query(Article).count() == 0
+
+
+def test_run_fetch_pipeline_flags_empty_source(seeded_db):
+    """抓到 0 条 = 死信源，必须显式暴露出来，而不是安静地当作「今天没更新」。"""
+
+    def empty_fetcher(url: str, **kwargs):
+        return []
+
+    stats = run_fetch_pipeline(fetcher=empty_fetcher)
+    assert stats["empty_sources"] == 1
+    assert stats["details"][0]["status"] == "empty"
+
+
+def test_run_fetch_pipeline_drops_stale_items(seeded_db):
+    """归档型 feed（一次返回整个历史）必须按 max_age_days 挡掉。"""
+    now = now_local()
+
+    def archive_fetcher(url: str, **kwargs):
+        return [
+            {
+                "title": "三天前的旧闻",
+                "link": "https://example.com/old",
+                "content": "正文",
+                "published_at": now - timedelta(days=30),
+            },
+            {
+                "title": "昨天的新闻",
+                "link": "https://example.com/new",
+                "content": "正文",
+                "published_at": now - timedelta(days=1),
+            },
+        ]
+
+    stats = run_fetch_pipeline(fetcher=archive_fetcher, max_age_days=14)
+
+    assert stats["stale"] == 1
+    assert stats["new"] == 1
+    with session_scope() as session:
+        titles = [row.title for row in session.execute(select(Article)).scalars()]
+    assert titles == ["昨天的新闻"]
+
+
+def test_run_fetch_pipeline_caps_items_per_source(seeded_db):
+    def many_fetcher(url: str, **kwargs):
+        return [
+            {"title": f"第 {i} 条", "link": f"https://example.com/{i}", "content": "正文", "published_at": None}
+            for i in range(10)
+        ]
+
+    stats = run_fetch_pipeline(fetcher=many_fetcher, max_items_per_source=4)
+
+    assert stats["new"] == 4
+    assert stats["capped"] == 6
+
+
+def test_run_fetch_pipeline_min_content_chars(seeded_db):
+    def titled_fetcher(url: str, **kwargs):
+        return [
+            {"title": "只有标题", "link": "https://example.com/t1", "content": "<p>短</p>", "published_at": None},
+            {
+                "title": "有正文",
+                "link": "https://example.com/t2",
+                "content": "<p>足够长的正文内容，用来通过长度阈值</p>",
+                "published_at": None,
+            },
+        ]
+
+    stats = run_fetch_pipeline(fetcher=titled_fetcher, min_content_chars=10)
+
+    assert stats["no_content"] == 1
+    assert stats["new"] == 1
+    with session_scope() as session:
+        titles = [row.title for row in session.execute(select(Article)).scalars()]
+    assert titles == ["有正文"]
+
+
+def test_run_fetch_pipeline_survives_link_collision(seeded_db):
+    """并发/手动抓取撞上同一 link 时，只丢那一条，不该整批回滚。"""
+    with session_scope() as session:
+        session.add(Article(title="已存在", link="https://example.com/dup", status="processed"))
+
+    def fetcher(url: str, **kwargs):
+        return [
+            {"title": "撞车条目", "link": "https://example.com/dup", "content": "正文", "published_at": None},
+            {"title": "正常条目", "link": "https://example.com/fine", "content": "正文", "published_at": None},
+        ]
+
+    # 故意关掉 link 预检，模拟「预检通过但写入时才发现撞车」的情况
+    stats = run_fetch_pipeline(fetcher=fetcher)
+    assert stats["new"] == 1
+    assert stats["failed"] == 0
+    with session_scope() as session:
+        titles = {row.title for row in session.execute(select(Article)).scalars()}
+    assert titles == {"已存在", "正常条目"}
+
+
+def test_run_fetch_pipeline_counts_items_without_date(seeded_db):
+    def undated_fetcher(url: str, **kwargs):
+        return [{"title": "没有日期", "link": "https://example.com/undated", "content": "正文", "published_at": None}]
+
+    stats = run_fetch_pipeline(fetcher=undated_fetcher, max_age_days=14)
+    assert stats["no_date"] == 1
+    assert stats["new"] == 1

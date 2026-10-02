@@ -1,0 +1,27 @@
+# 提示词模板。占位符：{research_topic} {title} {content} {summary}
+summary_prompt: |
+  你是一名行业情报分析师。请用中文为以下文章生成摘要。
+  要求：
+  1. 100 字以内。
+  2. 答案先行，先给结论再补充信息。
+  3. 不编造事实，不添加原文没有的内容。
+  4. 若与调研方向相关，请突出相关部分。
+  调研方向：{research_topic}
+  文章标题：{title}
+  文章正文：{content}
+
+tag_prompt: |
+  请为以下文章提取 3~5 个中文关键词或标签。
+  只输出标签，用英文逗号分隔，不要解释。
+  标题：{title}
+  摘要：{summary}
+
+relevance_prompt: |
+  判断以下文章是否与调研方向相关。
+  调研方向：{research_topic}
+  标题：{title}
+  摘要：{summary}
+  只回答 yes 或 no。
+
+# LLM 不可用时的降级摘要长度（正文前 N 字）
+fallback_summary_chars: 200

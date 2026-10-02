@@ -2,27 +2,35 @@
 
 from __future__ import annotations
 
-from datetime import date as date_type
-
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import __version__
 from app.db import get_session
 from app.models import Article, DailyReport, Source
+from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleOut, HealthOut, ReportDetail, ReportOut
+from app.utils.text import now_local
 
 api_router = APIRouter(prefix="/api")
 
 
 @api_router.get("/articles", response_model=list[ArticleOut])
 def list_articles(date: str | None = None, limit: int = 200, session: Session = Depends(get_session)):
-    """按日期（默认今天）列出文章。"""
-    target = date or date_type.today().isoformat()
+    """按日期（默认**北京时间**今天）列出进日报的文章。"""
+    try:
+        start, end = day_window(date or now_local().strftime("%Y-%m-%d"))
+    except ValueError:
+        raise HTTPException(status_code=400, detail=f"日期格式应为 YYYY-MM-DD：{date!r}") from None
     statement = (
         select(Article)
-        .where(func.date(Article.published_at) == target)
+        .where(
+            Article.relevance == 1,
+            Article.status.in_(STATUS_REPORTABLE),
+            Article.published_at >= start,
+            Article.published_at < end,
+        )
         .order_by(Article.published_at.desc(), Article.id.desc())
         .limit(max(1, min(limit, 1000)))
     )

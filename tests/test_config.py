@@ -5,8 +5,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 
-from app.config import ConfigError, load_settings
+from app.config import ConfigError, Settings, SourceConfig, load_settings
+from app.db import seed_sources, session_scope
+from app.models import Source
 
 CONFIG_DIR = Path(__file__).resolve().parent.parent / "config"
 
@@ -56,3 +59,23 @@ def test_missing_config_dir_raises(tmp_path: Path):
     with pytest.raises(ConfigError) as excinfo:
         load_settings(env=VALID, config_dir=tmp_path / "nope")
     assert "缺少默认配置文件" in str(excinfo.value)
+
+
+def test_sources_sync_adds_new_without_touching_existing(seeded_db, settings: Settings):
+    """升级项目后新增的信源要自动生效；用户手动关掉的不能被配置改回来。"""
+    with session_scope() as session:
+        session.execute(Source.__table__.update().values(enabled=0))
+        session.commit()
+
+    added = seed_sources(
+        [
+            SourceConfig(name="测试源", url="https://example.com/feed", lang="zh"),  # 已存在
+            SourceConfig(name="新信源", url="https://example.com/new"),  # 新增
+        ]
+    )
+
+    assert added == 1
+    with session_scope() as session:
+        by_url = {row.url: row.enabled for row in session.execute(select(Source)).scalars()}
+    assert by_url["https://example.com/new"] == 1
+    assert by_url["https://example.com/feed"] == 0  # 仍保持用户关掉的状态

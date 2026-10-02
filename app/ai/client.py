@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import time
 
 import httpx
@@ -9,6 +10,14 @@ import httpx
 from app.utils.logger import get_logger
 
 log = get_logger(__name__)
+
+# 兜底脱敏：某些网关会把请求头原样回显在错误体里，别让 API Key 落进日志。
+_SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{6,}|Bearer\s+[A-Za-z0-9._\-]{6,})")
+
+
+def redact(text: object, limit: int = 200) -> str:
+    """把可能含密钥的片段打码后再截断，用于写日志。"""
+    return _SECRET_RE.sub("***", str(text))[:limit]
 
 
 class LLMError(RuntimeError):
@@ -66,11 +75,11 @@ class LLMClient:
             try:
                 response = self._http().post(self.endpoint, json=payload)
                 if response.status_code >= 400:
-                    raise LLMError(f"HTTP {response.status_code}: {response.text[:200]}")
+                    raise LLMError(f"HTTP {response.status_code}: {redact(response.text)}")
                 data = response.json()
                 choices = data.get("choices") or []
                 if not choices:
-                    raise LLMError(f"返回体缺少 choices：{str(data)[:200]}")
+                    raise LLMError(f"返回体缺少 choices：{redact(data)}")
                 content = (choices[0].get("message") or {}).get("content") or ""
                 if not str(content).strip():
                     raise LLMError("返回内容为空")

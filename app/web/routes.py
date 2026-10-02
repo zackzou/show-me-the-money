@@ -8,11 +8,12 @@ from typing import Any
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
 from app.models import Article, DailyReport, Source
+from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import split_tags
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
@@ -22,14 +23,22 @@ page_router = APIRouter()
 
 
 def articles_of_day(session: Session, date_str: str) -> list[dict[str, Any]]:
-    """当天与调研方向相关的文章（页面直接成卡片展示，不必让读者去读 Markdown 源文）。"""
+    """某一天进日报的文章（页面直接成卡片展示，不必让读者去读 Markdown 源文）。
+
+    口径与日报生成保持一致（含降级摘要的文章），否则页面会比日报多/少东西。
+    """
+    try:
+        start, end = day_window(date_str)
+    except ValueError:
+        return []  # 非法日期当作「这一天没有内容」，由路由返回 404
     statement = (
         select(Article, Source.name)
         .outerjoin(Source, Article.source_id == Source.id)
         .where(
-            func.date(Article.published_at) == date_str,
             Article.relevance == 1,
-            Article.status == "processed",
+            Article.status.in_(STATUS_REPORTABLE),
+            Article.published_at >= start,
+            Article.published_at < end,
         )
         .order_by(Article.published_at.desc(), Article.id.desc())
     )
@@ -43,6 +52,7 @@ def articles_of_day(session: Session, date_str: str) -> list[dict[str, Any]]:
                 "time": article.published_at.strftime("%m-%d %H:%M") if article.published_at else "",
                 "summary": article.summary or "",
                 "tags": split_tags(article.tags),
+                "degraded": article.status == "failed",
             }
         )
     return items
@@ -66,12 +76,13 @@ def index(request: Request, session: Session = Depends(get_session)) -> HTMLResp
 @page_router.get("/daily/{date}", response_class=HTMLResponse)
 def daily(request: Request, date: str, session: Session = Depends(get_session)) -> HTMLResponse:
     report = session.execute(select(DailyReport).where(DailyReport.date == date)).scalar_one_or_none()
+    articles = articles_of_day(session, date)
     return templates.TemplateResponse(
         request,
         "daily.html",
         {
             "report": report,
-            "articles": articles_of_day(session, date),
+            "articles": articles,
             "date": date,
             "topics": _topics(request),
             "title": f"{date} 日报",

@@ -70,21 +70,39 @@ def process_pending(
     *,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """批量处理 status=pending 的文章。"""
+    """批量处理 status=pending 的文章。
+
+    单篇出错只标记这一篇并继续 —— 否则一篇坏数据就能让整批卡在 pending，
+    下一个周期又重来一遍。每处理 ``checkpoint_every`` 篇提交一次，
+    避免长任务中途失败把已完成的进度一起回滚。
+    """
     statement = select(Article).where(Article.status == "pending").order_by(Article.published_at.desc())
     if limit is not None:
         statement = statement.limit(limit)
     articles = list(session.execute(statement).scalars())
 
-    stats = {"pending": len(articles), "processed": 0, "irrelevant": 0, "failed": 0}
-    for article in articles:
+    stats = {"pending": len(articles), "processed": 0, "irrelevant": 0, "failed": 0, "crashed": 0}
+    checkpoint = max(1, settings.ai.batch_checkpoint_every)
+    for index, article in enumerate(articles, start=1):
         previous_relevance = article.relevance
-        status = process_article(session, article, client, settings)
+        try:
+            status = process_article(session, article, client, settings)
+        except Exception as exc:  # 兜底：任何意外都不该中断整批
+            article.status = STATUS_FAILED
+            if article.summary is None:
+                article.summary = _fallback_summary(article, settings.prompts.fallback_summary_chars)
+            if article.relevance is None:
+                article.relevance = 1
+            stats["crashed"] += 1
+            log.error("处理文章时出现未预期异常，已跳过：%s（%r）", article.title[:60], exc)
+            status = STATUS_FAILED
         if status == STATUS_FAILED:
             stats["failed"] += 1
         elif article.relevance == 0 and previous_relevance != 0:
             stats["irrelevant"] += 1
         else:
             stats["processed"] += 1
+        if index % checkpoint == 0:
+            session.flush()
     session.flush()
     return stats

@@ -90,6 +90,23 @@ class FetcherSettings(BaseModel):
     timeout_seconds: float = 15.0
     max_retries: int = 2
     user_agent: str = "ShowMeTheMoney/0.1"
+    # 只收最近 N 天发布的内容。用来挡「全量归档型」feed：有些博客的 RSS 会一次
+    # 返回整个历史（实测 Hugging Face Blog 单次 872 条且没有正文），不清掉的话
+    # 首启会灌进几百条陈年文章，每条都要花 3 次 LLM 调用。
+    max_age_days: int = 14
+    # 单个信源单次最多入库多少条，作为最后一道成本闸门。
+    max_items_per_source: int = 60
+    # 正文短于该长度视为「只有标题」，直接丢弃；0 = 不限制。
+    min_content_chars: int = 0
+
+
+class AISettings(BaseModel):
+    """单次处理任务的规模控制（每篇文章要花 2~3 次 LLM 调用）。"""
+
+    # 每个调度周期最多处理多少篇 pending，剩下的留给下个周期，避免单次任务跑太久。
+    batch_size: int = 60
+    # 每处理多少篇提交一次，防止长任务中途失败把进度一起回滚。
+    batch_checkpoint_every: int = 10
 
 
 class Settings(BaseModel):
@@ -105,6 +122,7 @@ class Settings(BaseModel):
     schedule: ScheduleSettings
     web: WebSettings
     fetcher: FetcherSettings
+    ai: AISettings = AISettings()
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
     project_root: Path = Field(default=PROJECT_ROOT)
@@ -184,10 +202,16 @@ def load_settings(
         schedule = ScheduleSettings(**(raw_settings.get("schedule") or {}))
         web = WebSettings(**(raw_settings.get("web") or {}))
         fetcher = FetcherSettings(**(raw_settings.get("fetcher") or {}))
+        ai = AISettings(**(raw_settings.get("ai") or {}))
         prompts = PromptsConfig(**prompts_raw)
         sources = [SourceConfig(**item) for item in sources_raw]
     except (ValidationError, TypeError) as exc:
         raise ConfigError(f"config/*.yaml 内容不合法：{exc}") from exc
+
+    for label, value in (("daily_report_time", schedule.daily_report_time), ("cleanup_time", schedule.cleanup_time)):
+        hour, _, minute = value.partition(":")
+        if not (hour.isdigit() and minute.isdigit() and 0 <= int(hour) < 24 and 0 <= int(minute) < 60):
+            raise ConfigError(f"config/settings.yaml 里 {label} 不是合法的 HH:MM：{value!r}")
 
     if user.db_path.strip():
         storage.db_path = user.db_path.strip()
@@ -213,6 +237,7 @@ def load_settings(
         schedule=schedule,
         web=web,
         fetcher=fetcher,
+        ai=ai,
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,

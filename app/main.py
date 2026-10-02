@@ -18,7 +18,14 @@ from fastapi import FastAPI
 from app import __version__
 from app.config import ConfigError, Settings, load_settings
 from app.db import init_db, seed_sources
-from app.scheduler import run_fetch_job, shutdown_scheduler, start_scheduler
+from app.scheduler import (
+    run_backfill_reports,
+    run_fetch_job,
+    run_process_job,
+    run_today_report_job,
+    shutdown_scheduler,
+    start_scheduler,
+)
 from app.utils.logger import get_logger, setup_logging
 from app.web.api import api_router
 from app.web.routes import page_router
@@ -31,25 +38,42 @@ def _bootstrap(settings: Settings) -> None:
     """进程级初始化：日志、数据库、默认信源、调度器。"""
     setup_logging(log_file=settings.project_root / "data" / "smtm.log")
     init_db(settings.db_file)
-    seeded = seed_sources(settings.sources)
-    if seeded:
-        log.info("已导入 %d 个默认信源", seeded)
+    added = seed_sources(settings.sources)
+    if added:
+        log.info("按配置新增了 %d 个信源", added)
+    run_backfill_reports(settings)
     start_scheduler(settings, log_file=settings.project_root / "data" / "smtm.log")
     if settings.fetch_on_startup:
-        threading.Thread(target=_safe_startup_fetch, args=(settings,), daemon=True).start()
+        threading.Thread(target=_safe_startup_run, args=(settings,), daemon=True).start()
         log.info("已触发一次启动抓取（后台线程）")
 
 
-def _safe_startup_fetch(settings: Settings) -> None:
+def _safe_startup_run(settings: Settings) -> None:
+    """启动时先抓取、再处理、最后刷新今天的日报；任何一步失败都不拖垮服务。"""
     try:
         run_fetch_job(settings)
-    except Exception as exc:  # 启动抓取失败不该拖垮服务
+    except Exception as exc:
         log.warning("启动抓取失败：%s", exc)
+        return
+    try:
+        run_process_job(settings)
+    except Exception as exc:
+        log.warning("启动处理失败：%s", exc)
+        return
+    try:
+        run_today_report_job(settings)
+    except Exception as exc:
+        log.warning("启动日报生成失败：%s", exc)
 
 
 def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> FastAPI:
     """构建 FastAPI 应用。``bootstrap=False`` 时不建库/不起调度（测试用）。"""
-    resolved = settings or load_settings()
+    try:
+        resolved = settings or load_settings()
+    except ConfigError as exc:
+        # uvicorn --factory 走不到 main()，配置错了应该看到人话而不是裸 traceback
+        print(f"\n❌ {exc}\n", flush=True)
+        raise SystemExit(2) from exc
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI) -> AsyncIterator[None]:

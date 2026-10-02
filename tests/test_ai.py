@@ -159,3 +159,67 @@ def test_process_pending_counts(seeded_db, settings: Settings):
             assert stats["processed"] + stats["irrelevant"] == 2
     finally:
         client.close()
+
+
+def test_process_pending_survives_unexpected_error(seeded_db, settings: Settings):
+    """一篇坏数据不能把整批 pending 卡死 —— 单篇异常要就地标记并继续。"""
+    from sqlalchemy import select
+
+    from app.ai.processor import process_pending
+    from app.db import session_scope
+    from app.models import Article
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        session.add(Article(title="会炸的", link="https://example.com/boom", status="pending",
+                            published_at=now_local()))
+        session.add(Article(title="正常的", link="https://example.com/fine", status="pending",
+                            published_at=now_local()))
+        session.flush()
+        boom_id = session.query(Article).filter(Article.title == "会炸的").one().id
+
+    class ExplodingClient:
+        def chat(self, prompt: str) -> str:
+            title = "会炸的" if "会炸的" in prompt else "ok"
+            if title == "会炸的":
+                raise RuntimeError("模拟未预期异常")
+            return "yes"
+
+    with session_scope() as session:
+        stats = process_pending(session, ExplodingClient(), settings)
+
+    assert stats["crashed"] == 1
+    assert stats["processed"] == 1
+    with session_scope() as session:
+        boom = session.execute(select(Article).where(Article.id == boom_id)).scalar_one()
+        assert boom.status == "failed"
+        assert boom.summary  # 降级摘要已补上
+
+
+def test_process_pending_respects_batch_limit(seeded_db, settings: Settings):
+    from app.ai.processor import process_pending
+    from app.db import session_scope
+    from app.models import Article
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        for i in range(5):
+            session.add(Article(title=f"文章{i}", link=f"https://example.com/b{i}", status="pending",
+                                published_at=now_local()))
+
+    class YesClient:
+        def chat(self, prompt: str) -> str:
+            return "yes"
+
+    with session_scope() as session:
+        stats = process_pending(session, YesClient(), settings, limit=2)
+    assert stats["pending"] == 2
+
+
+def test_redact_masks_secrets():
+    from app.ai.client import redact
+
+    assert "sk-abcdef123456" not in redact("key=sk-abcdef123456 rest")
+    assert "***" in redact("key=sk-abcdef123456 rest")
+    assert redact("Authorization: Bearer tok_1234567890") == "Authorization: ***"
+    assert redact("正常报错信息") == "正常报错信息"

@@ -66,8 +66,19 @@ def main() -> int:
             retries=settings.fetcher.max_retries,
             user_agent=settings.fetcher.user_agent,
             dedup_window=settings.storage.dedup_recent_window,
+            max_age_days=settings.fetcher.max_age_days,
+            max_items_per_source=settings.fetcher.max_items_per_source,
+            min_content_chars=settings.fetcher.min_content_chars,
         )
-        print(f"✅ 抓取完成：{stats}")
+        print(f"✅ 抓取完成：{ {k: v for k, v in stats.items() if k != 'details'} }")
+        for detail in stats["details"]:
+            if detail.get("status") == "ok":
+                print(
+                    f"   · {detail['source']}: 抓到 {detail['items']}，入库 {detail['new']}"
+                    f"（过期丢弃 {detail.get('stale', 0)}，超量丢弃 {detail.get('over_cap', 0)}）"
+                )
+            else:
+                print(f"   ⚠️ {detail['source']}: {detail['status']} {detail.get('error', '')}".rstrip())
     return 0
 
 

@@ -85,8 +85,40 @@ def test_rss_output(client, settings: Settings, seeded_db):
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("application/rss+xml")
     assert response.text.startswith("<?xml")
-    assert f"日报 · {TODAY}" in response.text
+    # 每篇文章一个条目，而不是整份日报塞进一个 item
+    assert "RSS 用文章（标签A、标签B）" in response.text
+    assert response.text.count("<item>") == 1
 
 
 def test_unknown_report_date_returns_404(client):
     assert client.get("/api/reports/1999-01-01").status_code == 404
+
+
+def test_api_and_pages_include_degraded_articles(client, seeded_db):
+    """页面、JSON 接口与日报口径一致：降级文章都该出现。"""
+    with session_scope() as session:
+        make_article(session, title="降级接口文章", link="https://example.com/api-5", status="failed")
+
+    payload = client.get(f"/api/articles?date={TODAY}").json()
+    assert [row["title"] for row in payload] == ["降级接口文章"]
+
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=client.app.state.settings)
+    assert "降级接口文章" in client.get(f"/daily/{TODAY}").text
+
+
+def test_articles_endpoint_defaults_to_beijing_today(client, seeded_db):
+    """服务器本地时区不是北京时间时（如容器 UTC），也不能把「今天」算错。"""
+    with session_scope() as session:
+        make_article(session, title="默认日期文章", link="https://example.com/api-6")
+
+    response = client.get("/api/articles")
+    assert response.status_code == 200
+    assert [row["title"] for row in response.json()] == ["默认日期文章"]
+
+
+def test_invalid_date_does_not_return_500(client, seeded_db):
+    """外部能直接触发的参数：非法日期必须 4xx，不能 500。"""
+    assert client.get("/api/articles?date=2026-13-45").status_code == 400
+    assert client.get("/daily/2026-13-45").status_code == 404
+    assert client.get("/rss?date=2026-13-45").status_code == 404
