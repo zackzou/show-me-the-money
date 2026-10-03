@@ -71,6 +71,20 @@ def render_translate_prompt(prompts: PromptsConfig, title: str, summary: str) ->
     return _fill(prompts.translate_prompt, {"title": title, "summary": summary or "（无）"})
 
 
+def render_translate_title_zh_prompt(prompts: PromptsConfig, title: str) -> str:
+    """英译中标题。模板为空时返回空串，调用方据此跳过。"""
+    if not prompts.translate_title_zh_prompt.strip():
+        return ""
+    return _fill(prompts.translate_title_zh_prompt, {"title": title})
+
+
+def render_translate_content_prompt(prompts: PromptsConfig, text: str) -> str:
+    """英译中正文。模板为空时返回空串，调用方据此跳过。"""
+    if not prompts.translate_content_prompt.strip():
+        return ""
+    return _fill(prompts.translate_content_prompt, {"text": text})
+
+
 def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
     return _fill(
         prompts.relevance_prompt,

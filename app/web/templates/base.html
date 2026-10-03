@@ -151,6 +151,69 @@
       .arc-panel { padding-left:12px; }
     }
 
+    /* ── 早报片段：左栏按钮 + 手机竖屏浮层 ──────────────────── */
+    .digest-btn { display:flex; align-items:center; gap:9px; width:100%; margin:14px 0 18px;
+                  padding:11px 13px; cursor:pointer; text-align:left; font-family:inherit;
+                  background:var(--surface); border:1px solid var(--line); border-radius:10px;
+                  color:var(--text); transition:border-color .18s ease, transform .18s ease,
+                  box-shadow .18s ease, background-color .18s ease; }
+    .digest-btn:hover { border-color:var(--accent); transform:translateY(-2px);
+                        box-shadow:0 8px 20px -12px rgba(16,24,40,.3); }
+    .digest-btn .db-ico { width:26px; height:26px; flex:none; display:grid; place-items:center;
+                          border-radius:7px; background:var(--accent); color:#fff; font-size:13px; }
+    .digest-btn .db-txt { font-size:13px; font-weight:600; line-height:1.35; }
+    .digest-btn .db-txt em { display:block; font-style:normal; font-weight:400; font-size:11px;
+                             color:var(--faint); margin-top:1px; }
+
+    .dg-mask { position:fixed; inset:0; z-index:90; display:grid; place-items:center;
+               padding:24px 16px; background:rgba(16,24,40,.45); backdrop-filter:blur(3px);
+               animation:dg-fade .18s ease; }
+    .dg-mask[hidden] { display:none; }
+    @keyframes dg-fade { from { opacity:0; } }
+    html.dg-open { overflow:hidden; }
+    .dg { width:100%; max-width:400px; max-height:calc(100vh - 48px); display:flex; flex-direction:column;
+          background:var(--bg); border:1px solid var(--line); border-radius:14px; overflow:hidden;
+          box-shadow:0 30px 70px -20px rgba(16,24,40,.5); animation:dg-pop .22s cubic-bezier(.2,.9,.3,1.15); }
+    @keyframes dg-pop { from { opacity:0; transform:translateY(14px) scale(.97); } }
+    @media (prefers-reduced-motion:reduce) { .dg, .dg-mask { animation:none; } }
+    .dg-bar { display:flex; align-items:center; justify-content:space-between; gap:10px;
+              padding:10px 12px 10px 14px; border-bottom:1px solid var(--line);
+              font-size:12.5px; color:var(--muted); flex:none; }
+    .dg-bar-b { display:flex; align-items:center; gap:6px; }
+    .dg-copy { padding:5px 11px; font-size:12px; font-family:inherit; cursor:pointer; color:var(--accent);
+               background:transparent; border:1px solid var(--accent); border-radius:999px; }
+    .dg-copy:hover { background:var(--accent); color:#fff; }
+    .dg-x { width:26px; height:26px; display:grid; place-items:center; cursor:pointer; font-size:17px;
+            color:var(--muted); background:transparent; border:1px solid var(--line); border-radius:50%; }
+    .dg-x:hover { color:var(--text); background:var(--chip); }
+    .dg-phone { flex:1; min-height:0; overflow-y:auto; padding:16px; background:var(--chip); }
+
+    /* 手机版日报卡片：竖列、微信里读起来就是这个密度 */
+    .dg-card { background:#fff; color:#1a1a1a; border-radius:12px; padding:22px 18px 16px;
+               box-shadow:0 1px 3px rgba(0,0,0,.06); font-size:15px; line-height:1.85; }
+    html.dark .dg-card { background:#17181c; color:#e8e8ea; }
+    .dg-head { display:flex; align-items:baseline; justify-content:space-between; gap:8px;
+               padding-bottom:10px; margin-bottom:14px; border-bottom:1px solid rgba(128,128,128,.22); }
+    .dg-brand { font-size:12px; font-weight:700; letter-spacing:-.2px; }
+    .dg-brand em { font-style:normal; color:#2f6bff; }
+    .dg-date { font-size:11px; color:#8a8a8e; font-variant-numeric:tabular-nums; }
+    .dg-title { margin:0 0 10px; font-weight:700; font-size:18px; line-height:1.5; font-weight:700; letter-spacing:-.3px; }
+    .dg-meta { display:flex; flex-wrap:wrap; gap:6px; margin-bottom:12px; }
+    .dg-cat { padding:2px 9px; border-radius:999px; background:rgba(47,107,255,.1);
+              color:#2f6bff; font-size:11.5px; font-weight:600; }
+    .dg-src { padding:2px 9px; border-radius:999px; background:rgba(128,128,128,.12);
+              color:#6c6c70; font-size:11.5px; }
+    .dg-sum { margin:0; font-size:14.5px; line-height:1.9; color:#333; }
+    html.dark .dg-sum { color:#c9c9cd; }
+    .dg-tags { display:flex; flex-wrap:wrap; gap:6px; margin-top:14px; }
+    .dg-tags span { padding:2px 8px; border-radius:5px; background:rgba(128,128,128,.1);
+                    color:#78787c; font-size:11px; }
+    .dg-foot { display:flex; align-items:center; justify-content:space-between; gap:8px;
+               margin-top:16px; padding-top:11px; border-top:1px solid rgba(128,128,128,.22);
+               font-size:11px; color:#9a9a9e; }
+    .dg-foot-brand { font-weight:600; }
+    .dg-tip { margin:12px 2px 0; font-size:11.5px; line-height:1.6; color:var(--faint); text-align:center; }
+
     /* 窄屏收缩顺序：搜索框 → RSS → 导航 */
     @media (max-width:1080px) { .hd-in { gap:14px; } .nav { gap:13px; } }
     @media (max-width:960px) { .nav a[href="/rss"] { display:none; } }
@@ -185,6 +248,24 @@
     html[data-lang="en"] .zh { display:none; }
     html[data-lang="en"] .en { font-size:1em; color:var(--text); }
     html[data-lang="both"] .en { margin-top:5px; padding-left:9px; border-left:2px solid var(--line); }
+    /* 原文块：不参与语言切换（没有译文时中文模式也要能读到），只做视觉降一级 */
+    .prose.orig { color:var(--muted); }
+    html[data-lang="en"] .prose.orig { color:var(--text); font-size:1em; }
+    /* 双语模式：原文跟在译文下面，加一条竖线区分 */
+    html[data-lang="both"] .prose.en { margin-top:14px; padding-left:14px;
+                                      border-left:2px solid var(--line); color:var(--muted); font-size:.96em; }
+    /* 正文区的语言标注 */
+    .sec-t .t-zh, .sec-t .t-en, .sec-t .t-note {
+        margin-left:9px; padding:2px 8px; border-radius:999px; font-weight:400; font-size:11px;
+        background:var(--chip); color:var(--faint); letter-spacing:0; vertical-align:middle; }
+    .sec-t .t-en { background:transparent; border:1px solid var(--line); }
+    .sec-t .t-note { background:none; border:0; padding-left:0; color:var(--faint); }
+    /* 抓不到正文的提示 */
+    .note-box { border:1px solid var(--line); border-left:3px solid var(--accent);
+                border-radius:8px; padding:13px 16px; background:var(--surface); }
+    .note-box b { font-size:13.5px; }
+    .note-box p { margin:6px 0 0; font-size:13px; line-height:1.75; color:var(--muted); }
+    .note-box a { color:var(--accent); }
     html[data-lang="both"] .t .en { margin-top:7px; }
     html[data-lang="both"] .d .en { margin-top:6px; }
     /* 语言切换 */

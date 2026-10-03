@@ -44,6 +44,8 @@ _BLOCK_SPLIT_RE = re.compile(rf"</?(?:{_BLOCK_TAGS})\b[^>]*>", re.I)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
 _TAGLIKE_RE = re.compile(r"<\s*/?\s*[a-z][\w-]*", re.I)
 
+# 清掉模板噪音后，正文至少要有这么多字符才算「原文真的有正文」
+_MIN_REAL_BODY_CHARS = 30
 # 一段正文至少要有这么多字符才值得留（滤掉「阅读全文」「分享到」这类碎片）
 _MIN_PARAGRAPH_CHARS = 24
 # 导航/版权类短句黑名单
@@ -64,7 +66,39 @@ _JUNK_PATTERNS = (
     "Sign up",
     "All rights reserved",
     "Cookie",
+    # Reddit 的 RSS description 里全是这种模板噪音，清掉后正文才算真的空
+    "submitted by",
+    "[link]",
+    "[comments]",
+    "Comments",
+    "level 1",
+    "ago",
 )
+
+# Reddit 这类站点即使抓不到 selftext，RSS description 里也只剩模板套话。
+# 清完这些之后还剩下什么，才算「原文真的有正文」。
+_BOILERPLATE_ONLY_RE = re.compile(
+    r"(?:submitted\s+by|\[link\]|\[comments\]|comments|level\s*\d+|"
+    r"/u/[\w-]+|\b\d+\s*(?:mo|yr|day|hour|min)s?\s*ago\b|\bupvote\b|\bpermalink\b|\breport\b)",
+    re.I,
+)
+
+
+def is_real_body(text: str | None) -> bool:
+    """正文是不是「真的」。清掉模板噪音后连 30 个字都不到，就算没有正文。
+
+    Reddit 的 RSS description 形如
+    ``submitted by  /u/xxx   [link]   [comments]`` —— 剥掉标签之后还剩几十个字符，
+    不做这一步的话详情页会渲染出一个只写着「Comments」的「正文开头」区块，
+    看起来就像抓取坏了。
+    """
+    body = (text or "").strip()
+    if len(body) < _MIN_REAL_BODY_CHARS:
+        return False
+    # 光看总长度会被「submitted by /u/xxx [link] [comments]」骗过去 ——
+    # 得把模板噪音和用户名删掉，剩下的还够长才算真的有正文。
+    residue = _BOILERPLATE_ONLY_RE.sub(" ", body).strip()
+    return len(residue) >= _MIN_REAL_BODY_CHARS
 
 
 def _clean(html_text: str) -> str:

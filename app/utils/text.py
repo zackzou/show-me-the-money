@@ -156,3 +156,54 @@ def extract_images(html_text: str | None, *, base_url: str = "", limit: int = 6)
         if len(urls) >= limit:
             break
     return urls
+
+
+def looks_english(text: str | None) -> bool:
+    """粗判一段文字是不是（以）英文。
+
+    样本要求 >40 个拉丁字母：太短的文本判不准，不如保守地当作「需要翻译」，
+    宁可多翻一次，也不要把英文原文当成中文漏掉。
+
+    实测踩过的坑：早期版本把「标题 + 摘要」拼起来一起判，于是「英文标题 + 中文摘要」
+    这种最常见的组合会被判成英文，摘要永远没人翻。所以这里只看传入的这一段本身。
+    """
+    sample = (text or "")[:400]
+    if not sample:
+        return False
+    ascii_letters = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
+    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    return ascii_letters > cjk * 2 and ascii_letters > 40
+
+
+# 早报片段的汇总上限：微信早报一行约 22 个汉字，3~5 行就在这个量级
+BRIEF_DIGEST_CHARS = 108
+_BRIEF_SENTENCE_END = "。！？.!?"
+
+
+def brief_digest(text: str | None, *, limit: int = BRIEF_DIGEST_CHARS) -> str:
+    """把一段导读压成三到五行的一句话，用于早报 / 推送。
+
+    早报读者是在手机上扫读，塞一整段进去没人看。按句号切，切到接近上限就收住，
+    避免最后半句被硬切断。
+
+    放在服务端而不是浏览器：按句切依赖正则里的 lookbehind，旧 Safari 不支持。
+    """
+    clean = " ".join((text or "").split())
+    if not clean:
+        return ""
+    out: list[str] = []
+    used = 0
+    for piece in re.split(f"(?<=[{re.escape(_BRIEF_SENTENCE_END)}])", clean):
+        piece = piece.strip()
+        if not piece:
+            continue
+        if used + len(piece) > limit:
+            break
+        out.append(piece)
+        used += len(piece)
+        if used >= limit - 20:
+            break
+    brief = "".join(out).strip() or clean
+    if len(brief) > limit:
+        brief = brief[: limit - 1].rstrip("，、,。！？.!? ") + "…"
+    return brief

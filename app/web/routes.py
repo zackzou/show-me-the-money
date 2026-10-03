@@ -18,8 +18,10 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import get_session
+from app.fetcher.content import is_real_body
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
+from app.utils.text import looks_english as is_english
 from app.utils.text import now_local, split_tags, strip_markdown, truncate
 from app.web.search import (
     SCOPE_FULL,
@@ -140,7 +142,9 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
     published = article.published_at
     return {
         "id": article.id,
-        "title": article.title,
+        # 中文标题优先：英文信源译过来的标题读起来才像中文
+        "title": article.title_zh or article.title,
+        "title_zh": article.title_zh or "",
         "title_en": article.title_en or "",
         "link": article.link,
         "source": source_name or "未知来源",
@@ -414,10 +418,24 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     # 同分类 / 同标签的邻居，方便顺着标签继续读
     item["related"] = _related(session, article, now)
     # 正文按段落切开，并标出哪些段落是「小标题」，供页面渲染目录与 <h3>
-    marked = mark_headings(_body_blocks(article.content_full))
+    # is_real_body 会把 Reddit 那种只剩模板套话的 description 判成「没有正文」，
+    # 免得详情页渲染出一个只写着 Comments 的空区块，看着像抓取坏了。
+    def _body(*candidates: str | None) -> str:
+        return next((c for c in candidates if c and is_real_body(c)), "") or ""
+
+    original = _body(article.content_full, article.content)
+    marked = mark_headings(_body_blocks(original))
     item["body_blocks"] = marked
     item["toc"] = table_of_contents(marked)
-    item["content_preview"] = truncate(article.content_full or article.content or "", 400)
+    item["content_preview"] = truncate(original, 400)
+    # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文
+    translated = article.content_zh or ""
+    item["has_translation"] = bool(translated.strip())
+    item["body_blocks_zh"] = mark_headings(_body_blocks(translated)) if item["has_translation"] else []
+    item["content_preview_zh"] = truncate(translated, 400) if item["has_translation"] else ""
+    # 没有译文时要说清楚，避免「中文模式却整页英文」看着像坏了
+    item["body_is_foreign"] = bool(original.strip()) and not item["has_translation"] and is_english(original)
+    item["body_missing"] = not original.strip()
     return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
 
 

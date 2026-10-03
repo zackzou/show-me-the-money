@@ -11,7 +11,7 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete, func, select
 
 from app.ai.client import LLMClient
-from app.ai.processor import process_pending
+from app.ai.processor import backfill_translations, process_pending
 from app.config import Settings
 from app.db import session_scope
 from app.fetcher.content import backfill_content
@@ -63,6 +63,24 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
         run_media_job(settings)
     except Exception as exc:
         log.warning("补齐配图失败：%s", exc)
+    # 补译正文：正文翻译是可选步骤，限流或抖动失败的文章到这里再试一次
+    try:
+        if settings.i18n.enabled and settings.i18n.translate_content:
+            translator = LLMClient(
+                settings.llm.api_base,
+                settings.llm.api_key,
+                settings.llm.model,
+                timeout=settings.llm.timeout_seconds,
+                retries=settings.llm.max_retries,
+                temperature=settings.llm.temperature,
+            )
+            try:
+                with session_scope() as session:
+                    log.info("补译中文正文：%s", backfill_translations(session, translator, settings))
+            finally:
+                translator.close()
+    except Exception as exc:
+        log.warning("补译中文正文失败：%s", exc)
     try:
         run_today_report_job(settings)
     except Exception as exc:  # 日报失败不该把处理统计一起丢掉

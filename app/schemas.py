@@ -21,7 +21,9 @@ class ArticleOut(BaseModel):
     category: str | None = None
     topics: str | None = None
     title_en: str | None = None
+    title_zh: str | None = None
     digest_en: str | None = None
+    content_zh: str | None = None
     tags: str | None = None
     relevance: int | None = None
     status: str
@@ -35,6 +37,10 @@ class ArticleDetailOut(ArticleOut):
     content: str | None = None
     image_urls: list[str] = []
     source_name: str = "未知来源"
+    # 早报片段用的三到五行汇总（服务端算，浏览器端的等价正则不兼容旧 Safari）
+    digest_brief: str = ""
+    # topics 在库里是 JSON 字符串，早报卡片要的是可直接遍历的列表
+    topics_list: list[str] = []
 
     model_config = {"from_attributes": True}
 

@@ -52,7 +52,11 @@ class Article(Base):
     topics: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 英文版标题与速览：页面可在 中文 / English / 双语 之间切换
     title_en: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # 中文版标题：英文信源译过来，中文模式（以及早报片段）才不至于顶着英文标题
+    title_zh: Mapped[str | None] = mapped_column(String(500), nullable=True)
     digest_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 中文版正文：英文原文整篇译过来，中文模式下不至于整页英文
+    content_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)

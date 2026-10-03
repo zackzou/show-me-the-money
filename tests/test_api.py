@@ -149,7 +149,11 @@ def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
             summary="一句摘要",
             digest="10月3日，某公司发布了 X，带来 Y 的变化。这是导语式速览。",
             reason="披露了具体数字，读者可据此判断影响面。",
-            content_full="第一段正文内容。\n\n第二段正文内容。",
+            # 长度要过「是否真的有正文」的阈值（见 is_real_body）
+            content_full=(
+                "第一段正文内容，这里补足到足够长度以通过正文字数门槛的判定。\n\n"
+                "第二段正文内容，同样补足长度，确保整段都会被渲染出来。"
+            ),
             image_urls='["https://cdn.example.com/1.jpg", "https://cdn.example.com/2.jpg"]',
         )
         article_id = article.id
@@ -158,8 +162,8 @@ def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
     assert page.status_code == 200
     assert "页内速览测试" in page.text
     assert "这是导语式速览" in page.text              # AI 导读在页内可见
-    assert "第一段正文内容。" in page.text             # 正文全文逐段展示
-    assert "第二段正文内容。" in page.text
+    assert "第一段正文内容，这里补足到足够长度" in page.text   # 正文全文逐段展示
+    assert "第二段正文内容，同样补足长度" in page.text
     assert "AI 导读" in page.text
     assert ">正文<" in page.text.replace(" ", "")
     assert "打开原文 ↗" in page.text                   # 右栏「打开原文」
@@ -508,7 +512,7 @@ def test_story_body_never_renders_empty_paragraphs(client, settings: Settings, s
         article_id = article.id
 
     text = client.get(f"/story/{article_id}").text
-    prose = text.split('class="prose"')[1].split("</div>")[0]
+    prose = text.split('class="prose')[1].split("</div>")[0]
     assert "<h3" in prose
     for para in re.findall(r"<p>(.*?)</p>", prose, re.S):
         assert para.strip(), "出现了空段落"
@@ -649,3 +653,229 @@ def test_bilingual_macro_skips_identical_english(client, settings: Settings, see
     assert text.count('<span class="zh">An English only headline about agents</span>') == 1
     assert '<span class="en">An English only headline about agents</span>' not in text
     assert '<span class="en">An English only digest about agents</span>' not in text
+
+
+# ── 详情页：正文翻译、无正文提示、早报片段 ──────────────────────────────────
+
+
+def test_story_shows_chinese_translation_in_zh_mode(client, settings: Settings, seeded_db):
+    """英文原文整篇译成中文后，中文模式读译文、双语模式两段都在、英文模式读原文。"""
+    en_body = (
+        "Apple says it is changing its macOS privacy settings to stop third-party app "
+        "developers from misusing them to access message histories."
+    )
+    zh_body = (
+        "苹果表示将修改 macOS 的隐私设置，阻止第三方应用滥用这些权限读取信息记录。"
+    )
+    with session_scope() as session:
+        article = make_article(
+            session, title="Apple changes permissions", link="https://example.com/tr",
+            content_full=en_body, content_zh=zh_body,
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    # 有译文：译文块与原文块都随语言切换（中文模式只看译文，双语模式上下对照）
+    assert '<div class="prose zh">' in text
+    assert "苹果表示将修改 macOS" in text
+    assert '<div class="prose en">' in text
+    assert "stop third-party app developers" in text
+    # 英文原文不能是不受语言控制的 orig 块，否则中文模式下两段一起显示
+    assert '<div class="prose orig">' not in text
+    assert "中文译文" in text
+    assert "英文原文" in text
+
+
+def test_story_marks_untranslated_foreign_body(client, settings: Settings, seeded_db):
+    """英文正文没有译文时要说清楚，别让人以为页面坏了。"""
+    with session_scope() as session:
+        article = make_article(
+            session, title="Apple changes permissions", link="https://example.com/tr2",
+            content_full=(
+                "Apple says it is changing its macOS privacy settings to stop third-party app "
+                "developers from misusing them to access message histories."
+            ),
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert "原文为英文，暂无中文译文" in text
+    assert '<div class="prose orig">' in text
+    assert '<div class="prose zh">' not in text
+
+
+def test_story_explains_when_source_has_no_body(client, settings: Settings, seeded_db):
+    """Reddit 这类只有标题的帖子：要明说「原文没有正文」，不能渲染空的正文区块。"""
+    with session_scope() as session:
+        article = make_article(
+            session, title="WTF Google getting rid of free models",
+            link="https://example.com/rd",
+            content_full="", content="submitted by  /u/someone   [link]   [comments]",
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert "原文没有正文" in text
+    assert "内容基本都在标题里" in text
+    # 不该把模板套话当正文渲染出来
+    assert "[comments]" not in text
+    assert ">Comments<" not in text
+
+
+def test_is_real_body_filters_boilerplate():
+    from app.fetcher.content import is_real_body
+
+    real = "Apple says it is changing its macOS privacy settings to stop third-party app developers."
+    assert is_real_body(real) is True
+    # Reddit 的 RSS description：清掉噪音后只剩用户名，不算正文
+    assert is_real_body("submitted by  /u/Ashamed-Principle40   [link]   [comments]") is False
+    assert is_real_body("Comments") is False
+    assert is_real_body("") is False
+    assert is_real_body(None) is False
+
+
+def test_brief_digest_keeps_three_to_five_lines():
+    """早报片段要压到三到五行：按句切，不能硬切断在半句上。"""
+    from app.utils.text import brief_digest
+
+    long = "第一句话在这里说清楚了。" * 10   # 120 字，必定超出 108 的上限
+    brief = brief_digest(long)
+    assert 60 <= len(brief) <= 108
+    # 按句收住，所以末句是完整的；不会切在半句上
+    assert brief.endswith("。")
+    assert brief.count("第一句话在这里说清楚了。") < 10
+    # 一个标点都没有、且超过上限时，才用省略号硬收
+    assert brief_digest("超长" * 60).endswith("…")
+    assert len(brief_digest("超长" * 60)) == 108
+
+    short = "只有一句话的摘要。"
+    assert brief_digest(short) == short
+    assert brief_digest("") == ""
+    assert brief_digest(None) == ""
+    assert " " not in brief_digest("第一句。\n\n第二句。")
+
+
+def test_digest_button_loads_over_api_without_duplicate_text(client, settings: Settings, seeded_db):
+    """早报片段按钮不跳转；数据点开时才取，HTML 里不重复塞一遍摘要。"""
+    with session_scope() as session:
+        article = make_article(
+            session, title="早报片段测试", link="https://example.com/dg",
+            digest="这是导语内容，只该出现一次。", score=88, category="行业",
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert 'class="digest-btn" id="digest-btn"' in text
+    assert f'data-article-id="{article_id}"' in text
+    # 浮层是 hidden 的空壳，内容走接口
+    assert 'id="dg-mask" hidden' in text
+    assert 'id="dg-card"' in text
+    assert text.count("这是导语内容，只该出现一次。") == 1
+    # 不跳转：不带 href，也不导航
+    assert "e.preventDefault()" in text
+
+
+def test_article_detail_api(client, settings: Settings, seeded_db):
+    """单篇详情接口：早报片段与收藏页都靠它按 id 取历史文章。"""
+    with session_scope() as session:
+        article = make_article(
+            session, title="详情接口测试", link="https://example.com/api",
+            digest="第一句摘要。第二句摘要也在这里，长度足够。", category="产品", score=77,
+        )
+        article_id = article.id
+
+    body = client.get(f"/api/articles/{article_id}").json()
+    assert body["id"] == article_id
+    assert body["category"] == "产品"
+    assert body["score"] == 77
+    assert body["digest_brief"]
+    assert body["source_name"]
+    assert client.get("/api/articles/999999").status_code == 404
+
+
+def test_digest_brief_has_no_double_punctuation():
+    """导读结尾已有句号时，补上的理由不能拼出「记录。。Apple」这种双句号。"""
+    from app.web.api import _digest_with_fallback
+
+    class FakeArticle:
+        digest = "导读第一句已经以句号结尾。第二句也以句号结尾。"
+        reason = "推荐理由的第一句内容，还有第二句。"
+        summary = ""
+        content = ""
+
+    out = _digest_with_fallback(FakeArticle())
+    assert "。。" not in out
+    assert "。。" not in out
+    assert ".." not in out
+    assert out.startswith("导读第一句")
+    assert "推荐理由" in out
+
+
+def test_digest_brief_does_not_repeat_same_text():
+    """理由与导读重复时不要硬拼。"""
+    from app.web.api import _digest_with_fallback
+
+    class FakeArticle:
+        digest = "同一句话在这里出现了两次。"
+        reason = "同一句话在这里出现了两次。"
+        summary = ""
+        content = ""
+
+    assert _digest_with_fallback(FakeArticle()).count("同一句话") == 1
+
+
+def test_saved_page_does_not_double_bind_toggle(client):
+    """回归：收藏页不能再绑一次 toggle。
+
+    base.html 已经用事件委托统一处理 [data-save]；saved.html 若再绑 onclick，
+    一次点击会 toggle 两遍 —— 取消收藏看着像没反应，localStorage 顺序还会乱掉。
+    """
+    text = client.get("/saved").text
+    # 收藏页自己的脚本块 = 最后一个 <script>…</script>
+    # （index("</script>") 会命中 head 里那段主题脚本，不能用）
+    saved_script = text.rsplit("<script>", 1)[1].split("</script>")[0]
+    assert "smtmToggleSave" not in saved_script, "收藏页不应再直接调 toggle"
+    # 仍然要处理「取消后刷新列表」
+    assert "window.smtmSaved" in saved_script
+
+
+def test_page_has_exactly_one_h1(client, settings: Settings, seeded_db):
+    """一个页面只能有一个 h1。早报浮层里的标题曾经也用 h1，会让读屏多出一个主标题。"""
+    import re
+
+    with session_scope() as session:
+        make_article(session, title="标题唯一性测试", link="https://example.com/h1",
+                     digest="导读内容在这里，足够长以通过字数门槛的判定逻辑。")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    for path in ("/", "/story/1"):
+        html = client.get(path).text
+        # 先整块去掉 script / style，再数 h1 —— 只按 "<script" 截断会把 body 一起切掉
+        body = re.sub(r"<script\b.*?</script>", "", html, flags=re.S | re.I)
+        body = re.sub(r"<style\b.*?</style>", "", body, flags=re.S | re.I)
+        assert len(re.findall(r"<h1\b", body)) == 1, f"{path} 的 h1 不止一个"
+    html = client.get("/story/1").text
+    assert '<h1 class="body-title">' in html
+    assert '<p class="dg-title"' in html, "浮层标题不该用 h1"
+
+
+def test_article_detail_topics_are_clean_strings():
+    """topics 库里是 JSON 字符串，早报卡片要的是去掉引号的列表。"""
+    from app.web.api import _topics_json
+
+    assert _topics_json('["AI Agent", "隐私权限"]') == ["AI Agent", "隐私权限"]
+    assert _topics_json(None) == []
+    assert _topics_json("") == []
+    assert _topics_json("不是 JSON") == []
+    assert _topics_json('{"a":1}') == []
+
+
+def test_topics_json_used_in_detail_api(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        article = make_article(session, title="主题标签测试", link="https://example.com/tp",
+                               digest="导读内容在这里，足够长以通过正文长度门槛的判定。",
+                               topics='["AI Agent", "隐私权限"]')
+        article_id = article.id
+    body = client.get(f"/api/articles/{article_id}").json()
+    assert body["topics_list"] == ["AI Agent", "隐私权限"]

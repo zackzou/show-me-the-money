@@ -17,12 +17,14 @@ from app.ai.prompts import (
     render_relevance_prompt,
     render_summary_prompt,
     render_tag_prompt,
+    render_translate_content_prompt,
     render_translate_prompt,
+    render_translate_title_zh_prompt,
 )
-from app.config import Settings
+from app.config import PromptsConfig, Settings
 from app.models import Article
 from app.utils.logger import get_logger
-from app.utils.text import split_tags, strip_html, truncate
+from app.utils.text import looks_english, split_tags, strip_html, truncate
 
 _TAG_SPLIT_RE = re.compile(r"[,，、;；]")
 
@@ -95,16 +97,6 @@ def parse_classify(raw: str, valid: set[str]) -> tuple[str | None, list[str]]:
     return category, topics[:3]
 
 
-def looks_english(text: str) -> bool:
-    """粗判是否已经是英文（用于英文信源不必再翻一次）。"""
-    sample = (text or "")[:400]
-    if not sample:
-        return False
-    ascii_letters = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
-    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
-    return ascii_letters > cjk * 2 and ascii_letters > 40
-
-
 def parse_translate(raw: str) -> tuple[str | None, str | None]:
     """解析中译英结果：第一行英文标题，第二行英文导语。"""
     lines = [line.strip() for line in (raw or "").splitlines() if line.strip()]
@@ -113,6 +105,73 @@ def parse_translate(raw: str) -> tuple[str | None, str | None]:
     title_en = lines[0][:500] or None
     digest_en = truncate(" ".join(lines[1:]), 400) or None
     return title_en, digest_en
+
+
+# 正文翻译按段翻：一次翻太多容易被截断，也浪费 token
+TRANSLATE_CHUNK_PARAGRAPHS = 4
+# 参与翻译的正文长度上限（与抓取时的上限对齐）
+MAX_CONTENT_CHARS = 40_000
+# 译文明显比原文短一半以上，就认为这一段没翻成功
+_TRANSLATE_MIN_RATIO = 0.4
+
+
+def split_paragraphs(text: str) -> list[str]:
+    """按空行切段。抓回来的正文本身就是段落结构，直接切即可。"""
+    return [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
+
+
+def parse_title_zh(raw: str) -> str | None:
+    """解析中译标题：只取第一行，去掉引号和编号。"""
+    line = (raw or "").strip().splitlines()[0].strip() if (raw or "").strip() else ""
+    line = line.strip("「」『』\"'\u201c\u201d《》").lstrip("#*-— ").strip()
+    return line[:500] or None
+
+
+def translate_title_to_chinese(client: LLMClient, prompts: PromptsConfig, title: str) -> str | None:
+    """英文标题译成中文。中文标题或模板为空时返回 ``None``（不浪费调用）。"""
+    if not title or not looks_english(title):
+        return None
+    raw = _optional_llm(client, render_translate_title_zh_prompt(prompts, title), "")
+    return parse_title_zh(raw)
+
+
+def translate_to_chinese(
+    client: LLMClient,
+    prompts: PromptsConfig,
+    content: str,
+    *,
+    max_chars: int | None = None,
+) -> str | None:
+    """把英文原文正文整篇译成中文。
+
+    按段分组调用，逐组拼回去；某一组失败只丢那一组，不影响其它段
+    （长文很难一次成功，丢掉一段比整篇没有译文好）。
+    全程都是英文就原样返回，不浪费调用。
+    """
+    text = (content or "").strip()
+    if not text or not looks_english(text):
+        return None
+    limit = max_chars or MAX_CONTENT_CHARS
+    paragraphs = split_paragraphs(text)[: max(1, limit // 200)]
+    if not paragraphs:
+        return None
+    out: list[str] = []
+    failed = 0
+    for start in range(0, len(paragraphs), TRANSLATE_CHUNK_PARAGRAPHS):
+        chunk = "\n\n".join(paragraphs[start : start + TRANSLATE_CHUNK_PARAGRAPHS])
+        translated = _optional_llm(
+            client, render_translate_content_prompt(prompts, chunk), ""
+        ).strip()
+        if not translated or len(translated) < len(chunk) * _TRANSLATE_MIN_RATIO:
+            failed += 1
+            continue
+        out.append(translated)
+    if not out:
+        return None
+    result = "\n\n".join(out)
+    if failed:
+        log.info("正文翻译有 %d/%d 段未成功，保留已译部分", failed, len(paragraphs))
+    return result
 
 
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
@@ -205,6 +264,14 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
                 en_title, en_digest = parse_translate(raw_en)
                 article.title_en = en_title if title_needs else article.title
                 article.digest_en = en_digest if digest_needs else truncate(summary, 400)
+            # 英文信源补一个中文标题：中文模式与早报片段都用它
+            if not title_needs:
+                article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title)
+            # 英文原文正文整篇译成中文，中文模式下才读得到中文
+            if settings.i18n.translate_content:
+                article.content_zh = translate_to_chinese(
+                    client, settings.prompts, article.content_full or article.content or ""
+                )
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
@@ -270,4 +337,53 @@ def process_pending(
         if index % checkpoint == 0:
             session.flush()
     session.flush()
+    return stats
+
+def backfill_translations(
+    session: Session,
+    client: LLMClient,
+    settings: Settings,
+    *,
+    limit: int = 10,
+) -> dict[str, Any]:
+    """给「英文正文但还没中文译文」的文章补译。
+
+    为什么需要单独一轮：正文翻译是可选步骤，失败（限流、网络抖动）时只丢译文，
+    文章本身照样处理完 —— 于是 ``content_zh`` 就一直是空，中文模式下又变回整页英文，
+    而且再也没有人回来补。这里定期扫一遍把它填上。
+    """
+    if not settings.i18n.enabled or not settings.i18n.translate_content:
+        return {"candidates": 0, "filled": 0, "skipped": 0}
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(
+                # 正文译文或中文标题缺一个都补
+                (Article.content_zh.is_(None)) | (Article.title_zh.is_(None) & Article.title_en.isnot(None)),
+                Article.content_full.isnot(None),
+                Article.relevance == 1,
+                # 已经有中文译文的没必要再翻
+                Article.link.notlike("http://localhost%"),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    stats = {"candidates": len(rows), "filled": 0, "skipped": 0}
+    for article in rows:
+        source = article.content_full or ""
+        if not looks_english(source):
+            # 中文原文不需要译文，标成已处理，别每轮都来扫
+            article.content_zh = ""
+            stats["skipped"] += 1
+            continue
+        if not article.title_zh:
+            article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title or "")
+        translated = translate_to_chinese(client, settings.prompts, source)
+        if translated:
+            article.content_zh = translated
+            stats["filled"] += 1
+    session.flush()
+    if stats["filled"]:
+        log.info("补齐中文正文 %d 篇（候选 %d 篇）", stats["filled"], stats["candidates"])
     return stats

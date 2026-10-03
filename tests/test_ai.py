@@ -2,14 +2,23 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 import pytest
 
 from app.ai.client import LLMClient, LLMError
-from app.ai.processor import process_article, process_pending
+from app.ai.processor import (
+    backfill_translations,
+    process_article,
+    process_pending,
+    translate_title_to_chinese,
+    translate_to_chinese,
+)
 from app.ai.prompts import render_relevance_prompt, render_summary_prompt, render_tag_prompt
 from app.config import Settings
 from app.db import session_scope
+from app.models import Article
 
 from .conftest import make_article
 
@@ -387,7 +396,9 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
         "Google will end free access to its Flash and Pro models, "
         "a move that tightens monetization for large language model providers."
     )
-    answers = iter(["yes 80", en_summary, "English digest", "reason", "产品\\nAI", "标签"])
+    # 纯英文信源：正文与摘要复用原文不翻，但标题要补一个中文标题 → 6 次 + 1 次标题
+    # 纯英文信源：正文与摘要复用原文不翻；标题要先补中文标题，标签在最后
+    answers = iter(["yes 80", en_summary, "English digest", "reason", "产品\\nAI", "苹果收紧隐私设置", "标签"])
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -406,6 +417,149 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
             assert process_article(session, article, client, settings) == "processed"
             assert article.title_en == article.title, "纯英文标题直接复用原文，不翻"
             assert article.digest_en == en_summary, "纯英文导语直接复用摘要原文"
-            assert calls["n"] == 6  # relevance/summary/digest/reason/classify/tags，没有 translate
+            # relevance/summary/digest/reason/classify/tags + 英译中标题，没有中译英那一跳
+            assert calls["n"] == 7
+            assert article.title_zh == "苹果收紧隐私设置"
+    finally:
+        client.close()
+
+
+def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settings):
+    """长正文按段分组翻译，顺序要保持；某组失败只丢那一组。"""
+    body = "\n\n".join(
+        f"Paragraph {i} of the English article body, long enough to pass the length gate."
+        for i in range(1, 12)
+    )
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        payload = json.loads(request.content)
+        text = payload["messages"][0]["content"]
+        seen.append(text)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "这段是译文。" * 40}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        out = translate_to_chinese(client, settings.prompts, body)
+        assert out, "英文正文应该翻得出中文"
+        assert len(seen) >= 2, "11 段不该一次就翻完"
+        assert "Paragraph 1" in seen[0]
+        assert "Paragraph 11" in seen[-1]
+        assert out.count("这段是译文") == len(seen) * 40
+        # 译文明显比原文短（模型只回了一截）要判为失败，不写进库
+        short = _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "太短"}}]}), retries=0)
+        try:
+            assert translate_to_chinese(short, settings.prompts, body) is None
+        finally:
+            short.close()
+    finally:
+        client.close()
+
+
+def test_translate_to_chinese_skips_chinese_body(seeded_db, settings: Settings):
+    """中文原文不翻，也不发请求。"""
+    import httpx
+
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "不该被调用"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        assert translate_to_chinese(client, settings.prompts, "这是一段中文原文，本来就不需要翻译。") is None
+        assert translate_to_chinese(client, settings.prompts, "") is None
+        assert called["n"] == 0
+    finally:
+        client.close()
+
+
+def test_translate_to_chinese_returns_none_when_all_chunks_fail(seeded_db, settings: Settings):
+    """全失败时返回 None（调用方据此不写库），不写半截译文。"""
+    import httpx
+
+    body = "\n\n".join(f"This is English paragraph number {i} in the article body." for i in range(6))
+    client = _client(lambda r: httpx.Response(500, text="boom"), retries=0)
+    try:
+        assert translate_to_chinese(client, settings.prompts, body) is None
+    finally:
+        client.close()
+
+
+def test_translate_chunk_rejected_when_too_short(seeded_db, settings: Settings):
+    """译文明显短于原文（多半是模型只回了一截）要判为失败，不写进库。"""
+    import httpx
+
+    body = "\n\n".join("English paragraph content that is long enough to pass the gate." for _ in range(4))
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "短"}}]}), retries=0
+    )
+    try:
+        assert translate_to_chinese(client, settings.prompts, body) is None
+    finally:
+        client.close()
+
+
+def test_backfill_translations_fills_missing_only(seeded_db, settings: Settings):
+    """只补没译文的；中文原文直接标成已处理，不再反复扫。"""
+    import httpx
+
+    with session_scope() as session:
+        en = make_article(
+            session, title="English headline that is definitely long enough to count as English text",
+            status="processed", relevance=1,
+            content_full="Apple says it is changing its macOS privacy settings for third-party developers.",
+        )
+        zh = make_article(session, title="中文标题", status="processed", relevance=1, content_full="这是一段中文原文。")
+        en.content_zh = None
+        zh.content_zh = None
+        en_id, zh_id = en.id, zh.id
+        session.commit()
+
+    reply = {"choices": [{"message": {"content": "苹果表示将修改 macOS 的隐私设置。" * 3}}]}
+    client = _client(lambda r: httpx.Response(200, json=reply), retries=0)
+    try:
+        with session_scope() as session:
+            stats = backfill_translations(session, client, settings, limit=10)
+            assert stats["filled"] == 1
+            assert stats["skipped"] == 1
+            assert session.get(Article, en_id).content_zh
+            # 中文原文标成空串，表示「已确认无需翻译」，下一轮不会再扫它
+            assert session.get(Article, zh_id).content_zh == ""
+            # 再跑一轮不该重复处理
+            assert backfill_translations(session, client, settings, limit=10)["candidates"] == 0
+    finally:
+        client.close()
+
+
+def test_parse_title_zh_strips_quotes_and_prefix():
+    from app.ai.processor import parse_title_zh
+
+    assert parse_title_zh("苹果收紧 macOS 隐私设置") == "苹果收紧 macOS 隐私设置"
+    assert parse_title_zh('"苹果收紧隐私设置"') == "苹果收紧隐私设置"
+    assert parse_title_zh("「苹果收紧隐私设置」\n多余的一行") == "苹果收紧隐私设置"
+    assert parse_title_zh("## 苹果收紧隐私设置") == "苹果收紧隐私设置"
+    assert parse_title_zh("") is None
+    assert parse_title_zh("   \n  ") is None
+
+
+def test_translate_title_skips_chinese_and_no_template(seeded_db, settings: Settings):
+    """中文标题不翻；提示词为空时也不发请求。"""
+    import httpx
+
+    called = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        called["n"] += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "不该调用"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        assert translate_title_to_chinese(client, settings.prompts, "中文标题本来就不需要翻译") is None
+        empty = settings.model_copy(deep=True)
+        empty.prompts.translate_title_zh_prompt = ""
+        assert translate_title_to_chinese(client, empty.prompts, "An English headline long enough to pass") is None
+        assert called["n"] == 0
     finally:
         client.close()

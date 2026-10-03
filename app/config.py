@@ -73,6 +73,8 @@ class PromptsConfig(BaseModel):
     relevance_prompt: str
     classify_prompt: str = ""
     translate_prompt: str = ""
+    translate_content_prompt: str = ""
+    translate_title_zh_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80
@@ -128,6 +130,9 @@ class I18nSettings(BaseModel):
     """中英双语：默认中文，可切英文或双语。"""
 
     enabled: bool = True
+    # 是否把英文原文正文整篇译成中文。开销比标题/导语大得多（长文要分段翻），
+    # 关掉则中文模式只译标题与导语。
+    translate_content: bool = True
 
 
 class MediaSettings(BaseModel):

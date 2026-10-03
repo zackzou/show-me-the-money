@@ -12,6 +12,12 @@
 
   <aside class="side">
     <a href="/" class="back">← 返回</a>
+    {# 早报片段：不跳转，弹手机竖屏预览，供拼微信早报长图 #}
+    {# 数据点开时再取：HTML 里不重复塞一遍摘要，页面也更干净 #}
+    <button type="button" class="digest-btn" id="digest-btn" data-article-id="{{ item.id }}">
+      <span class="db-ico">▤</span>
+      <span class="db-txt">早报片段<em>手机版长图</em></span>
+    </button>
     <dl>
       <dt>来源</dt>
       <dd>{{ item.source }}</dd>
@@ -46,25 +52,45 @@
       <p class="lead-p">{{ bi(item.digest or item.reason or '（没有生成导读）', item.digest_en) }}</p>
     </section>
 
-    {% if item.body_blocks %}
+    {# 正文：中文/双语读译文，英文读原文；没有译文时退回原文并说明原因 #}
+    {% macro prose(blocks) %}
+      {% for block in blocks %}
+        {% if block.heading %}<h3 id="sec-{{ block.i }}">{{ block.text }}</h3>{% else %}<p>{{ block.text }}</p>{% endif %}
+      {% endfor %}
+    {% endmacro %}
+
+    {% if item.body_blocks_zh %}
       <div class="rule"></div>
       <section class="sec">
-        <div class="sec-t plain">正文</div>
-        <div class="prose">
-          {% for block in item.body_blocks %}
-            {% if block.heading %}
-              <h3 id="sec-{{ block.i }}">{{ block.text }}</h3>
-            {% else %}
-              <p>{{ block.text }}</p>
-            {% endif %}
-          {% endfor %}
-        </div>
+        <div class="sec-t plain">正文<span class="t-zh">中文译文</span>{% if item.body_blocks %}<span class="t-en">英文原文</span>{% endif %}</div>
+        <div class="prose zh">{{ prose(item.body_blocks_zh) }}</div>
+        {% if item.body_blocks %}
+          {# 有译文时原文也要跟着语言切换走：中文模式读译文，双语模式上下对照 #}
+          <div class="prose en">{{ prose(item.body_blocks) }}</div>
+        {% endif %}
+      </section>
+    {% elif item.body_blocks %}
+      <div class="rule"></div>
+      <section class="sec">
+        <div class="sec-t plain">正文{% if item.body_is_foreign %}<span class="t-note">原文为英文，暂无中文译文</span>{% endif %}</div>
+        <div class="prose orig">{{ prose(item.body_blocks) }}</div>
       </section>
     {% elif item.content_preview %}
       <div class="rule"></div>
       <section class="sec">
         <div class="sec-t plain">正文开头</div>
-        <p class="d">{{ item.content_preview }}</p>
+        <p class="d orig">{{ item.content_preview }}</p>
+      </section>
+    {% endif %}
+
+    {# 抓不到正文时说清楚，别让页面看着像坏了 #}
+    {% if item.body_missing %}
+      <section class="sec">
+        <div class="note-box">
+          <b>原文没有正文</b>
+          <p>这类帖子（多为社区链接分享）内容基本都在标题里。标题、评分与推荐理由仍然可用，也可以
+            <a href="{{ item.link }}" target="_blank" rel="noopener">打开原文</a>看一眼。</p>
+        </div>
       </section>
     {% endif %}
 
@@ -136,6 +162,137 @@
 </div>
 {% endif %}
 
+{# ── 早报片段浮层：手机竖屏日报样式，点「复制文字」直接拿去做微信早报 ── #}
+<div class="dg-mask" id="dg-mask" hidden>
+  <div class="dg" role="dialog" aria-modal="true" aria-label="早报片段">
+    <div class="dg-bar">
+      <span>早报片段 · 手机版</span>
+      <div class="dg-bar-b">
+        <button type="button" class="dg-copy" id="dg-copy">复制文字</button>
+        <button type="button" class="dg-x" id="dg-x" aria-label="关闭">×</button>
+      </div>
+    </div>
+    <div class="dg-phone">
+      <article class="dg-card" id="dg-card">
+        <header class="dg-head">
+          <span class="dg-brand">Show Me the <em>Money</em></span>
+          <span class="dg-date" id="dg-date"></span>
+        </header>
+        <p class="dg-title" id="dg-title"></p>
+        <div class="dg-meta">
+          <span class="dg-cat" id="dg-cat"></span>
+          <span class="dg-src" id="dg-src"></span>
+        </div>
+        <p class="dg-sum" id="dg-sum"></p>
+        <div class="dg-tags" id="dg-tags"></div>
+        <footer class="dg-foot">
+          <span id="dg-foot-date"></span>
+          <span class="dg-foot-brand">Show Me the Money</span>
+        </footer>
+      </article>
+      <p class="dg-tip">这段就是推送里的样子：标题 + 一段汇总，控制在三到五行。</p>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra %}
+<script>
+  // 早报片段：不跳转，点按钮弹出手机竖屏预览
+  (function () {
+    var btn = document.getElementById("digest-btn");
+    var mask = document.getElementById("dg-mask");
+    if (!btn || !mask) return;
+    var $ = function (id) { return document.getElementById(id); };
+    var data = {};
+    var cache = {};
+    var inflight = null;
+
+    function fill() {
+      $("dg-title").textContent = data.title || "";
+      $("dg-sum").textContent = data.summary || "";
+      $("dg-src").textContent = data.source || "";
+      var cat = $("dg-cat");
+      cat.textContent = data.category || "";
+      cat.hidden = !data.category;
+      $("dg-date").textContent = data.date || "";
+      $("dg-foot-date").textContent = data.date || "";
+      var tags = $("dg-tags");
+      // 分类已经在 meta 行体现了，底部不再重复，只补一个 AI 评分
+      var pills = [];
+      if (data.score) pills.push("AI 评分 " + data.score);
+      (data.topics || []).slice(0, 2).forEach(function (t) { pills.push(t); });
+      tags.innerHTML = pills.map(function (w) { return "<span>" + w + "</span>"; }).join("");
+    }
+
+    function load(id) {
+      if (cache[id]) return Promise.resolve(cache[id]);
+      if (inflight) return inflight;
+      inflight = fetch("/api/articles/" + id)
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("bad status")); })
+        .then(function (a) {
+          var published = a.published_at || "";
+          cache[id] = {
+            // 中文标题优先（英文信源会带 title_zh）
+            title: a.title_zh || a.title || "",
+            summary: a.digest_brief || "",
+            source: a.source_name || "",
+            score: a.score,
+            category: a.category || "",
+            topics: a.topics_list || [],
+            date: published.slice(0, 10),
+            link: a.link || ""
+          };
+          inflight = null;
+          return cache[id];
+        })
+        .catch(function () { inflight = null; throw new Error("load failed"); });
+      return inflight;
+    }
+
+    function open() {
+      var id = btn.getAttribute("data-article-id");
+      mask.hidden = false;
+      document.documentElement.classList.add("dg-open");
+      $("dg-x").focus();
+      $("dg-sum").textContent = "正在准备…";
+      load(id).then(function (d) {
+        if (mask.hidden) return;
+        data = d;
+        fill();
+      }).catch(function () {
+        $("dg-sum").textContent = "读取失败，请关闭后重试。";
+      });
+    }
+    function close() {
+      mask.hidden = true;
+      document.documentElement.classList.remove("dg-open");
+    }
+
+    btn.addEventListener("click", open);
+    $("dg-x").addEventListener("click", close);
+    mask.addEventListener("click", function (e) { if (e.target === mask) close(); });
+    document.addEventListener("keydown", function (e) { if (e.key === "Escape" && !mask.hidden) close(); });
+
+    $("dg-copy").addEventListener("click", function () {
+      var lines = [data.title, "", data.summary, "", "—— " + data.source + "｜Show Me the Money"];
+      var text = lines.join("\n");
+      var box = $("dg-copy");
+      var done = function () { box.textContent = "已复制"; setTimeout(function () { box.textContent = "复制文字"; }, 1600); };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { fallback(text, done); });
+      } else { fallback(text, done); }
+    });
+    function fallback(text, done) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (err) { /* 复制失败就不提示了 */ }
+      document.body.removeChild(ta);
+    }
+  })();
+</script>
 {% endblock %}
 
 {% block container_extra %} wide{% endblock %}

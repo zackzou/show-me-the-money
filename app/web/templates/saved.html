@@ -14,13 +14,19 @@
 {% block extra %}
 <script>
   // 收藏列表在浏览器本地，页面渲染时按 id 拉接口
-  fetch("/api/articles?limit=500")
-    .then(function (r) { return r.json(); })
-    .then(function (rows) {
-      var ids = window.smtmSaved ? window.smtmSaved() : [];
-      var map = {};
-      rows.forEach(function (r) { map[r.id] = r; });
-      var picked = ids.map(function (id) { return map[id]; }).filter(Boolean);
+  var ids = window.smtmSaved ? window.smtmSaved() : [];
+  // 收藏里可能有几天前的文章，而 /api/articles 默认只返回今天，
+  // 所以逐个按 id 取详情，别用列表接口凑。
+  Promise.all(
+    ids.map(function (id) {
+      return fetch("/api/articles/" + id)
+        .then(function (r) { return r.ok ? r.json() : null; })
+        .catch(function () { return null; });
+    })
+  )
+    .then(function (picked) {
+      picked = picked.filter(Boolean);
+      picked.sort(function (a, b) { return (b.published_at || "").localeCompare(a.published_at || ""); });
       var root = document.getElementById("saved-root");
       if (!picked.length) {
         root.innerHTML = '<div class="empty">还没有收藏。<br><span style="font-size:12.5px">在列表或详情页点 ☆ 就能收藏。</span></div>';
@@ -35,8 +41,19 @@
           + '<p class="d">' + (a.digest || a.summary || "") + "</p></article>";
       });
       root.innerHTML = html + "</div>";
-      root.querySelectorAll("[data-save]").forEach(function (b) {
-        b.onclick = function () { window.smtmToggleSave(Number(b.getAttribute("data-save"))); location.reload(); };
+      // 注意：不要再绑 onclick。base.html 已经用事件委托统一处理 [data-save]，
+      // 这里再绑一次会 toggle 两遍 —— 点了等于没点（还会把 localStorage 顺序弄乱）。
+      // 只需要把被取消的那条从列表里去掉。
+      root.addEventListener("click", function (e) {
+        if (!e.target.closest("[data-save]")) return;
+        setTimeout(function () {
+          var left = (window.smtmSaved ? window.smtmSaved() : []).slice();
+          if (!left.length) { location.reload(); return; }
+          fetch("/api/articles/" + left[0])
+            .then(function (r) { return r.ok ? r.json() : null; })
+            .then(function () { location.reload(); })
+            .catch(function () { location.reload(); });
+        }, 0);
       });
     })
     .catch(function () {
