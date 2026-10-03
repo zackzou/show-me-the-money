@@ -68,6 +68,9 @@ class Article(Base):
     i18n_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)
     relevance: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    # 同一则新闻被多个源转载时的「主条目」id；非空表示这条是重复内容，
+    # 列表页 / 日报 / 搜索都不再展示它（详情页仍可直达）
+    duplicate_of: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
 

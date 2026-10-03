@@ -48,6 +48,7 @@ def _day_items(session: Session, date_str: str) -> list[Article]:
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             Article.published_at >= start,
             Article.published_at < end,
         )

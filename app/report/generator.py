@@ -74,6 +74,7 @@ def _report_items(session: Session, date_str: str, *, until: datetime | None = N
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             Article.published_at >= start,
             Article.published_at < end,
         )

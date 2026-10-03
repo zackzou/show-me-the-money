@@ -8,6 +8,15 @@
     <p style="font-size:12.5px"><a href="/" style="color:var(--accent)">回到热点资讯</a></p>
   </div>
 {% else %}
+{# 这条本身是重复稿：直接告诉读者去主条目看，别让人以为抓错了 #}
+{% if item.duplicate_of_id %}
+  <div class="dup-note">
+    <b>这条与另一条是同一则新闻</b>
+    <p>{{ item.duplicate_of_source }} 的另一篇报道说的是同一件事，内容更完整：
+      <a href="/story/{{ item.duplicate_of_id }}">{{ item.duplicate_of_title }}</a></p>
+  </div>
+{% endif %}
+
 <div class="story">
 
   <aside class="side">
@@ -111,6 +120,18 @@
                  data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
           {% endfor %}
         </div>
+      </section>
+    {% endif %}
+
+    {# 同一件事的其它源报道：合并后仍然列出来，一条内容都不丢 #}
+    {% if item.also_reported %}
+      <section class="sec">
+        <div class="sec-t plain">其他来源也报道了</div>
+        <ul class="rel-list">
+          {% for row in item.also_reported %}
+            <li><a href="/story/{{ row.id }}">《{{ row.title }}》</a> <em class="src">{{ row.source }}</em></li>
+          {% endfor %}
+        </ul>
       </section>
     {% endif %}
 

@@ -59,6 +59,7 @@ def search_articles(
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             or_(*conditions),
         )
         .order_by(Article.published_at.desc(), Article.id.desc())
@@ -98,6 +99,7 @@ def count_by_category(session: Session, term: str, *, scope: str = SCOPE_META) -
         select(Article.category).where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             or_(*conditions),
         )
     ).scalars()

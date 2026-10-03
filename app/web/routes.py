@@ -16,6 +16,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.ai.cluster import duplicates_of, primary_of
 from app.config import Settings
 from app.db import get_session
 from app.fetcher.content import is_real_body
@@ -152,6 +153,7 @@ def _day_statement(date_str: str):
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             Article.published_at >= start,
             Article.published_at < end,
         )
@@ -296,6 +298,7 @@ def count_of_day(session: Session, date_str: str) -> int:
             select(func.count(Article.id)).where(
                 Article.relevance == 1,
                 Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
                 Article.published_at >= start,
                 Article.published_at < end,
             )
@@ -497,7 +500,23 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     item["digest_missing_zh"] = (
         is_english(article.digest or "") and not str(article.digest_zh or "").strip()
     )
+    # 同题合并：这条是重复稿就指回主条目；是主条目就把别家的同题报道列出来，
+    # 合并只是不重复展示，不是把内容删掉
+    primary = primary_of(session, article)
+    item["duplicate_of_id"] = primary.id if primary else 0
+    item["duplicate_of_title"] = (primary.title_zh or primary.title) if primary else ""
+    item["duplicate_of_source"] = _source_name(session, primary.source_id) if primary else ""
+    item["also_reported"] = [
+        {"id": row.id, "source": _source_name(session, row.source_id), "title": row.title_zh or row.title}
+        for row in duplicates_of(session, article.id)
+    ]
     return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
+
+
+def _source_name(session: Session, source_id: int | None) -> str:
+    if source_id is None:
+        return "未知来源"
+    return session.execute(select(Source.name).where(Source.id == source_id)).scalar() or "未知来源"
 
 
 def _related(session: Session, article: Article, now: datetime, *, limit: int = 6) -> list[dict[str, Any]]:
@@ -513,6 +532,7 @@ def _related(session: Session, article: Article, now: datetime, *, limit: int = 
                 Article.id != article.id,
                 Article.relevance == 1,
                 Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             )
             .order_by(Article.published_at.desc(), Article.id.desc())
             .limit(120)

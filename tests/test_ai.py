@@ -698,3 +698,101 @@ def test_short_english_title_still_gets_a_chinese_one(settings: Settings):
         assert translate_title_to_chinese(client, settings.prompts, "外骨骼时代开启") is None
     finally:
         client.close()
+
+
+def test_fallback_digest_ignores_site_boilerplate(seeded_db, settings: Settings):
+    """回归：Hacker News / Reddit 的模板套话不能当摘要。
+
+    HN 的 RSS description 剥掉标签之后只剩「Comments」，直接拿来兜底，
+    页面上就是一行「推荐理由：Comments」。
+    """
+    from app.ai.processor import _fallback_digest, _fallback_summary
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="Scientists invent underwater umbrellas to protect coral reefs",
+            link="https://example.com/boiler",
+            content="Comments",
+            content_full=None,
+        )
+        article_id = article.id
+
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        assert _fallback_digest(stored, 180) == stored.title
+        assert _fallback_summary(stored, 200) == stored.title
+
+
+def test_fallback_digest_prefers_real_body_over_boilerplate(seeded_db):
+    """正文抓回来了就用正文，别退回到只有 Comments 的 RSS 摘要。"""
+    from app.ai.processor import _fallback_digest
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="Underwater umbrellas for coral reefs",
+            link="https://example.com/boiler2",
+            content="Comments",
+            content_full=(
+                "Researchers tested umbrella-shaped coral shelters across twelve reefs "
+                "and measured how much bleaching each one prevented."
+            ),
+        )
+        article_id = article.id
+
+    with session_scope() as session:
+        out = _fallback_digest(session.get(Article, article_id), 180)
+    assert out.startswith("Researchers tested")
+
+
+def test_backfill_translations_fills_titles_and_digests_before_bodies(seeded_db, settings: Settings):
+    """先补便宜的（标题 + 导读），正文译文放第二轮。
+
+    正文是长文、一次要翻好几段，单篇成本是标题的十几倍；标题与导读才是首页和
+    详情页最显眼的地方。限额的时候先保证这些地方是中文的。
+    """
+    import httpx
+
+    prompts: list[str] = []
+    body = "\n\n".join(f"This is English body paragraph number {i} in the article." for i in range(6))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        prompts.append(prompt)
+        if "把下面这段英文资讯导读翻译成中文" in prompt:
+            out = "西雅图山岳救援队开始穿着外骨骼装备进入荒野徒步。"
+        elif "科技资讯正文翻译成中文" in prompt:
+            out = "这是中文译文的第" + str(len(prompts)) + "段，译完之后的长度足够通过那道长度校验门槛。" * 4
+        else:
+            out = "外骨骼时代开启"
+        return httpx.Response(200, json={"choices": [{"message": {"content": out}}]})
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="The dawn of the age of the exoskeleton",
+            status="processed",
+            relevance=1,
+            content_full=body,
+            digest="Mountain rescue crews now hike with powered exoskeletons in the wild.",
+        )
+        article_id = article.id
+        session.commit()
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            backfill_translations(session, client, settings, limit=5)
+    finally:
+        client.close()
+
+    # 标题与导读都在正文译文之前完成
+    first_body_call = next(i for i, p in enumerate(prompts) if "科技资讯正文翻译成中文" in p)
+    assert all("科技资讯正文翻译成中文" not in p for p in prompts[:first_body_call])
+    assert any("英文资讯导读" in p for p in prompts[:first_body_call])
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        assert stored.title_zh == "外骨骼时代开启"
+        assert "西雅图" in stored.digest_zh
+        assert stored.content_zh

@@ -76,6 +76,7 @@ class PromptsConfig(BaseModel):
     translate_content_prompt: str = ""
     translate_title_zh_prompt: str = ""
     translate_digest_zh_prompt: str = ""
+    same_story_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80
@@ -85,6 +86,14 @@ class StorageSettings(BaseModel):
     retention_days: int = 30
     db_path: str = "data/smtm.db"
     dedup_recent_window: int = 500
+
+
+class MergeSettings(BaseModel):
+    """跨源重复内容合并。"""
+
+    enabled: bool = True
+    # 每轮参与比较的文章数（按发布时间倒序取最近的这些）
+    window: int = 40
 
 
 class ScheduleSettings(BaseModel):
@@ -134,6 +143,8 @@ class I18nSettings(BaseModel):
     # 是否把英文原文正文整篇译成中文。开销比标题/导语大得多（长文要分段翻），
     # 关掉则中文模式只译标题与导语。
     translate_content: bool = True
+    # 每轮补译多少篇（标题 + 导读每篇 2 次调用，正文长文还要再翻好几段）
+    backfill_batch_size: int = 20
 
 
 class MediaSettings(BaseModel):
@@ -171,6 +182,7 @@ class Settings(BaseModel):
     ai: AISettings = AISettings()
     media: MediaSettings = MediaSettings()
     i18n: I18nSettings = I18nSettings()
+    merge: MergeSettings = MergeSettings()
     content: ContentSettings = ContentSettings()
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
@@ -299,6 +311,7 @@ def load_settings(
         media=media,
         content=content,
         i18n=i18n,
+        merge=MergeSettings(**(raw_settings.get("merge") or {})),
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,

@@ -426,6 +426,79 @@ def backfill_content(
     return stats
 
 
+# 「同一个信源里有几篇文章一字不差地以这段开头」才算站点通栏。
+# 20 个字是实测出来的下限：InfoQ 那段通栏的第一行只有 28 个字。
+_MIN_SHARED_OPENING_CHARS = 20
+
+
+def strip_shared_openings(
+    session: Session, *, min_group: int = 3, limit: int = 300, passes: int = 4
+) -> dict[str, Any]:
+    """删掉「同一信源里多篇文章共有的开头」—— 站点通栏广告 / 会议宣传。
+
+    抓 InfoQ 时发现的：每一篇文章的开头都是同一段 QCon 大会宣传
+
+        从「构建 AI」到「驾驭 AI」，100+ 实战案例拆解 …
+        2026 年 QCon 全球软件开发大会 · 上海站
+        将于 10 月 22 日—24 日 举办，聚焦 …
+
+    四篇文章一字不差地顶着这段广告开场，读者以为自己在看重复内容，
+    文章真正要讲的第一段也被挤到屏幕外。
+
+    判定不靠关键词（换个会议名就失效），而是**同一个信源里有几篇文章的开头一字不差**：
+    真实新闻不会这么巧，站点通栏会。纯本地计算，不用重新抓取。
+
+    不按相关度筛：通栏是站点层面的事，与这条新闻是否相关无关；而筛了的话
+    「三篇被判为不相关」就刚好凑不满门槛，广告反而留着。
+    """
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(Article.content_full.isnot(None), Article.content_full != "")
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    stats = {"candidates": len(rows), "groups": 0, "articles": 0, "paragraphs": 0}
+    if not rows:
+        return stats
+    for _ in range(passes):
+        buckets: dict[tuple[int | None, str], list[Article]] = {}
+        for article in rows:
+            body = article.content_full or ""
+            head = body.split("\n\n", 1)[0].strip()
+            # 门槛压到 20 个字：InfoQ 的通栏第一段只有「2026 年 QCon 全球软件开发大会大会 ·
+            # 上海站」这 28 个字，卡在 40 就正好把它漏掉，第二段通栏也就跟着留下了
+            if len(head) >= _MIN_SHARED_OPENING_CHARS:
+                buckets.setdefault((article.source_id, head), []).append(article)
+        shared = {key: group for key, group in buckets.items() if len(group) >= min_group}
+        if not shared:
+            break
+        stats["groups"] += len(shared)
+        for group in shared.values():
+            for article in group:
+                trimmed = strip_leading_paragraph(article.content_full)
+                if trimmed and trimmed != article.content_full:
+                    article.content_full = trimmed
+                    stats["articles"] += 1
+                    stats["paragraphs"] += 1
+    session.flush()
+    if stats["articles"]:
+        log.info(
+            "删掉站点通栏开头 %d 段（%d 篇、%d 组）", stats["paragraphs"], stats["articles"], stats["groups"]
+        )
+    return stats
+
+
+def strip_leading_paragraph(text: str | None) -> str | None:
+    """去掉正文的第一段；没有可去的第一段时返回 ``None``（调用方据此判断要不要写回）。"""
+    if not text:
+        return None
+    _, sep, rest = text.partition("\n\n")
+    rest = rest.strip()
+    return rest or None
+
+
 def count_with_full_text(session: Session) -> int:
     """库里有正文全文的文章数（健康检查用）。"""
     return int(

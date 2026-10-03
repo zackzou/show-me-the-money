@@ -13,7 +13,15 @@ from app.web.routes import PAGE_SIZE
 
 from .conftest import make_article
 
-TODAY = now_local().strftime("%Y-%m-%d")
+
+def _today() -> str:
+    """今天（测试运行时再算一次）。
+
+    模块级常量会在跨午夜时过期：导入时是 10-03，用例里 ``now_local() - 3 分钟``
+    已经是 10-04，文章就落在时间窗外面，页面自然是空的 —— 这个坑只在 23:5x 之后跑测试时出现。
+    """
+    return now_local().strftime("%Y-%m-%d")
+
 
 
 def test_health(client):
@@ -30,7 +38,7 @@ def test_articles_endpoint(client, seeded_db):
     with session_scope() as session:
         make_article(session, title="接口测试文章", link="https://example.com/api-1")
 
-    response = client.get(f"/api/articles?date={TODAY}")
+    response = client.get(f"/api/articles?date={_today()}")
     assert response.status_code == 200
     payload = response.json()
     assert len(payload) == 1
@@ -42,18 +50,18 @@ def test_articles_endpoint(client, seeded_db):
 
 def test_reports_endpoints(client, settings: Settings, seeded_db):
     assert client.get("/api/reports").json() == []
-    assert client.get(f"/api/reports/{TODAY}").status_code == 404
+    assert client.get(f"/api/reports/{_today()}").status_code == 404
 
     with session_scope() as session:
         make_article(session, title="报告用文章", link="https://example.com/api-2")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     listing = client.get("/api/reports").json()
     assert len(listing) == 1
-    assert listing[0]["date"] == TODAY
+    assert listing[0]["date"] == _today()
 
-    detail = client.get(f"/api/reports/{TODAY}")
+    detail = client.get(f"/api/reports/{_today()}")
     assert detail.status_code == 200
     assert "报告用文章" in detail.json()["content_md"]
 
@@ -70,11 +78,11 @@ def test_html_pages(client, settings: Settings, seeded_db):
     with session_scope() as session:
         make_article(session, title="页面用文章", link="https://example.com/api-3")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     assert "页面用文章" in client.get("/").text
-    assert "页面用文章" in client.get(f"/daily/{TODAY}").text
-    assert TODAY in client.get("/archive").text
+    assert "页面用文章" in client.get(f"/daily/{_today()}").text
+    assert _today() in client.get("/archive").text
 
 
 def test_rss_output(client, settings: Settings, seeded_db):
@@ -83,7 +91,7 @@ def test_rss_output(client, settings: Settings, seeded_db):
     with session_scope() as session:
         make_article(session, title="RSS 用文章", link="https://example.com/api-4")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     response = client.get("/rss")
     assert response.status_code == 200
@@ -103,12 +111,12 @@ def test_api_and_pages_include_degraded_articles(client, seeded_db):
     with session_scope() as session:
         make_article(session, title="降级接口文章", link="https://example.com/api-5", status="failed")
 
-    payload = client.get(f"/api/articles?date={TODAY}").json()
+    payload = client.get(f"/api/articles?date={_today()}").json()
     assert [row["title"] for row in payload] == ["降级接口文章"]
 
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=client.app.state.settings)
-    assert "降级接口文章" in client.get(f"/daily/{TODAY}").text
+        generate_daily_report(_today(), session=session, settings=client.app.state.settings)
+    assert "降级接口文章" in client.get(f"/daily/{_today()}").text
 
 
 def test_articles_endpoint_defaults_to_beijing_today(client, seeded_db):
@@ -134,9 +142,9 @@ def test_summary_markdown_stripped_in_page_and_rss(client, seeded_db):
         make_article(session, title="Markdown 摘要", link="https://example.com/md2",
                      summary="**结论：** 重点在这里")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=client.app.state.settings)
+        generate_daily_report(_today(), session=session, settings=client.app.state.settings)
 
-    assert "**结论：**" not in client.get(f"/daily/{TODAY}").text
+    assert "**结论：**" not in client.get(f"/daily/{_today()}").text
     assert "**" not in client.get("/rss").text
 
 
@@ -206,7 +214,7 @@ def test_images_only_on_story_page(client, settings: Settings, seeded_db):
         make_article(session, title="带图文章", link="https://example.com/img",
                      digest="速览内容", reason="值得看", image_urls='["https://cdn.example.com/x.jpg"]')
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     home = client.get("/").text
     assert "推荐理由" in home
@@ -229,7 +237,7 @@ def test_story_images_are_small_grid(client, settings: Settings, seeded_db):
         make_article(session, title="长图文章", link="https://example.com/tall",
                      digest="速览", image_urls='["https://cdn.example.com/tall.jpg"]')
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/story/1").text
     assert "shot-grid" in text
@@ -242,7 +250,7 @@ def test_timeline_groups_by_date_and_shows_score(client, settings: Settings, see
         make_article(session, title="带评分的文章", link="https://example.com/scored",
                      digest="导语内容", reason="披露了关键数字", score=88)
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert "day-head" in text
@@ -255,21 +263,27 @@ def test_timeline_groups_by_date_and_shows_score(client, settings: Settings, see
 
 
 def test_relative_time_formatting(client, settings: Settings, seeded_db):
+    """相对时间文案。
+
+    「小时前」直接验格式化函数，不往库里造：``now - 3 小时`` 在 00:0x 跑的时候
+    会落到昨天，那篇文章根本不在今天的时间窗里，页面当然没有「小时前」。
+    """
     from datetime import timedelta
 
     from app.utils.text import now_local
+    from app.web.routes import _relative
 
+    now = now_local()
     with session_scope() as session:
         make_article(session, title="刚刚的", link="https://example.com/just",
-                     published_at=now_local() - timedelta(minutes=3))
-        make_article(session, title="三小时前的", link="https://example.com/h3",
-                     published_at=now_local() - timedelta(hours=3))
+                     published_at=now - timedelta(minutes=3))
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert "分钟前" in text
-    assert "小时前" in text
+    assert _relative(now - timedelta(hours=3), now) == "3 小时前"
+    assert _relative(now - timedelta(days=2), now) == "2 天前"
 
 
 def test_score_hidden_when_absent(client, settings: Settings, seeded_db):
@@ -277,7 +291,7 @@ def test_score_hidden_when_absent(client, settings: Settings, seeded_db):
     with session_scope() as session:
         make_article(session, title="无评分", link="https://example.com/noscore", digest="导语")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     assert "相关度" not in client.get("/").text
 
@@ -287,7 +301,7 @@ def test_timeline_time_not_truncated_and_dot_aligned(client, settings: Settings,
     with session_scope() as session:
         make_article(session, title="时间轴对齐", link="https://example.com/tl", digest="导语")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert "tl-time" in text
@@ -348,7 +362,7 @@ def test_story_has_right_rail_with_topic_and_tags(client, settings: Settings, se
                      digest="导语", reason="因为披露了关键数字", category="行业",
                      topics='["OpenAI / ChatGPT", "Agent 智能体"]', tags="行业动态,Agent")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/story/1").text
     assert 'class="rail"' in text
@@ -372,7 +386,7 @@ def test_card_shows_category_and_clickable_tags(client, settings: Settings, seed
         make_article(session, title="卡片标签测试", link="https://example.com/card",
                      digest="速览", reason="理由", score=79, category="行业", tags="行业动态,OpenAI")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert "AI 评分" in text
@@ -390,7 +404,7 @@ def test_story_subtitle_is_not_duplicate_of_digest(client, settings: Settings, s
                      digest="这是导语内容，只该出现一次。", category="行业",
                      topics='["云计算"]')
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/story/1").text
     assert text.count("这是导语内容，只该出现一次。") == 1
@@ -406,7 +420,7 @@ def test_card_is_whole_clickable_with_pointer_cursor(client, settings: Settings,
         make_article(session, title="整卡可点测试", link="https://example.com/whole",
                      digest="导语内容", reason="理由", category="行业", tags="OpenAI")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     # 手型光标
@@ -429,7 +443,7 @@ def test_card_body_click_does_not_nest_links(client, settings: Settings, seeded_
         make_article(session, title="结构测试", link="https://example.com/struct",
                      digest="导语", category="行业", tags="OpenAI,Agent")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     class NestChecker(HTMLParser):
         def __init__(self):
@@ -560,7 +574,7 @@ def test_card_shows_english_below_chinese(client, settings: Settings, seeded_db)
         make_article(session, title="中文标题", title_en="English Title", link="https://example.com/bi",
                      digest="中文导语", digest_en="English digest", category="行业")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert '<span class="zh">中文标题</span>' in text
@@ -579,7 +593,7 @@ def test_story_shows_bilingual_title_and_digest(client, settings: Settings, seed
                                link="https://example.com/bi2", digest="中文导语", digest_en="English lead")
         article_id = article.id
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get(f"/story/{article_id}").text
     assert '<h1 class="body-title"><span class="zh">中文大标题</span>' in text
@@ -592,12 +606,12 @@ def test_archive_expandable_with_titles(client, settings: Settings, seeded_db):
     with session_scope() as session:
         make_article(session, title="归档里的文章", link="https://example.com/ar")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/archive").text
     assert "arc-row" in text
     assert 'aria-expanded="false"' in text
-    assert f'data-date="{TODAY}"' in text
+    assert f'data-date="{_today()}"' in text
     assert "arc-panel" in text
     # 展开内容走接口按需拉，不一次性把所有标题塞进 HTML
     assert "/api/articles?date=" in text
@@ -648,7 +662,7 @@ def test_bilingual_macro_skips_identical_english(client, settings: Settings, see
                      digest="An English only digest about agents",
                      digest_en="An English only digest about agents", category="行业")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
     assert text.count('<span class="zh">An English only headline about agents</span>') == 1
@@ -850,7 +864,7 @@ def test_page_has_exactly_one_h1(client, settings: Settings, seeded_db):
         make_article(session, title="标题唯一性测试", link="https://example.com/h1",
                      digest="导读内容在这里，足够长以通过字数门槛的判定逻辑。")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     for path in ("/", "/story/1"):
         html = client.get(path).text
@@ -971,3 +985,45 @@ def test_english_mode_still_shows_something_when_title_en_missing(client, settin
     assert "《外骨骼时代开启》" not in text  # 详情页标题不是书名号
     assert '<span class="zh">外骨骼时代开启</span>' in text
     assert '<span class="en">The dawn of the age of the exoskeleton</span>' in text
+
+
+def test_duplicate_articles_are_hidden_from_every_listing(client, settings: Settings, seeded_db):
+    """合并后的重复稿：列表页 / 日报 / API / 搜索都不再出现，但详情页仍可直达。"""
+    with session_scope() as session:
+        primary = make_article(
+            session,
+            title="Apple tightens Mac disk access for AI agents",
+            link="https://example.com/p",
+            category="行业动态",
+        )
+        twin = make_article(
+            session, title="Apple will limit Mac disk access as AI agents increase risk",
+            link="https://example.com/q", category="行业动态",
+        )
+        twin.duplicate_of = primary.id
+        primary_id, twin_id = primary.id, twin.id
+
+    home = client.get("/").text
+    assert home.count("Apple will limit Mac disk access") == 0
+    assert client.get("/api/articles").text.count("Apple will limit Mac disk access") == 0
+    assert client.get("/search?q=Apple").text.count("Apple will limit Mac disk access") == 0
+    assert client.get("/rss").text.count("Apple will limit Mac disk access") == 0
+    # 详情页仍然可达，并在顶部说明它是重复稿
+    twin_page = client.get(f"/story/{twin_id}").text
+    assert "这条与另一条是同一则新闻" in twin_page
+    assert f"/story/{primary_id}" in twin_page
+
+
+def test_primary_article_lists_the_other_sources(client, settings: Settings, seeded_db):
+    """主条目把别家的同题报道列出来 —— 合并只是不重复展示，不是把内容删掉。"""
+    with session_scope() as session:
+        primary = make_article(session, title="Apple tightens Mac disk access for AI agents", link="https://example.com/r")
+        twin = make_article(
+            session, title="Apple will limit Mac disk access as AI agents increase risk", link="https://example.com/s"
+        )
+        twin.duplicate_of = primary.id
+        primary_id, twin_id = primary.id, twin.id
+
+    text = client.get(f"/story/{primary_id}").text
+    assert "其他来源也报道了" in text
+    assert f"/story/{twin_id}" in text

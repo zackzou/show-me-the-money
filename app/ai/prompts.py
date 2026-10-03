@@ -97,3 +97,13 @@ def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summ
         prompts.relevance_prompt,
         {"research_topic": topic, "title": title, "summary": truncate(summary, 500) or "（无摘要）"},
     )
+
+
+def render_same_story_prompt(prompts: PromptsConfig, title_a: str, title_b: str, shared: str = "") -> str:
+    """同题判定：两条报道是不是同一件事。模板为空（老配置）时返回空串。"""
+    if not prompts.same_story_prompt.strip():
+        return ""
+    return _fill(
+        prompts.same_story_prompt,
+        {"title_a": title_a, "title_b": title_b, "shared_words": shared or "（无）"},
+    )

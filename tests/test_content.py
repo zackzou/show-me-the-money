@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 
 import httpx
+from sqlalchemy import select
 
 from app.fetcher.content import extract_article_text, fetch_article_text
 
@@ -228,3 +229,72 @@ def test_backfill_body_images_fills_positions_only(seeded_db):
         # 标记成数组（含空数组）之后就不再重复请求
         with session_scope() as session:
             assert backfill_body_images(session, limit=5)["candidates"] == 0
+
+
+# InfoQ 每篇文章开头都是同一段 QCon 大会宣传（实测四篇一字不差）
+INFOQ_BANNER = (
+    "从「构建 AI」到「驾驭 AI」，100+ 实战案例拆解 AI Native 时代的工程新实践！\n\n"
+    "2026 年 QCon 全球软件开发大会 · 上海站将于 10 月 22 日至 24 日举办，"
+    "聚焦 Harness AI 时代的工程实践，围绕 AI Native 架构展开讨论。"
+)
+
+
+def test_strip_shared_openings_removes_site_banner(seeded_db):
+    """同一个信源里多篇文章一字不差的开头是站点通栏，不是正文，要删掉。"""
+    from app.db import session_scope
+    from app.fetcher.content import strip_shared_openings
+    from app.models import Article
+    from tests.conftest import make_article
+
+    with session_scope() as session:
+        for index in range(3):
+            make_article(
+                session,
+                title=f"实战案例第 {index} 篇",
+                link=f"https://example.com/banner{index}",
+                source_id=1,
+                content_full=f"{INFOQ_BANNER}\n\n这是第 {index} 篇真正要讲的正文，字符数足够不会被过滤掉。",
+            )
+        # 只有一个源、一篇文章才有同样的开头 → 撞车很正常，不该动
+        make_article(
+            session,
+            title="孤例",
+            link="https://example.com/solo",
+            source_id=None,
+            content_full=f"{INFOQ_BANNER}\n\n只有一个来源是这样开头的，这是它自己的正文内容。",
+        )
+
+    with session_scope() as session:
+        stats = strip_shared_openings(session)
+    # 通栏是两段（「从「构建 AI」…」+「2026 年 QCon …」），每轮删一段，所以是 3×2
+    assert stats["articles"] == 6
+    assert stats["groups"] == 2
+
+    with session_scope() as session:
+        first = session.execute(select(Article).where(Article.link == "https://example.com/banner0")).scalar_one()
+        solo = session.execute(select(Article).where(Article.link == "https://example.com/solo")).scalar_one()
+    assert first.content_full.startswith("这是第 0 篇真正要讲的正文")
+    assert "QCon" not in first.content_full
+    # 孤例原样保留
+    assert solo.content_full.startswith(INFOQ_BANNER[:40])
+
+
+def test_strip_shared_openings_leaves_news_alone(seeded_db):
+    """真实新闻的开头不会一字不差地重复，不能误删。"""
+    from app.db import session_scope
+    from app.fetcher.content import strip_shared_openings
+    from tests.conftest import make_article
+
+    with session_scope() as session:
+        for index in range(3):
+            make_article(
+                session,
+                title=f"第 {index} 条快讯",
+                link=f"https://example.com/news{index}",
+                source_id=1,
+                content_full=f"第 {index} 条消息讲的是完全不同的一件事，各自有各自的开头段落。",
+            )
+
+    with session_scope() as session:
+        stats = strip_shared_openings(session)
+    assert stats["articles"] == 0

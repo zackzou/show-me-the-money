@@ -21,10 +21,18 @@ from app.scheduler import (
 from app.utils.text import now_local
 from tests.conftest import CONFIG_DIR, ENV, make_article
 
+
+def _today() -> str:
+    """今天（测试运行时再算一次）。
+
+    模块级常量会在跨午夜时过期：导入时是 10-03，用例里 ``now_local() - 3 分钟``
+    已经是 10-04，文章就落在时间窗外面，页面自然是空的 —— 这个坑只在 23:5x 之后跑测试时出现。
+    """
+    return now_local().strftime("%Y-%m-%d")
+
 BAD_TIME_DIR = CONFIG_DIR.parent / "tests" / "fixtures" / "bad_schedule"
 
 NOW = now_local()
-TODAY = NOW.strftime("%Y-%m-%d")
 YESTERDAY = (NOW - timedelta(days=1)).strftime("%Y-%m-%d")
 
 
@@ -46,7 +54,7 @@ def test_generate_daily_report_filters_and_renders(seeded_db, settings: Settings
         _seed(session, title="还没处理的", link="https://example.com/5", status="pending")
 
     with session_scope() as session:
-        result = generate_daily_report(TODAY, session=session, settings=settings)
+        result = generate_daily_report(_today(), session=session, settings=settings)
 
     assert result["article_count"] == 2
     assert "相关的第一条" in result["content_md"]
@@ -57,19 +65,19 @@ def test_generate_daily_report_filters_and_renders(seeded_db, settings: Settings
     with session_scope() as session:
         rows = list(session.execute(select(DailyReport)).scalars())
         assert len(rows) == 1
-        assert rows[0].date == TODAY
+        assert rows[0].date == _today()
 
 
 def test_generate_daily_report_overwrites_same_date(seeded_db, settings: Settings):
     with session_scope() as session:
         _seed(session, title="第一版", link="https://example.com/10")
     with session_scope() as session:
-        generate_daily_report(TODAY, session=session, settings=settings)
+        generate_daily_report(_today(), session=session, settings=settings)
 
     with session_scope() as session:
         _seed(session, title="第二版", link="https://example.com/11")
     with session_scope() as session:
-        second = generate_daily_report(TODAY, session=session, settings=settings)
+        second = generate_daily_report(_today(), session=session, settings=settings)
 
     assert second["article_count"] == 2
     with session_scope() as session:
@@ -117,7 +125,7 @@ def test_run_today_report_job_is_rolling_to_now(seeded_db, settings: Settings):
 
     result = run_today_report_job(settings)
 
-    assert result["date"] == TODAY
+    assert result["date"] == _today()
     assert result["article_count"] == 1
     assert "今天早些时候" in result["content_md"]
     assert "今天稍晚才发布" not in result["content_md"]
@@ -142,7 +150,7 @@ def test_report_includes_degraded_articles(seeded_db, settings: Settings):
         _seed(session, title="未处理文章", link="https://example.com/27", status="pending")
 
     with session_scope() as session:
-        result = generate_daily_report(TODAY, session=session, settings=settings)
+        result = generate_daily_report(_today(), session=session, settings=settings)
 
     assert result["article_count"] == 1
     assert result["degraded_count"] == 1
@@ -286,7 +294,7 @@ def test_markdown_markers_stripped_from_display(seeded_db, settings: Settings):
               summary="**结论：** 这是一个 **重要** 的变化。\n- 要点一\n- 要点二")
 
     with session_scope() as session:
-        result = generate_daily_report(TODAY, session=session, settings=settings)
+        result = generate_daily_report(_today(), session=session, settings=settings)
 
     assert "**" not in result["content_md"]
     assert "**" not in result["content_html"]
@@ -312,7 +320,7 @@ def test_generate_daily_report_retries_when_db_locked(seeded_db, settings: Setti
     with session_scope() as session:
         _seed(session, title="锁重试文章", link="https://example.com/lock-1")
 
-    result = generate_daily_report(TODAY, settings=settings)
+    result = generate_daily_report(_today(), settings=settings)
 
     assert result["article_count"] == 1
     assert calls["n"] == 2
@@ -331,4 +339,4 @@ def test_generate_daily_report_gives_up_after_attempts(seeded_db, settings: Sett
     monkeypatch.setattr(gen.time, "sleep", lambda _s: None)
 
     with pytest.raises(gen.OperationalError):
-        generate_daily_report(TODAY, settings=settings)
+        generate_daily_report(_today(), settings=settings)

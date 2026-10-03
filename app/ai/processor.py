@@ -23,6 +23,7 @@ from app.ai.prompts import (
     render_translate_title_zh_prompt,
 )
 from app.config import PromptsConfig, Settings
+from app.fetcher.content import is_real_body
 from app.models import Article
 from app.utils.logger import get_logger
 from app.utils.text import is_chinese_text, looks_english, split_tags, strip_html, strip_markdown, truncate
@@ -63,14 +64,27 @@ def _is_affirmative(answer: str) -> bool:
     return parse_relevance(answer)[0]
 
 
+def _fallback_body(article: Article) -> str:
+    """LLM 不可用时能拿来读的文本：正文全文 → RSS 摘要 → 标题。
+
+    中间那层必须过 ``is_real_body``：Hacker News / Reddit 的 RSS description
+    剥掉标签之后只剩 ``Comments``、``submitted by /u/xxx [link] [comments]``
+    这类模板套话，直接拿来当摘要，页面上就是一行「推荐理由：Comments」。
+    """
+    for candidate in (article.content_full, article.content):
+        text = strip_html(candidate) or ""
+        if is_real_body(text):
+            return text
+    return article.title or ""
+
+
 def _fallback_summary(article: Article, chars: int) -> str:
-    body = strip_html(article.content) or article.title
-    return truncate(body, chars)
+    return truncate(_fallback_body(article), chars)
 
 
 def _fallback_digest(article: Article, chars: int) -> str:
     """LLM 不可用时的速览：直接取正文开头，好歹让页内能读。"""
-    return truncate(strip_html(article.content_full) or strip_html(article.content) or article.title, chars)
+    return truncate(_fallback_body(article), chars)
 
 
 def category_hints(categories: list[Any]) -> str:
@@ -381,7 +395,7 @@ def backfill_translations(
     client: LLMClient,
     settings: Settings,
     *,
-    limit: int = 10,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """把中英双版本补齐：中文标题、中文速览、中文正文，一个都不能缺。
 
@@ -390,16 +404,22 @@ def backfill_translations(
     就一直是空，「中文」模式下又在标题、导读、正文里露出英文，而且再也没人
     回来补。这里定期扫一遍把它们填上。
 
-    两个坑：
+    四个坑，都是实测踩出来的：
 
     1. **中文原文要当场把三个字段都标成已处理。** 只写 ``content_zh=""`` 的话，
        ``title_zh`` / ``digest_zh`` 还是 NULL，这篇每轮都会被重新捞回来，白占名额。
     2. **重试次数少的优先。** 一旦上游限流，最新的那几篇会一直失败；
        按发布时间倒序取前 N 篇的话，它们会把名额占满，排在后面的永远轮不到。
+    3. **不拿 title_en 当条件。** 处理早期失败的文章压根没轮到写这个字段，
+       拿它当条件会让这类文章永远等不到中文标题。
+    4. **先补标题与导读，再翻正文。** 正文是长文、一次要翻好几段，单篇成本是
+       标题的十几倍；而标题与导读是首页和详情页最显眼的地方。先把便宜的补齐，
+       读者先看到全中文，再慢慢补正文。
     """
     if not settings.i18n.enabled:
         return {"candidates": 0, "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
     wants_content = settings.i18n.translate_content
+    batch = limit if limit is not None else settings.i18n.backfill_batch_size
     rows = list(
         session.execute(
             select(Article)
@@ -413,10 +433,11 @@ def backfill_translations(
                 Article.link.notlike("http://localhost%"),
             )
             .order_by(Article.i18n_attempts.asc(), Article.published_at.desc(), Article.id.desc())
-            .limit(limit)
+            .limit(batch)
         ).scalars()
     )
     stats = {"candidates": len(rows), "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
+    pending_content: list[tuple[Article, str]] = []
     for article in rows:
         source = article.content_full or ""
         if not looks_english(source):
@@ -427,8 +448,6 @@ def backfill_translations(
             stats["skipped"] += 1
             continue
         article.i18n_attempts = (article.i18n_attempts or 0) + 1
-        # 不看 title_en：处理早期失败的文章根本没轮到写 title_en，
-        # 拿它当条件会让这类文章永远等不到中文标题
         if not article.title_zh:
             title_zh = translate_title_to_chinese(client, settings.prompts, article.title or "")
             if title_zh:
@@ -444,10 +463,14 @@ def backfill_translations(
                 # 没有导读、或导读本来就是中文：标成已处理，别每轮都来扫
                 article.digest_zh = ""
         if wants_content and not article.content_zh:
-            translated = translate_to_chinese(client, settings.prompts, source)
-            if translated:
-                article.content_zh = translated
-                stats["contents"] += 1
+            pending_content.append((article, source))
+
+    # 正文译文单独一轮：标题与导读都已经补上了，这里只翻长文
+    for article, source in pending_content:
+        translated = translate_to_chinese(client, settings.prompts, source)
+        if translated:
+            article.content_zh = translated
+            stats["contents"] += 1
     session.flush()
     if any(stats[key] for key in ("titles", "digests", "contents")):
         log.info(

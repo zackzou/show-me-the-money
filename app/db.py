@@ -52,6 +52,7 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.content_zh": "TEXT",
     "articles.body_images": "TEXT",
     "articles.i18n_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "articles.duplicate_of": "INTEGER",
 }
 
 

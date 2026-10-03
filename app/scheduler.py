@@ -11,10 +11,11 @@ from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete, func, select
 
 from app.ai.client import LLMClient
+from app.ai.cluster import merge_duplicates
 from app.ai.processor import backfill_translations, process_pending
 from app.config import Settings
 from app.db import session_scope
-from app.fetcher.content import backfill_body_images, backfill_content
+from app.fetcher.content import backfill_body_images, backfill_content, strip_shared_openings
 from app.fetcher.images import backfill_images
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
@@ -63,6 +64,11 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
         run_media_job(settings)
     except Exception as exc:
         log.warning("补齐配图失败：%s", exc)
+    # 合并跨源重复：正文已经抓回来了，这时才有足够信号判断「是不是同一件事」
+    try:
+        run_merge_job(settings)
+    except Exception as exc:
+        log.warning("合并重复内容失败：%s", exc)
     # 补译正文：正文翻译是可选步骤，限流或抖动失败的文章到这里再试一次
     try:
         if settings.i18n.enabled and settings.i18n.translate_content:
@@ -111,6 +117,9 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
             limit=settings.media.batch_size,
             timeout=settings.media.timeout_seconds,
         )
+        # 站点通栏广告（InfoQ 每篇都顶着同一段大会宣传）不算正文，删掉
+        with session_scope() as session:
+            strip_shared_openings(session)
         # 正文内联配图：老数据都没有位置，顺手补齐，详情页才能像原站那样把图插进正文
         inline = backfill_body_images(
             session,
@@ -206,11 +215,42 @@ def _has_reportable_articles(date_str: str) -> bool:
                 select(func.count(Article.id)).where(
                     Article.relevance == 1,
                     Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
                     Article.published_at >= start,
                     Article.published_at < end,
                 )
             ).scalar()
         )
+
+
+def run_merge_job(settings: Settings) -> dict[str, Any]:
+    """把「多家源报道同一件事」的文章合并成一条。
+
+    入库时的去重只比 link 与标题，跨源转载的标题差别很大（Apple 磁盘访问那条
+    被TechCrunch / The Verge / Ars Technica 各写了一遍），只能等处理完、正文
+    抓回来之后再判一次。
+    """
+    if not settings.merge.enabled:
+        return {"candidates": 0, "pairs": 0, "merged": 0, "kept": 0}
+    client = LLMClient(
+        settings.llm.api_base,
+        settings.llm.api_key,
+        settings.llm.model,
+        timeout=settings.llm.timeout_seconds,
+        retries=settings.llm.max_retries,
+        temperature=settings.llm.temperature,
+    )
+    try:
+        with session_scope() as session:
+            stats = merge_duplicates(session, client, settings, limit=settings.merge.window)
+    except Exception as exc:
+        log.warning("合并重复内容失败：%s", exc)
+        return {"candidates": 0, "pairs": 0, "merged": 0, "kept": 0}
+    finally:
+        client.close()
+    if stats["merged"]:
+        log.info("合并重复内容 %d 条（候选 %d 篇、判定 %d 对）", stats["merged"], stats["candidates"], stats["pairs"])
+    return stats
 
 
 def run_cleanup_job(settings: Settings) -> dict[str, int]:

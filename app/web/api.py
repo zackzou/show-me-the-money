@@ -37,6 +37,7 @@ def list_articles(date: str | None = None, limit: int = 200, session: Session = 
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
+            Article.duplicate_of.is_(None),
             Article.published_at >= start,
             Article.published_at < end,
         )
