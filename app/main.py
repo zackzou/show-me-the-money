@@ -22,7 +22,6 @@ from app.scheduler import (
     run_backfill_reports,
     run_fetch_job,
     run_process_job,
-    run_today_report_job,
     shutdown_scheduler,
     start_scheduler,
 )
@@ -56,14 +55,10 @@ def _safe_startup_run(settings: Settings) -> None:
         log.warning("启动抓取失败：%s", exc)
         return
     try:
+        # run_process_job 内部已经会刷新「今天」这份日报，不再重复调用
         run_process_job(settings)
     except Exception as exc:
         log.warning("启动处理失败：%s", exc)
-        return
-    try:
-        run_today_report_job(settings)
-    except Exception as exc:
-        log.warning("启动日报生成失败：%s", exc)
 
 
 def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> FastAPI:

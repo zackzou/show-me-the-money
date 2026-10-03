@@ -16,7 +16,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
-from app.report.generator import day_window, generate_daily_report
+from app.report.generator import STATUS_REPORTABLE, day_window, generate_daily_report
 from app.utils.logger import get_logger, setup_logging
 from app.utils.text import now_local
 
@@ -107,10 +107,13 @@ def run_today_report_job(settings: Settings) -> dict[str, Any]:
 
 
 def run_backfill_reports(settings: Settings, *, days: int = 7) -> list[str]:
-    """补齐最近几天里缺失的日报，返回补上的日期列表。
+    """补齐最近几天里缺失、且**当天确有内容**的日报，返回补上的日期列表。
 
     服务停机几天再起来时，只有 08:00 那一次定时任务，中间的日期会永远缺一份日报
     （文章还在库里，只是没人去生成）。启动时补一次就齐了。
+
+    刻意跳过「当天没有任何进日报内容」的日期：刚装好的空库不该在历史列表里
+    摆出一串 0 篇的日报。
     """
     today = now_local()
     with session_scope() as session:
@@ -123,14 +126,35 @@ def run_backfill_reports(settings: Settings, *, days: int = 7) -> list[str]:
         for offset in range(1, days + 1)
         if (today - timedelta(days=offset)).strftime("%Y-%m-%d") not in existing
     ]
+    filled: list[str] = []
     for date_str in missing:
+        if not _has_reportable_articles(date_str):
+            continue
         try:
             generate_daily_report(date_str, settings=settings)
-        except Exception as exc:  # 补不齐 shouldn't 影响启动
+        except Exception as exc:  # 补不齐不该影响启动
             log.warning("补齐日报失败：%s（%s）", date_str, exc)
-    if missing:
-        log.info("已补齐 %d 天的日报：%s", len(missing), "、".join(missing))
-    return missing
+            continue
+        filled.append(date_str)
+    if filled:
+        log.info("已补齐 %d 天的日报：%s", len(filled), "、".join(filled))
+    return filled
+
+
+def _has_reportable_articles(date_str: str) -> bool:
+    """这一天有没有「本该进日报」的文章。"""
+    start, end = day_window(date_str)
+    with session_scope() as session:
+        return bool(
+            session.execute(
+                select(func.count(Article.id)).where(
+                    Article.relevance == 1,
+                    Article.status.in_(STATUS_REPORTABLE),
+                    Article.published_at >= start,
+                    Article.published_at < end,
+                )
+            ).scalar()
+        )
 
 
 def run_cleanup_job(settings: Settings) -> dict[str, int]:

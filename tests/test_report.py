@@ -263,3 +263,15 @@ def test_report_job_warns_on_unprocessed_articles(seeded_db, settings: Settings,
 
     assert result["article_count"] == 0  # pending 不进日报
     assert any("batch_size" in record.message for record in caplog.records)
+
+
+def test_backfill_skips_days_without_articles(seeded_db, settings: Settings):
+    """空库不该被补出一串 0 篇日报（那会让历史列表很难看）。"""
+    with session_scope() as session:
+        _seed(session, title="唯一有内容的一天", link="https://example.com/only", published_at=_at(days=2))
+
+    filled = run_backfill_reports(settings, days=7)
+
+    assert filled == [(NOW - timedelta(days=2)).strftime("%Y-%m-%d")]
+    with session_scope() as session:
+        assert session.query(DailyReport).count() == 1
