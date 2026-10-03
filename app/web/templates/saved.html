@@ -1,0 +1,46 @@
+{% extends "base.html" %}
+{% from "_articles.html" import timeline %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">SAVED</div>
+  <h1>我的收藏</h1>
+  <p class="meta">收藏保存在<b>你这台设备的浏览器</b>里，不会上传到任何服务器。</p>
+</div>
+
+<div id="saved-root"><div class="empty">正在读取本地收藏…</div></div>
+
+{% endblock %}
+{% block extra %}
+<script>
+  // 收藏列表在浏览器本地，页面渲染时按 id 拉接口
+  fetch("/api/articles?limit=500")
+    .then(function (r) { return r.json(); })
+    .then(function (rows) {
+      var ids = window.smtmSaved ? window.smtmSaved() : [];
+      var map = {};
+      rows.forEach(function (r) { map[r.id] = r; });
+      var picked = ids.map(function (id) { return map[id]; }).filter(Boolean);
+      var root = document.getElementById("saved-root");
+      if (!picked.length) {
+        root.innerHTML = '<div class="empty">还没有收藏。<br><span style="font-size:12.5px">在列表或详情页点 ☆ 就能收藏。</span></div>';
+        return;
+      }
+      var html = '<div class="list">';
+      picked.forEach(function (a) {
+        var t = (a.published_at || "").slice(5, 16).replace("T", " ");
+        html += '<article class="item"><div class="i-head"><span>' + t + "</span>"
+          + '<button class="bm on" data-save="' + a.id + '">★</button></div>'
+          + '<a href="/story/' + a.id + '"><div class="t">' + a.title + "</div></a>"
+          + '<p class="d">' + (a.digest || a.summary || "") + "</p></article>";
+      });
+      root.innerHTML = html + "</div>";
+      root.querySelectorAll("[data-save]").forEach(function (b) {
+        b.onclick = function () { window.smtmToggleSave(Number(b.getAttribute("data-save"))); location.reload(); };
+      });
+    })
+    .catch(function () {
+      document.getElementById("saved-root").innerHTML = '<div class="empty">读取失败。</div>';
+    });
+</script>
+{% endblock %}

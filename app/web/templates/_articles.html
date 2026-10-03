@@ -6,24 +6,46 @@
         <div class="i-head">
           <span class="src">{{ item.source }}</span>
           {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
+          <span style="flex:1"></span>
           {% if item.score is not none %}
-            <span class="score {{ 'strong' if item.score >= 70 else '' }}">相关度 <b>{{ item.score }}</b></span>
+            <span class="score {{ 'strong' if item.score >= 70 else '' }}" title="相关度评分">AI 评分 <b>{{ item.score }}</b></span>
           {% endif %}
+          <button class="bm" data-save="{{ item.id }}" title="收藏（存在本地浏览器）">☆</button>
         </div>
         <a href="/story/{{ item.id }}"><div class="t">{{ item.title }}</div></a>
         {% if item.digest %}<p class="d">{{ item.digest }}</p>{% endif %}
+        {% if item.category or item.tags %}
+          <div class="cats">
+            {% if item.category %}
+              <a class="cat" href="/?cat={{ item.category|urlencode }}">{{ item.category }}</a>
+            {% endif %}
+            {% for t in item.tags %}
+              <a class="tagx" href="/?tag={{ t|urlencode }}">#{{ t }}</a>
+            {% endfor %}
+          </div>
+        {% endif %}
         {% if item.reason %}
           <p class="why"><b>推荐理由</b>：{{ item.reason }}</p>
         {% endif %}
         <div class="i-foot">
           {% if item.time_full %}<span>{{ item.time_full }}</span><span>·</span>{% endif %}
           <span>{{ item.relative }}</span>
-          {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
           <a class="more" href="/story/{{ item.id }}">读全文 →</a>
         </div>
       </article>
     </div>
   </div>
+{% endmacro %}
+
+{% macro tabs(categories, active_cat='', counts=None, base='') %}
+  <nav class="tabs">
+    <a class="tab {{ 'on' if not active_cat else '' }}" href="{{ base }}">全部{% if counts and counts.get('_all') is defined %} <span class="n">{{ counts.get('_all', 0) }}</span>{% endif %}</a>
+    {% for c in categories %}
+      <a class="tab {{ 'on' if active_cat == c.name else '' }}"
+         href="{{ base }}{{ '&' if base else '?' }}{{ 'cat=' if base else '?' }}{{ c.name|urlencode }}"
+         {% if c.hint %}title="{{ c.hint }}"{% endif %}>{{ c.name }}</a>
+    {% endfor %}
+  </nav>
 {% endmacro %}
 
 {% macro timeline(groups, empty_text='这一天还没有筛选出相关报道。') %}
@@ -33,7 +55,7 @@
         <div class="day-head">
           <span class="caret">▼</span>
           <span>{{ g.date }}</span>
-          <span class="meta">{{ g.weekday }} · {{ g['items']|length }} 条</span>
+          <span class="meta">{{ g.weekday }}{% if g.count %} · {{ g.count }} 条{% endif %}</span>
         </div>
         {% for item in g['items'] %}{{ card(item) }}{% endfor %}
       {% endfor %}

@@ -1,0 +1,35 @@
+{% extends "base.html" %}
+{% from "_articles.html" import timeline, tabs %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">SEARCH</div>
+  <h1>{% if q %}搜索"{{ q }}"{% else %}搜索{% endif %}</h1>
+  {% if q %}
+    <p class="meta">找到 <b>{{ found }}</b> 条{% if active_cat %} · 分类「{{ active_cat }}」{% endif %}
+      · 更新于 {{ searched_at.strftime('%H:%M') }}</p>
+  {% else %}
+    <p class="meta">在已入选的报道里搜标题、摘要、速览、推荐理由{% if scope_full_note %}与正文{% endif %}。按 <kbd style="font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 4px">/</kbd> 快速聚焦搜索框。</p>
+  {% endif %}
+</div>
+
+<div class="sub-bar">
+  <div class="sub-left">
+    {{ tabs(categories, active_cat, none, '/search?q=' ~ (q|urlencode) ~ '&') }}
+    {% if q %}
+      <span class="scope">
+        <a class="{{ 'on' if scope == scope_meta else '' }}"
+           href="/search?q={{ q|urlencode }}&scope=meta{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}">最新</a>
+        <a class="{{ 'on' if scope == scope_full else '' }}"
+           href="/search?q={{ q|urlencode }}&scope=full{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}">全文</a>
+      </span>
+    {% endif %}
+  </div>
+</div>
+
+{% if q %}{{ timeline(groups, '没有找到匹配的内容，换个关键词试试。') }}
+{% else %}
+  <div class="empty">输入关键词开始搜索。<br><span style="font-size:12.5px">支持中英文，标题与摘要之外还能搜速览、推荐理由与主题。</span></div>
+{% endif %}
+
+{% endblock %}

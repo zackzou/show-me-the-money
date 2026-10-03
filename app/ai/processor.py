@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from typing import Any
 
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
 from app.ai.prompts import (
+    render_classify_prompt,
     render_digest_prompt,
     render_reason_prompt,
     render_relevance_prompt,
@@ -20,6 +22,8 @@ from app.config import Settings
 from app.models import Article
 from app.utils.logger import get_logger
 from app.utils.text import split_tags, strip_html, truncate
+
+_TAG_SPLIT_RE = re.compile(r"[,，、;；]")
 
 log = get_logger(__name__)
 
@@ -65,6 +69,31 @@ def _fallback_digest(article: Article, chars: int) -> str:
     return truncate(strip_html(article.content_full) or strip_html(article.content) or article.title, chars)
 
 
+def category_hints(categories: list[Any]) -> str:
+    """把分类清单渲染成给模型看的说明（含每类的判定提示）。"""
+    return "\n".join(f"- {c.name}：{c.hint}" if c.hint else f"- {c.name}" for c in categories)
+
+
+def parse_classify(raw: str, valid: set[str]) -> tuple[str | None, list[str]]:
+    """解析分类结果：第一行分类名，第二行主题。
+
+    容错：模型多写几行、分类名不在清单里、主题里混进分类名 —— 都不能让整条内容挂掉。
+    """
+    lines = [line.strip() for line in (raw or "").splitlines() if line.strip()]
+    category = None
+    topics: list[str] = []
+    for line in lines:
+        head = line.lstrip(" -•*#").strip()
+        if category is None and head in valid:
+            category = head
+            continue
+        for piece in _TAG_SPLIT_RE.split(head):
+            name = piece.strip().strip("「」【】")
+            if name and name not in valid and len(name) <= 20 and name not in topics:
+                topics.append(name)
+    return category, topics[:3]
+
+
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
     """跑一个「锦上添花」的 LLM 步骤；失败就用 fallback，不影响主流程。"""
     if not prompt:
@@ -92,6 +121,8 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
             article.summary = None
             article.digest = None
             article.reason = None
+            article.category = None
+            article.topics = None
             article.tags = None
             article.status = STATUS_PROCESSED
             return STATUS_PROCESSED
@@ -117,6 +148,23 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
             _fallback_digest(article, settings.prompts.fallback_reason_chars),
         )
         article.reason = truncate(reason, 200)
+
+        # 分类 + 主题：一次调用同时产出，失败只丢这两个字段
+        if settings.categories:
+            raw_classify = _optional_llm(
+                client,
+                render_classify_prompt(
+                    settings.prompts,
+                    topic,
+                    article.title,
+                    summary,
+                    category_hints(settings.categories),
+                ),
+                "",
+            )
+            category, topics = parse_classify(raw_classify, {c.name for c in settings.categories})
+            article.category = category
+            article.topics = json.dumps(topics, ensure_ascii=False) if topics else None
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None

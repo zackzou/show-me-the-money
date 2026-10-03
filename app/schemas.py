@@ -18,6 +18,8 @@ class ArticleOut(BaseModel):
     digest: str | None = None
     reason: str | None = None
     score: int | None = None
+    category: str | None = None
+    topics: str | None = None
     tags: str | None = None
     relevance: int | None = None
     status: str

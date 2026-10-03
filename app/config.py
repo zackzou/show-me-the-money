@@ -58,12 +58,20 @@ class SourceConfig(BaseModel):
     enabled: bool = True
 
 
+class CategoryConfig(BaseModel):
+    """分类项：名字 + 提示（提示会喂给模型，避免它自造分类名）。"""
+
+    name: str
+    hint: str = ""
+
+
 class PromptsConfig(BaseModel):
     summary_prompt: str
     digest_prompt: str = ""
     reason_prompt: str = ""
     tag_prompt: str
     relevance_prompt: str
+    classify_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80
@@ -140,6 +148,7 @@ class Settings(BaseModel):
     research_topic: str
     research_topics: list[str]
     topics: list[str]
+    categories: list[CategoryConfig] = []
     sources: list[SourceConfig]
     prompts: PromptsConfig
     storage: StorageSettings
@@ -220,7 +229,12 @@ def load_settings(
 
     raw_settings = _read_yaml(cfg_dir / "settings.yaml")
     sources_raw = _read_yaml(cfg_dir / "default_sources.yaml").get("sources") or []
-    topics_raw = _read_yaml(cfg_dir / "default_topics.yaml").get("topics") or []
+    taxonomy = _read_yaml(cfg_dir / "default_topics.yaml")
+    topics_raw = taxonomy.get("topics") or []
+    try:
+        categories = [CategoryConfig(**item) for item in (taxonomy.get("categories") or [])]
+    except (ValidationError, TypeError) as exc:
+        raise ConfigError(f"config/default_topics.yaml 里的 categories 不合法：{exc}") from exc
     prompts_raw = _read_yaml(cfg_dir / "default_prompts.yaml")
 
     try:
@@ -259,6 +273,7 @@ def load_settings(
         research_topic=topic,
         research_topics=[part.strip() for part in topic.split(",") if part.strip()],
         topics=[str(t) for t in topics_raw],
+        categories=categories,
         sources=sources,
         prompts=prompts,
         storage=storage,

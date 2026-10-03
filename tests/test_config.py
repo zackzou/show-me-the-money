@@ -26,7 +26,10 @@ def test_load_settings_happy_path():
     assert settings.llm.model == "deepseek-chat"
     assert settings.research_topics == ["AI Agent", "芯片"]
     assert len(settings.sources) == 9
-    assert settings.topics[:3] == ["AI", "大模型", "开源"]
+    assert settings.topics[:3] == ["AI Agent / 智能体", "大模型", "开源生态"]
+    assert [c.name for c in settings.categories] == [
+        "一手", "模型", "产品", "行业", "论文", "教程", "观点",
+    ]
     assert settings.schedule.daily_report_time == "08:00"
     assert settings.db_file.name == "smtm.db"
 

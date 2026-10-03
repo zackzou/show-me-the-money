@@ -54,6 +54,16 @@ def render_reason_prompt(prompts: PromptsConfig, topic: str, title: str, summary
     return _fill(prompts.reason_prompt, {"research_topic": topic, "title": title, "summary": summary or "（无）"})
 
 
+def render_classify_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str, categories: str) -> str:
+    """分类 + 主题。模板或分类清单为空时返回空串，调用方据此跳过。"""
+    if not prompts.classify_prompt.strip() or not categories.strip():
+        return ""
+    return _fill(
+        prompts.classify_prompt,
+        {"categories": categories, "research_topic": topic, "title": title, "summary": summary or "（无）"},
+    )
+
+
 def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
     return _fill(
         prompts.relevance_prompt,

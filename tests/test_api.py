@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from urllib.parse import quote
+
 from app.config import Settings
 from app.db import session_scope
 from app.report.generator import generate_daily_report
@@ -160,7 +162,7 @@ def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
     assert "第二段正文内容。" in page.text
     assert "AI 导读" in page.text
     assert ">正文<" in page.text.replace(" ", "")
-    assert "打开 ↗" in page.text                      # 原站链接仍保留
+    assert "打开原文 ↗" in page.text                   # 右栏「打开原文」
     assert "data-shot" in page.text                   # 配图点击页内放大
 
 
@@ -287,3 +289,90 @@ def test_timeline_time_not_truncated_and_dot_aligned(client, settings: Settings,
     # 时间列右对齐且禁止换行，宽度留给 5 个字符
     assert "white-space:nowrap" in text
     assert "grid-template-columns:92px 1fr" in text
+
+
+def test_category_tabs_and_search_box(client, seeded_db):
+    """顶部要有分类 tab 与搜索框（图1），并且带 / 快捷键。"""
+    home = client.get("/").text
+    assert 'class="tabs"' in home
+    for name in ("一手", "模型", "产品", "行业", "论文", "教程", "观点"):
+        assert f">{name}</a>" in home
+    assert 'action="/search"' in home
+    assert 'placeholder="搜索标题、摘要…"' in home
+    assert "s-key" in home          # 搜索框里的 / 提示
+    assert 'if (e.key !== "/")' in home or "e.key !== \"/\"" in home  # / 聚焦快捷键
+
+
+def test_search_page_renders_results(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        make_article(session, title="OpenAI 发布新一代模型", link="https://example.com/s1",
+                     digest="速览", reason="理由", category="模型", tags="OpenAI")
+        make_article(session, title="无关内容", link="https://example.com/s2", digest="别的")
+
+    page = client.get("/search?q=OpenAI")
+    assert page.status_code == 200
+    assert '搜索"OpenAI"' in page.text
+    assert "OpenAI 发布新一代模型" in page.text
+    assert "无关内容" not in page.text
+    assert "找到" in page.text
+    # 分类 tab 与 最新/全文 切换都要在
+    assert 'class="tabs"' in page.text
+    assert ">最新<" in page.text
+    assert ">全文<" in page.text
+
+    assert client.get("/search").status_code == 200
+    assert client.get("/search?q=绝对不存在的词").status_code == 200
+
+
+def test_home_category_filter(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        make_article(session, title="模型类文章", link="https://example.com/f1",
+                     digest="速览", category="模型")
+        make_article(session, title="行业类文章", link="https://example.com/f2",
+                     digest="速览", category="行业")
+
+    page = client.get("/?cat=模型")
+    assert "模型类文章" in page.text
+    assert "行业类文章" not in page.text
+
+
+def test_story_has_right_rail_with_topic_and_tags(client, settings: Settings, seeded_db):
+    """详情页右栏：打开原文 / 推荐理由 / 主题 / 标签，且都可点（图3）。"""
+    with session_scope() as session:
+        make_article(session, title="右栏测试", link="https://example.com/rail",
+                     digest="导语", reason="因为披露了关键数字", category="行业",
+                     topics='["OpenAI / ChatGPT", "Agent 智能体"]', tags="行业动态,Agent")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/story/1").text
+    assert 'class="rail"' in text
+    assert "打开原文 ↗" in text
+    assert "推荐理由" in text
+    assert "因为披露了关键数字" in text
+    assert "主题" in text
+    assert "OpenAI / ChatGPT" in text
+    assert "标签" in text
+    assert "#Agent" in text
+    # 主题跳搜索、标签跳首页过滤，都要能用
+    assert "/search?q=OpenAI" in text
+    assert "/?tag=Agent" in text
+    # 左侧来源栏保留（图4）
+    assert "发布时间" in text
+
+
+def test_card_shows_category_and_clickable_tags(client, settings: Settings, seeded_db):
+    """卡片上要有分类 + 可点标签（图2）。"""
+    with session_scope() as session:
+        make_article(session, title="卡片标签测试", link="https://example.com/card",
+                     digest="速览", reason="理由", score=79, category="行业", tags="行业动态,OpenAI")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert "AI 评分" in text
+    assert "79" in text
+    # 分类与标签都是可点链接（中文会被 urlencode 成百分号编码）
+    assert f"?cat={quote('行业')}" in text
+    assert "?tag=OpenAI" in text
+    assert "#OpenAI" in text

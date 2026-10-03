@@ -88,7 +88,9 @@ def test_llm_client_endpoint_normalisation():
 
 
 def test_process_article_relevant(seeded_db, settings: Settings):
-    answers = iter(["yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由", "标签一,标签二"])
+    answers = iter(
+        ["yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由", "模型\nOpenAI, 大模型", "标签一,标签二"]
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
@@ -103,6 +105,8 @@ def test_process_article_relevant(seeded_db, settings: Settings):
             assert article.summary == "这是摘要"
             assert article.digest == "这是速览：两三句导语"
             assert article.reason == "这是推荐理由"
+            assert article.category == "模型"
+            assert article.topics == '["OpenAI", "大模型"]'
             assert article.score == 88
             assert article.tags == "标签一,标签二"
     finally:
@@ -147,7 +151,13 @@ def test_process_article_falls_back_on_llm_failure(seeded_db, settings: Settings
 
 
 def test_process_pending_counts(seeded_db, settings: Settings):
-    answers = iter(["yes 88", "摘要", "速览1", "理由1", "A,B", "no 5", "yes 72", "摘要2", "速览2", "理由2", "C"])
+    answers = iter(
+        [
+            "yes 88", "摘要", "速览1", "理由1", "模型\nOpenAI", "A,B",
+            "no 5",
+            "yes 72", "摘要2", "速览2", "理由2", "产品\nAI Agent", "C",
+        ]
+    )
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
@@ -306,7 +316,7 @@ def test_parse_relevance(answer, relevant, score):
 
 def test_relevance_without_score_still_processes(seeded_db, settings: Settings):
     """模型只给 yes 没给分数时，文章照样要正常进流程（评分是可选的）。"""
-    answers = iter(["yes", "摘要", "速览", "理由", "标签"])
+    answers = iter(["yes", "摘要", "速览", "理由", "行业\n云计算", "标签"])
     import httpx
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -322,3 +332,21 @@ def test_relevance_without_score_still_processes(seeded_db, settings: Settings):
             assert article.reason == "理由"
     finally:
         client.close()
+
+
+@pytest.mark.parametrize(
+    ("raw", "category", "topics"),
+    [
+        ("模型\nOpenAI, 大模型", "模型", ["OpenAI", "大模型"]),
+        ("行业\n芯片算力", "行业", ["芯片算力"]),
+        ("  - 教程  \n  AI Agent、芯片  ", "教程", ["AI Agent", "芯片"]),
+        ("不存在的分类\n随便什么", None, ["不存在的分类", "随便什么"]),
+        ("模型", "模型", []),
+        ("", None, []),
+        ("模型\n同一个\n同一个", "模型", ["同一个"]),
+    ],
+)
+def test_parse_classify(raw, category, topics):
+    from app.ai.processor import parse_classify
+
+    assert parse_classify(raw, {"一手", "模型", "产品", "行业", "论文", "教程", "观点"}) == (category, topics)

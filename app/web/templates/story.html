@@ -18,16 +18,6 @@
       <dt>发布时间</dt>
       <dd>{{ item.time_full or '—' }}</dd>
       <dd style="color:var(--faint);font-size:12px">{{ item.relative }}</dd>
-      {% if item.score is not none %}
-        <dt>相关度</dt>
-        <dd>{{ item.score }} / 100</dd>
-      {% endif %}
-      {% if item.tags %}
-        <dt>标签</dt>
-        <dd>{% for t in item.tags %}<span class="tag" style="margin-right:4px">{{ t }}</span>{% endfor %}</dd>
-      {% endif %}
-      <dt>原文</dt>
-      <dd><a href="{{ item.link }}" target="_blank" rel="noopener" style="color:var(--accent)">打开 ↗</a></dd>
     </dl>
   </aside>
 
@@ -73,6 +63,53 @@
       觉得不准确请以<a href="{{ item.link }}" target="_blank" rel="noopener" style="color:var(--accent)">原文</a>为准。
     </p>
   </article>
+
+  <aside class="rail">
+    <div class="rail-open">
+      <a class="btn-open" href="{{ item.link }}" target="_blank" rel="noopener">打开原文 ↗</a>
+      <button class="bm" data-save="{{ item.id }}" title="收藏（存在本地浏览器）">☆</button>
+    </div>
+
+    {% if item.reason %}
+      <div class="rail-sec">
+        <div class="rail-h">推荐理由</div>
+        <div class="cats" style="margin:0 0 8px">
+          {% if item.category %}<span class="cat">{{ item.category }}</span>{% endif %}
+          {% if item.score is not none %}
+            <span class="score {{ 'strong' if item.score >= 70 else '' }}">AI 评分 <b>{{ item.score }}</b></span>
+          {% endif %}
+        </div>
+        <p class="why">{{ item.reason }}</p>
+      </div>
+    {% endif %}
+
+    {% if item.topics %}
+      <div class="rail-sec">
+        <div class="rail-h">主题</div>
+        {% for t in item.topics %}
+          <a class="rail-chip" href="/search?q={{ t|urlencode }}">{{ t }}</a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if item.tags %}
+      <div class="rail-sec">
+        <div class="rail-h">标签</div>
+        {% for t in item.tags %}
+          <a class="rail-tag" href="/?tag={{ t|urlencode }}">#{{ t }}</a>
+        {% endfor %}
+      </div>
+    {% endif %}
+
+    {% if item.related %}
+      <div class="rail-sec">
+        <div class="rail-h">相关阅读</div>
+        {% for r in item.related[:4] %}
+          <a href="/story/{{ r.id }}" style="display:block;font-size:12.5px;line-height:1.6;color:var(--muted);margin-bottom:7px">{{ r.title[:42] }}</a>
+        {% endfor %}
+      </div>
+    {% endif %}
+  </aside>
 
 </div>
 {% endif %}

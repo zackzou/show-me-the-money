@@ -16,10 +16,18 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.config import Settings
 from app.db import get_session
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import now_local, split_tags, strip_markdown, truncate
+from app.web.search import (
+    SCOPE_FULL,
+    SCOPE_META,
+    count_by_category,
+    search_articles,
+    search_metadata,
+)
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -39,6 +47,17 @@ def _images(raw: str | None) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [str(item) for item in parsed if isinstance(item, str) and item.startswith(("http://", "https://"))]
+
+
+def _topics_of(article: Article) -> list[str]:
+    """topics 存的是 JSON 数组；老数据/坏数据一律当没有。"""
+    if not article.topics:
+        return []
+    try:
+        parsed = json.loads(article.topics)
+    except (TypeError, ValueError):
+        return []
+    return [str(item) for item in parsed if isinstance(item, str)]
 
 
 def _body_blocks(raw: str | None) -> list[str]:
@@ -98,12 +117,15 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "source": source_name or "未知来源",
         "source_host": _host(source_url),
         "time_hm": published.strftime("%H:%M") if published else "",
+        "date_key": published.strftime("%Y-%m-%d") if published else "",
         "time_full": published.strftime("%Y-%m-%d %H:%M") if published else "",
         "relative": _relative(published, now),
         # 速览优先（页内就能读完），没有就退回摘要
         "digest": strip_markdown(article.digest) or strip_markdown(article.summary),
         "reason": strip_markdown(article.reason),
         "score": article.score,
+        "category": article.category or "",
+        "topics": _topics_of(article),
         "tags": split_tags(article.tags),
         "images": _images(article.image_urls),
         "degraded": article.status == "failed",
@@ -137,21 +159,46 @@ def articles_of_day_paged(
     return [_card(article, name, url, now) for article, name, url in rows]
 
 
-def group_by_date(cards: list[dict[str, Any]], date_str: str) -> list[dict[str, Any]]:
-    """按日期分组，组头显示「10月3日 ⌄ 星期六 · N 条」。"""
-    if not cards:
-        return []
+def _date_label(date_str: str) -> tuple[str, str]:
     try:
         day = datetime.strptime(date_str, "%Y-%m-%d")
     except ValueError:
-        return [{"date": date_str, "weekday": "", "items": cards}]
-    return [
-        {
-            "date": f"{day.month}月{day.day}日",
-            "weekday": f"星期{WEEKDAYS[day.weekday()]}",
-            "items": cards,
-        }
-    ]
+        return date_str, ""
+    return f"{day.month}月{day.day}日", f"星期{WEEKDAYS[day.weekday()]}"
+
+
+def group_by_date(cards: list[dict[str, Any]], date_str: str) -> list[dict[str, Any]]:
+    """按日期分组，组头显示「10月3日 星期六 · N 条」。单日时只出一个组。"""
+    if not cards:
+        return []
+    label, weekday = _date_label(date_str)
+    return [{"date": label, "weekday": weekday, "count": len(cards), "items": cards}]
+
+
+def group_cards(cards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """搜索结果可能跨天：按 YYYY-MM-DD 分组，保持时间倒序。"""
+    buckets: dict[str, list[dict[str, Any]]] = {}
+    for card in cards:
+        buckets.setdefault(card["date_key"], []).append(card)
+    groups = []
+    for date_key in sorted(buckets, reverse=True):
+        label, weekday = _date_label(date_key)
+        items = buckets[date_key]
+        groups.append({"date": label, "weekday": weekday, "count": len(items), "items": items})
+    return groups
+
+
+def filter_by(
+    cards: list[dict[str, Any]], *, category: str | None = None, tag: str | None = None
+) -> list[dict[str, Any]]:
+    """按分类 / 标签过滤卡片。分类与标签都在应用层过滤，语义更准。"""
+    result = cards
+    if category:
+        result = [card for card in result if card["category"] == category]
+    if tag:
+        needle = tag.strip().casefold()
+        result = [card for card in result if any(t.casefold() == needle for t in card["tags"])]
+    return result
 
 
 def count_of_day(session: Session, date_str: str) -> int:
@@ -172,21 +219,33 @@ def count_of_day(session: Session, date_str: str) -> int:
     )
 
 
+def _settings(request: Request) -> Settings | None:
+    return getattr(request.app.state, "settings", None)
+
+
 def _topics(request: Request) -> list[str]:
-    return list(getattr(request.app.state.settings, "research_topics", []) or [])
+    settings = _settings(request)
+    return list(getattr(settings, "research_topics", []) or [])
+
+
+def _categories(request: Request) -> list[dict[str, str]]:
+    settings = _settings(request)
+    return [{"name": c.name, "hint": c.hint} for c in getattr(settings, "categories", []) or []]
 
 
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
-    return {"topics": _topics(request), **extra}
+    return {"topics": _topics(request), "categories": _categories(request), **extra}
 
 
 @page_router.get("/", response_class=HTMLResponse)
 def index(
     request: Request,
     page: int = Query(1, ge=1),
+    cat: str | None = None,
+    tag: str | None = None,
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
-    """首页：热点资讯时间轴。按时间倒序 + 分页，不用一次渲染全部。"""
+    """首页：热点资讯时间轴。按时间倒序 + 分页，可用 ?cat= / ?tag= 过滤。"""
     latest = session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(1)).scalar_one_or_none()
     date_str = latest.date if latest else now_local().strftime("%Y-%m-%d")
     now = now_local()
@@ -194,6 +253,7 @@ def index(
     pages = max(1, -(-total // PAGE_SIZE))
     page = min(page, pages)
     cards = articles_of_day_paged(session, date_str, page, PAGE_SIZE, now)
+    cards = filter_by(cards, category=cat, tag=tag)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -206,9 +266,80 @@ def index(
             total=total,
             page=page,
             pages=pages,
+            active_cat=cat or "",
+            active_tag=tag or "",
             title="热点资讯",
         ),
     )
+
+
+@page_router.get("/search", response_class=HTMLResponse)
+def search_page(
+    request: Request,
+    q: str = "",
+    scope: str = SCOPE_META,
+    cat: str | None = None,
+    tag: str | None = None,
+    session: Session = Depends(get_session),
+) -> HTMLResponse:
+    """站内搜索。``scope=全文`` 时连正文一起搜。"""
+    keyword = (q or "").strip()
+    effective_scope = SCOPE_FULL if scope == SCOPE_FULL else SCOPE_META
+    rows = (
+        search_articles(session, keyword, scope=effective_scope, category=cat, tag=tag)
+        if keyword
+        else []
+    )
+    now = now_local()
+    cards = [_card(article, None, None, now) for article in rows]
+    # 搜索结果里要显示来源名与域名，所以再查一次 source
+    cards = _attach_sources(session, rows, cards, now)
+    return templates.TemplateResponse(
+        request,
+        "search.html",
+        _ctx(
+            request,
+            q=keyword,
+            scope=effective_scope,
+            groups=group_cards(cards),
+            total=len(cards),
+            found=len(rows),
+            counts=count_by_category(session, keyword, scope=effective_scope) if keyword else {},
+            active_cat=cat or "",
+            active_tag=tag or "",
+            searched_at=now,
+            title=f'搜索 "{keyword}"' if keyword else "搜索",
+            **search_metadata(),
+        ),
+    )
+
+
+def _attach_sources(
+    session: Session, rows: list[Article], cards: list[dict[str, Any]], now: datetime
+) -> list[dict[str, Any]]:
+    """给搜索结果补上来源名与域名（一次查询搞定，不做 N+1）。"""
+    if not rows:
+        return cards
+    ids = {a.source_id for a in rows if a.source_id is not None}
+    names: dict[int, tuple[str | None, str | None]] = {}
+    if ids:
+        names = {
+            source_id: (name, url)
+            for source_id, name, url in session.execute(
+                select(Source.id, Source.name, Source.url).where(Source.id.in_(ids))
+            )
+        }
+    for article, card in zip(rows, cards, strict=True):
+        name, url = names.get(article.source_id, (None, None)) if article.source_id is not None else (None, None)
+        card["source"] = name or "未知来源"
+        card["source_host"] = _host(url)
+    return cards
+
+
+@page_router.get("/saved", response_class=HTMLResponse)
+def saved_page(request: Request) -> HTMLResponse:
+    """收藏页：收藏存在浏览器 localStorage，这里只提供一个空壳页面。"""
+    return templates.TemplateResponse(request, "saved.html", _ctx(request, title="我的收藏"))
 
 
 @page_router.get("/daily/{date}", response_class=HTMLResponse)
@@ -250,9 +381,41 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     article, source_name, source_url = row
     now = now_local()
     item = _card(article, source_name, source_url, now)
+    # 同分类 / 同标签的邻居，方便顺着标签继续读
+    item["related"] = _related(session, article, now)
     item["body_blocks"] = _body_blocks(article.content_full)
     item["content_preview"] = truncate(article.content_full or article.content or "", 400)
     return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
+
+
+def _related(session: Session, article: Article, now: datetime, *, limit: int = 6) -> list[dict[str, Any]]:
+    """找同类文章：优先同分类，其次同标签。"""
+    if not article.category and not article.tags:
+        return []
+    needle_tags = {t.strip().casefold() for t in (article.tags or "").split(",") if t.strip()}
+    rows = list(
+        session.execute(
+            select(Article, Source.name, Source.url)
+            .outerjoin(Source, Article.source_id == Source.id)
+            .where(
+                Article.id != article.id,
+                Article.relevance == 1,
+                Article.status.in_(STATUS_REPORTABLE),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(120)
+        )
+    )
+    scored: list[tuple[int, dict[str, Any]]] = []
+    for candidate, name, url in rows:
+        points = 0
+        if article.category and candidate.category == article.category:
+            points += 2
+        points += len({t.strip().casefold() for t in (candidate.tags or "").split(",")} & needle_tags)
+        if points:
+            scored.append((points, _card(candidate, name, url, now)))
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [card for _, card in scored[:limit]]
 
 
 @page_router.get("/archive", response_class=HTMLResponse)

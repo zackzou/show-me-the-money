@@ -46,6 +46,10 @@ class Article(Base):
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 相关度评分 0~100（由相关度判断顺带产出，不额外消耗调用）
     score: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # 分类：来自 config/default_topics.yaml 的 categories（顶部 tab 与卡片显示用）
+    category: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    # 主题（JSON 数组）：详情页右栏的「主题」区
+    topics: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)
