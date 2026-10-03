@@ -202,3 +202,16 @@ def test_home_shows_images_grid(client, settings: Settings, seeded_db):
 def test_dark_mode_toggle_present(client):
     assert "smtm-theme" in client.get("/").text
     assert 'classList.toggle("dark")' in client.get("/").text
+
+
+def test_story_image_has_height_cap(client, settings: Settings, seeded_db):
+    """详情页大图必须限高：原始 og:image 常常是 2000px 高的长图，不限高会撑爆页面。"""
+    with session_scope() as session:
+        make_article(session, title="长图文章", link="https://example.com/tall",
+                     digest="速览", image_urls='["https://cdn.example.com/tall.jpg"]')
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/story/1").text
+    assert "max-height:520px" in text
+    assert ".shots.one img { aspect-ratio:auto; }" in text

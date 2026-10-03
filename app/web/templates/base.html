@@ -84,8 +84,11 @@
     .shots.one { grid-template-columns:1fr; }
     .shots.two, .shots.four { grid-template-columns:1fr 1fr; }
     .shots.many { grid-template-columns:repeat(3,1fr); }
-    .shots img { width:100%; aspect-ratio:16/10; object-fit:cover; border-radius:9px;
-                 background:var(--chip); cursor:zoom-in; display:block; border:1px solid var(--line); }
+    .shots img { width:100%; height:auto; max-height:520px; aspect-ratio:16/10; object-fit:cover;
+                 border-radius:9px; background:var(--chip); cursor:zoom-in; display:block;
+                 border:1px solid var(--line); }
+    /* 单图时不强行裁 16:10（会把内容图切掉），按原始比例显示但限高 */
+    .shots.one img { aspect-ratio:auto; }
     @media (max-width:640px) { .shots.many { grid-template-columns:1fr 1fr; } h1 { font-size:24px; } }
 
     /* 页内放大，不跳原站 */
