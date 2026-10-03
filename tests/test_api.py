@@ -390,3 +390,128 @@ def test_story_subtitle_is_not_duplicate_of_digest(client, settings: Settings, s
     text = client.get("/story/1").text
     assert text.count("这是导语内容，只该出现一次。") == 1
     assert "行业 · 云计算" in text
+
+
+def test_card_is_whole_clickable_with_pointer_cursor(client, settings: Settings, seeded_db):
+    """整卡可点：卡片是定位容器，标题链接用 ::after 铺满，光标是手型。
+
+    同时确认卡内的标签 / 收藏按钮浮在拉伸链接之上，仍然能单独点。
+    """
+    with session_scope() as session:
+        make_article(session, title="整卡可点测试", link="https://example.com/whole",
+                     digest="导语内容", reason="理由", category="行业", tags="OpenAI")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    # 手型光标
+    assert "padding:14px 16px; box-shadow:var(--shadow); cursor:pointer" in text
+    # 拉伸链接铺满整卡
+    assert ".item .t::after { content:\"\"; position:absolute; inset:0;" in text
+    # 标题仍是真链接（可右键/可访问）
+    assert '<a href="/story/1"><div class="t">整卡可点测试</div></a>' in text
+    # 卡内可点元素浮到上面
+    assert ".item .cats a, .item .bm, .item .more" in text
+    assert "z-index:2" in text
+
+
+def test_card_body_click_does_not_nest_links(client, settings: Settings, seeded_db):
+    """不能出现 a 套 a（非法结构），分类与标签是独立链接。"""
+    from html.parser import HTMLParser
+
+    with session_scope() as session:
+        make_article(session, title="结构测试", link="https://example.com/struct",
+                     digest="导语", category="行业", tags="OpenAI,Agent")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    class NestChecker(HTMLParser):
+        def __init__(self):
+            super().__init__()
+            self.depth = 0
+            self.max_nest = 0
+
+        def handle_starttag(self, tag, attrs):
+            if tag == "a":
+                self.depth += 1
+                self.max_nest = max(self.max_nest, self.depth)
+
+        def handle_endtag(self, tag):
+            if tag == "a":
+                self.depth -= 1
+
+    parser = NestChecker()
+    parser.feed(client.get("/").text)
+    assert parser.max_nest == 1, "出现了 a 套 a"
+
+
+def test_story_page_uses_wide_container_and_toc(client, settings: Settings, seeded_db):
+    """详情页要更宽的容器（不然三栏把正文挤窄），正文小标题要能生成目录。"""
+    from app.web.routes import mark_headings, table_of_contents
+
+    marked = mark_headings(
+        [
+            "内部未发布模型 · RL 训练",  # 像小标题
+            "这是一段很长的正文内容，用来占位，所以不会被当成小标题来处理掉。",
+            "发生了什么",  # 短句 + 无句末标点 → 小标题
+            "2026年5月16日",  # 以数字开头 → 不算
+            "小结。",  # 以句号结尾 → 不算
+        ]
+    )
+    assert [item["heading"] for item in marked] == [True, False, True, False, False]
+    assert [item["text"] for item in table_of_contents(marked)] == ["内部未发布模型 · RL 训练", "发生了什么"]
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="目录测试",
+            link="https://example.com/toc",
+            digest="导语",
+            content_full="发生了什么\n\n这是第一段正文内容，足够长不会被当成标题。\n\n调查与响应\n\n这是第二段正文内容，也足够长。",
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert "wrap wide" in text          # 用了宽容器
+    assert "本文目录" in text
+    assert 'href="#sec-0"' in text
+    assert 'id="sec-0"' in text
+    assert "<h3" in text
+
+
+def test_story_columns_are_balanced(client, seeded_db):
+    """三栏比例：正文列要最宽，左右栏窄一些。"""
+    text = client.get("/").text
+    assert "grid-template-columns:216px minmax(0,1fr) 300px" in text
+    assert ".prose p { margin:0 0 24px; font-size:17px; line-height:2.05" in text
+
+
+def test_story_body_never_renders_empty_paragraphs(client, settings: Settings, seeded_db):
+    """回归：body_blocks 传成 dict 列表后，模板若还按字符串取，正文会渲染成一片空段落。
+
+    这里锁死「每个段落要么是 h3、要么是有文字的 p」。
+    """
+    import re
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="正文渲染",
+            link="https://example.com/body",
+            digest="导语",
+            content_full=(
+                "事件概要\n\n这是第一段正文，字符数足够不会被判成标题。\n\n"
+                "影响范围\n\n这是第二段正文，同样足够长所以也不会被当成标题。"
+            ),
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    prose = text.split('class="prose"')[1].split("</div>")[0]
+    assert "<h3" in prose
+    for para in re.findall(r"<p>(.*?)</p>", prose, re.S):
+        assert para.strip(), "出现了空段落"
+    assert "这是第一段正文" in prose
+    assert "这是第二段正文" in prose
+    # 小标题应该同时出现在目录里
+    assert 'href="#sec-0"' in text

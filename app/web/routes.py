@@ -60,11 +60,39 @@ def _topics_of(article: Article) -> list[str]:
     return [str(item) for item in parsed if isinstance(item, str)]
 
 
+# 像小标题的段落：短、不以句末标点结尾、不是纯数字
+_HEADING_MAX_CHARS = 30
+_HEADING_MIN_CHARS = 2
+_SENTENCE_END = "。！？；，、：,.!?;:…"
+
+
 def _body_blocks(raw: str | None) -> list[str]:
     """正文全文按空行切段，供详情页逐段渲染。"""
     if not raw:
         return []
     return [part.strip() for part in raw.split("\n\n") if part.strip()]
+
+
+def mark_headings(blocks: list[str]) -> list[dict[str, Any]]:
+    """把正文里「短句、不以标点结尾」的段落标成小标题。
+
+    这样详情页能像图1 那样给一个本文目录，并把小标题渲染成 ``<h3>``；
+    剩下的当普通段落。判不准就当普通段落，不会漏内容。
+    """
+    marked: list[dict[str, Any]] = []
+    for index, text in enumerate(blocks):
+        stripped = text.strip()
+        is_heading = (
+            _HEADING_MIN_CHARS <= len(stripped) <= _HEADING_MAX_CHARS
+            and stripped[-1] not in _SENTENCE_END
+            and not stripped[0].isdigit()
+        )
+        marked.append({"i": index, "text": stripped, "heading": is_heading})
+    return marked
+
+
+def table_of_contents(marked: list[dict[str, Any]], *, limit: int = 12) -> list[dict[str, Any]]:
+    return [item for item in marked if item["heading"]][:limit]
 
 
 def _day_statement(date_str: str):
@@ -383,7 +411,10 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     item = _card(article, source_name, source_url, now)
     # 同分类 / 同标签的邻居，方便顺着标签继续读
     item["related"] = _related(session, article, now)
-    item["body_blocks"] = _body_blocks(article.content_full)
+    # 正文按段落切开，并标出哪些段落是「小标题」，供页面渲染目录与 <h3>
+    marked = mark_headings(_body_blocks(article.content_full))
+    item["body_blocks"] = marked
+    item["toc"] = table_of_contents(marked)
     item["content_preview"] = truncate(article.content_full or article.content or "", 400)
     return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
 

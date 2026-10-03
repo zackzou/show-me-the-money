@@ -10,7 +10,7 @@
 <div class="list">
   {% if reports %}
     {% for item in reports %}
-      <article class="item" style="padding:15px 20px">
+      <article class="item rowline" style="padding:15px 20px;cursor:pointer">
         <div style="display:flex;align-items:center;gap:14px">
           <a href="/daily/{{ item.date }}" style="font-weight:650;font-size:16px">{{ item.date }}</a>
           <span class="meta" style="font-size:13px">{{ item.article_count }} 篇</span>

@@ -19,6 +19,16 @@
       <dd>{{ item.time_full or '—' }}</dd>
       <dd style="color:var(--faint);font-size:12px">{{ item.relative }}</dd>
     </dl>
+    {% if item.toc %}
+      <dl>
+        <dt>本文目录</dt>
+        <dd class="toc">
+          {% for entry in item.toc %}
+            <a href="#sec-{{ entry.i }}">{{ entry.text }}</a>
+          {% endfor %}
+        </dd>
+      </dl>
+    {% endif %}
   </aside>
 
   <article>
@@ -40,7 +50,13 @@
       <section class="sec">
         <div class="sec-t plain">正文</div>
         <div class="prose">
-          {% for block in item.body_blocks %}<p>{{ block }}</p>{% endfor %}
+          {% for block in item.body_blocks %}
+            {% if block.heading %}
+              <h3 id="sec-{{ block.i }}">{{ block.text }}</h3>
+            {% else %}
+              <p>{{ block.text }}</p>
+            {% endif %}
+          {% endfor %}
         </div>
       </section>
     {% elif item.content_preview %}
@@ -120,3 +136,5 @@
 {% endif %}
 
 {% endblock %}
+
+{% block container_extra %} wide{% endblock %}
