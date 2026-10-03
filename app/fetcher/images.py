@@ -1,7 +1,7 @@
 """配图补齐：RSS 没给图时，去文章页抓 og:image。
 
 为什么需要：实测默认信源的 description 多半是纯文本（量子位正文中位数 15 字、
-InfoQ 7 字），``<img>`` 抽不到；而这些站点���文章页基本都有 ``og:image``。
+InfoQ 7 字），``<img>`` 抽不到；而这些站点的文章页基本都有 ``og:image``。
 不补图，页面就还是只能靠跳原站看图。
 
 约束（都是成本 / 礼貌 / 稳定性考虑）：
@@ -40,6 +40,9 @@ _FIRST_IMG_RE = re.compile(r"""<img[^>]+src\s*=\s*["']([^"']+)["']""", re.I)
 _ATTR_RE = re.compile(r"""(\w[\w:-]*)\s*=\s*(?:"([^"]*)"|'([^']*)')""")
 _BAD_IMAGE_HINTS = ("logo", "avatar", "icon", "placeholder", "blank", "spacer", "qrcode")
 
+# 同一信源里同一张图出现这么多次，就当它是站点通用图
+SITE_DEFAULT_THRESHOLD = 3
+
 
 def _attr(tag: str, name: str) -> str:
     for match in _ATTR_RE.finditer(tag):
@@ -53,6 +56,15 @@ def _looks_like_content_image(url: str) -> bool:
     if any(hint in low for hint in _BAD_IMAGE_HINTS):
         return False
     return low.endswith((".jpg", ".jpeg", ".png", ".webp", ".avif", ".gif")) or "image" in low
+
+
+def looks_like_site_default(url: str, same_source: dict[str, int], *, threshold: int = SITE_DEFAULT_THRESHOLD) -> bool:
+    """同一个图地址在同一信源下反复出现 → 多半是站点通用头图 / 默认头像，不是内容图。
+
+    实测：量子位的 ``og:image`` 永远是 ``qbitai-logo-1.png``，InfoQ 是同一张默认剪影。
+    这种图挂上去只会让人觉得「配图和内容没关系」，不如不放。
+    """
+    return same_source.get(url, 0) >= threshold
 
 
 def extract_og_image(html_text: str, *, base_url: str = "") -> str | None:
@@ -112,9 +124,18 @@ def backfill_images(
         .limit(limit)
     )
     rows = list(session.execute(statement).scalars())
-    stats = {"candidates": len(rows), "filled": 0, "not_found": 0, "failed": 0}
+    stats = {"candidates": len(rows), "filled": 0, "not_found": 0, "site_default": 0, "failed": 0}
     if not rows:
         return stats
+
+    # 先数一遍每个信源里各图片地址已出现多少次，用来识别站点通用图
+    known: dict[str, dict[str, int]] = {}
+    for url, source_id in session.execute(select(Article.image_urls, Article.source_id)):
+        if not url or source_id is None:
+            continue
+        bucket = known.setdefault(str(source_id), {})
+        for one in _safe_list(url):
+            bucket[one] = bucket.get(one, 0) + 1
 
     with httpx.Client(
         timeout=timeout,
@@ -131,8 +152,13 @@ def backfill_images(
                 stats["failed"] += 1
                 log.debug("补图失败：%s（%r）", article.link[:80], exc)
                 continue
+            same_source = known.get(str(article.source_id), {})
+            if image and looks_like_site_default(image, same_source):
+                stats["site_default"] += 1
+                image = None
             if image:
                 article.image_urls = json.dumps([image], ensure_ascii=False)
+                same_source[image] = same_source.get(image, 0) + 1
                 stats["filled"] += 1
             else:
                 # 用空数组标记「查过了没有」，避免每轮都重查同一篇
@@ -142,6 +168,14 @@ def backfill_images(
     if stats["filled"]:
         log.info("补齐配图 %d 篇（候选 %d 篇、无图 %d 篇）", stats["filled"], stats["candidates"], stats["not_found"])
     return stats
+
+
+def _safe_list(raw: str) -> list[str]:
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    return [str(x) for x in parsed if isinstance(x, str)]
 
 
 def count_with_images(session: Session) -> int:

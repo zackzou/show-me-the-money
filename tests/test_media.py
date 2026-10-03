@@ -122,3 +122,42 @@ def test_backfill_images_marks_empty_so_it_does_not_retry(seeded_db):
         assert backfill_images(session, limit=10)["candidates"] == 0
     assert calls["n"] == 1
     assert fetcher is not None
+
+
+def test_site_default_image_is_rejected(seeded_db):
+    """同一张图在同一信源下反复出现 → 视为站点通用图，不挂上去。"""
+    import json
+
+    from sqlalchemy import select
+
+    from app.db import session_scope
+    from app.fetcher.images import backfill_images
+    from app.models import Article, Source
+    from app.utils.text import now_local
+
+    common = "https://cdn.example.com/site-logo.png"
+    with session_scope() as session:
+        source_id = session.query(Source).one().id
+        # 先前已经有 3 篇用过同一张图 → 站点通用图
+        for i in range(3):
+            session.add(Article(title=f"老文章{i}", link=f"https://example.com/old{i}",
+                                status="processed", relevance=1, image_urls=json.dumps([common]),
+                                source_id=source_id, published_at=now_local()))
+        session.add(Article(title="新文章", link="https://example.com/newone", status="processed",
+                            relevance=1, source_id=source_id, published_at=now_local()))
+
+    import app.fetcher.images as mod
+
+    original = mod.fetch_og_image
+    mod.fetch_og_image = lambda url, **kw: common  # 站点所有文章都返回这张
+    try:
+        with session_scope() as session:
+            stats = backfill_images(session, limit=10)
+    finally:
+        mod.fetch_og_image = original
+
+    assert stats["site_default"] == 1
+    assert stats["filled"] == 0
+    with session_scope() as session:
+        row = session.execute(select(Article).where(Article.title == "新文章")).scalar_one()
+        assert json.loads(row.image_urls) == []  # 标记为「查过、无可用图」
