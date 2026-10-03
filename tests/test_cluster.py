@@ -5,6 +5,7 @@ from __future__ import annotations
 import httpx
 from sqlalchemy import select
 
+from app.ai import cluster
 from app.ai.cluster import (
     dedup_title,
     duplicates_of,
@@ -156,3 +157,52 @@ def test_already_merged_articles_are_not_judged_again(seeded_db, settings: Setti
 
     assert stats["pairs"] == 0
     assert stats["merged"] == 0
+
+def test_duplicate_detection_reaches_across_several_days(seeded_db):
+    """回归：跨 3 天的同一则新闻也要能比到一起。
+
+    抓取按小时轮询，一批文章会在库里躺好几天才轮到处理 —— 窗口卡在 72 小时的话，
+    10-03 的 TechCrunch 与 09-30 的 MIT Tech Review 永远比不到一起。
+    """
+    from datetime import timedelta
+
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        older = make_article(
+            session,
+            title=APPLE_A,
+            link="https://example.com/old",
+            published_at=now_local() - timedelta(days=3),
+        )
+        make_article(
+            session,
+            title=APPLE_B,
+            link="https://example.com/new",
+            published_at=now_local() - timedelta(hours=2),
+        )
+        older_id = older.id
+
+    with session_scope() as session:
+        rows = cluster._candidate_articles(session, limit=50)
+        assert older_id in {row.id for row in rows}
+        ids = {row.id for row in rows}
+        assert {older_id, older_id + 1} <= ids
+        assert any({a.id, b.id} == {older_id, older_id + 1} for a, b in cluster.find_duplicate_pairs(rows))
+
+
+def test_duplicate_detection_stops_at_the_window(seeded_db):
+    """超出窗口的同名文章不比较 —— 半年前发过同一件事不算今天的重复。"""
+    from datetime import timedelta
+
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        make_article(session, title=APPLE_A, link="https://example.com/ancient",
+                     published_at=now_local() - timedelta(days=40))
+        make_article(session, title=APPLE_B, link="https://example.com/today",
+                     published_at=now_local())
+
+    with session_scope() as session:
+        rows = cluster._candidate_articles(session, limit=50)
+        assert len(rows) == 1  # 40 天前那篇不在窗口内

@@ -53,8 +53,11 @@ log = get_logger(__name__)
 TITLE_OVERLAP_MIN = 0.25
 # 至少要有这么多重合实词，否则「AI / model」这种通用词也能凑够比例
 TITLE_OVERLAP_MIN_WORDS = 2
-# 发布时间相差超过这么久就不算同一件事了（跨时区转载会差几个小时）
-PAIR_WINDOW_HOURS = 72
+# 发布时间相差超过这么久就不算同一件事了。取 7 天而不是一两天：
+# 抓取是按小时轮询的，一批文章会在库里躺好几天才轮到处理与合并 ——
+# 实测同一则新闻的两个源可以差 3 天（10-03 的 TechCrunch / 09-30 的 MIT Tech Review），
+# 窗口卡在 72 小时就永远比不到一起。
+PAIR_WINDOW_DAYS = 7
 # 正文最多看前这么多字符（只用于给候选对排序）
 BODY_SAMPLE_CHARS = 4000
 # 一轮最多判多少对：每对一次调用，别把配额打爆
@@ -170,9 +173,9 @@ def same_story(
     return parse_same_story(raw)
 
 
-def _candidate_articles(session: Session, *, limit: int, window_hours: int = PAIR_WINDOW_HOURS) -> list[Article]:
+def _candidate_articles(session: Session, *, limit: int, window_days: int = PAIR_WINDOW_DAYS) -> list[Article]:
     """取最近一段时间内、还没被判过重复的相关文章。"""
-    since = now_local().timestamp() - window_hours * 3600
+    since = now_local().timestamp() - window_days * 86400
     rows = list(
         session.execute(
             select(Article)
