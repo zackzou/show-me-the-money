@@ -1027,3 +1027,26 @@ def test_primary_article_lists_the_other_sources(client, settings: Settings, see
     text = client.get(f"/story/{primary_id}").text
     assert "其他来源也报道了" in text
     assert f"/story/{twin_id}" in text
+
+
+def test_degraded_card_does_not_repeat_the_digest_as_reason(client, settings: Settings, seeded_db):
+    """回归：降级时摘要与推荐理由是同一段兜底文本，卡片上不该并排显示两遍。
+
+    LLM 不可用时两个字段都退到正文开头那一段，看起来像坏了 ——
+    而且读者要读两遍一模一样的话。理由本来就是「为什么要点开这条」。
+    """
+    fallback = "This year, members of Seattle Mountain Rescue have been setting off into the wilds."
+    with session_scope() as session:
+        make_article(
+            session,
+            title="The dawn of the age of the exoskeleton",
+            link="https://example.com/degraded",
+            digest=fallback,
+            summary=fallback,
+            reason=fallback,
+            status="failed",
+        )
+
+    text = client.get("/").text
+    assert text.count(fallback) == 1
+    assert "推荐理由" not in text.split(fallback)[1][:200]

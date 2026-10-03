@@ -187,8 +187,23 @@ def _relative(value: datetime | None, now: datetime) -> str:
     return value.strftime("%Y-%m-%d")
 
 
+def _reason_of(article: Article, digest_zh: str, digest: str) -> str:
+    """推荐理由；和导语一字不差就当没有。
+
+    LLM 不可用时摘要与推荐理由都退到同一段兜底文本，卡片上并排显示两遍一模一样的
+    话看起来像坏了。理由本来就是「为什么要点开这条」，复读一遍导语没有意义。
+    """
+    reason = strip_markdown(article.reason)
+    if not reason:
+        return ""
+    lead = digest_zh.strip() or digest.strip()
+    return "" if lead and reason.strip() == lead else reason
+
+
 def _card(article: Article, source_name: str | None, source_url: str | None, now: datetime) -> dict[str, Any]:
     published = article.published_at
+    digest_zh = strip_markdown(article.digest_zh)
+    digest = strip_markdown(article.digest_zh or article.digest)
     return {
         "id": article.id,
         # 中文标题优先：英文信源译过来的标题读起来才像中文
@@ -206,10 +221,11 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "time_full": published.strftime("%Y-%m-%d %H:%M") if published else "",
         "relative": _relative(published, now),
         # 速览优先（页内就能读完），没有就退回摘要；中文模式读中文版导读
-        "digest": strip_markdown(article.digest_zh or article.digest) or strip_markdown(article.summary),
-        "digest_zh": strip_markdown(article.digest_zh),
+        "digest": digest or strip_markdown(article.summary),
+        "digest_zh": digest_zh,
         "digest_en": strip_markdown(article.digest_en or article.digest),
-        "reason": strip_markdown(article.reason),
+        # 降级时摘要与推荐理由是同一段兜底文本，卡片上并排显示两遍一模一样的话
+        "reason": _reason_of(article, digest_zh, digest),
         "score": article.score,
         "category": article.category or "",
         "topics": _topics_of(article),
