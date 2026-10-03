@@ -2,7 +2,15 @@
 
 [![GitHub Pages](https://img.shields.io/badge/在线演示-GitHub%20Pages-blue)](https://zackzou.github.io/show-me-the-money/)
 
-**只配两项，自动产出行业热点日报。** 你给出「大模型 API」和「调研方向」，项目自己去抓主流信源、按方向筛选、生成中文摘要与标签；当天每 2 小时滚动刷新，每天 08:00 定稿前一日日报，并提供网页 / JSON / RSS 三种看法。
+**只配两项，自动产出行业热点日报。** 你给出「大模型 API」和「调研方向」，项目自己去抓主流信源、按方向筛选、生成中文速览与标签；当天每 2 小时滚动刷新，每天 08:00 定稿前一日日报。
+
+**页内就能读完，不用跳原站**：每条资讯都配一段「导语式速览」，卡片内直接显示原文配图（点击页内放大），
+点进单篇页还有正文开头 —— 刷完热点不用来回切标签页。
+
+- 必填配置只有 `LLM_API_*` + `RESEARCH_TOPIC`，其余全部内置默认值
+- 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
+- 不绑定 OpenAI：任意 OpenAI 兼容接口、本地 Ollama 都可以（含返回 SSE 流的网关）
+- 单机轻量：Python + FastAPI + SQLite，一个 `docker compose up -d` 跑起来
 
 - 必填配置只有 `LLM_API_*` + `RESEARCH_TOPIC`，其余全部内置默认值
 - 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
@@ -115,8 +123,8 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 ## 它是怎么跑的
 
 ```
-每 2 小时   抓取 RSS → 时间窗/条数过滤 → 去重 → 入库（pending）
-每 2 小时   相关度判断 → 中文摘要 → 标签（失败则降级为正文开头 200 字）
+每 2 小时   抓取 RSS → 时间窗/条数过滤 → 抽正文配图 → 去重 → 入库（pending）
+每 2 小时   相关度判断 → 中文摘要 → 速览 → 标签（失败则降级为正文开头 200 字）
               └ 处理完顺手刷新「今天」这份日报，首页实时可见
 每天 08:00  定稿「昨天」的日报（昨天已不再变化，所以出的是完整版）
 启动时      补齐最近 7 天里缺失的日报（停机几天再起来也不会留空洞）
@@ -127,6 +135,8 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 - **日报按自然日切分，且一份日报只管一天。** 08:00 出的是「昨天」的定稿；今天那份每 2 小时滚动刷新到当前时刻。这样当天任何时间发布的文章都不会被漏掉（早先版本只出「当天 00:00 到生成时刻」的内容，下午和晚上的文章会永远不属于任何一份日报）。
 - **LLM 不可用不会让日报消失。** 摘要会降级为正文开头 200 字，并标注「降级：LLM 不可用」。
+- **配图不再被丢掉。** 入库时从 RSS 正文抽 `<img src/data-src/srcset>`（滤掉追踪像素与占位图），
+  页面直接显示；升级旧库会自动补上 `image_urls` / `digest` 两列，不需要你手动改数据库。
 - **停机后会自动补齐缺失日期的日报。**
 
 ---
@@ -135,8 +145,9 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 | 路径 | 说明 |
 | --- | --- |
-| `/` | 首页：最新一份日报 + 当天文章卡片 |
-| `/daily/{date}` | 指定日期（`YYYY-MM-DD`），没有则 404 |
+| `/` | 首页：热点资讯流（速览 + 配图 + 标签），每页 20 条，`?page=N` 翻页 |
+| `/story/{id}` | 单篇页内预览：速览 + 配图 + 正文开头 |
+| `/daily/{date}` | 指定日期（`YYYY-MM-DD`）的全部报道，没有日报则 404 |
 | `/archive` | 历史日报列表 |
 | `/api/articles?date=YYYY-MM-DD` | 当天文章 JSON（默认北京时间今天） |
 | `/api/reports` `/api/reports/{date}` | 日报列表 / 指定日报（Markdown + HTML 全文） |
@@ -148,7 +159,18 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 ## 预览产出长什么样
 
-仓库 `docs/` 下有两份样例：
+### 热点资讯卡片（首页 / `/daily/{date}`）
+
+每条资讯是一张卡片，从上到下：
+
+1. **标题** —— 点进 `/story/{id}` 看页内速览
+2. **配图** —— 直接取自 RSS 正文的 `<img>`，一张大图 / 多张网格，点击**页内放大**（不跳原站）
+3. **速览** —— 2~3 句导语式概述：「时间 + 谁 + 做了什么 + 关键数字」，页内就能读完
+4. **来源 · 时间 · 标签** —— 标签由模型生成；LLM 不可用时摘要会标注「降级摘要」
+
+页面支持深浅色切换（跟随系统，可手动覆盖并记住），窄屏自适应。
+
+仓库 `docs/` 下还有两份样例：
 
 - `docs/sample-report.md` —— 日报（Markdown）长什么样
 - `docs/sample-report.html` —— 同一天的 HTML 版
@@ -181,7 +203,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 25 个文件零告警、59 个测试全绿、覆盖率 89%。
+当前状态：`ruff` 无告警、`mypy` 26 个文件零告警、75 个测试全绿、覆盖率 89%。
 
 ---
 
@@ -192,6 +214,8 @@ ruff check . && mypy && pytest --cov=app
 - **服务没有任何鉴权，默认监听 `0.0.0.0:8000`。** 只建议在本机或内网使用；要放到公网，请在前面加一层反向代理并加上鉴权。
 - 数据库（`data/smtm.db`）同样在 `.gitignore` 里。
 - 文章标题/摘要来自第三方 RSS，在网页和 RSS 输出里都经过转义，不会造成 HTML 注入。
+- **配图是原站外链**：页面用 `<img>` 直接引用第三方图片地址，浏览器会把 Referer 发给图片站。
+  介意的话在 `config/default_sources.yaml` 里加 `?` 覆盖，或用反向代理缓存图片。
 
 ---
 
@@ -218,7 +242,7 @@ ruff check . && mypy && pytest --cov=app
 | 新增/停用信源 | `config/default_sources.yaml` |
 | 换模型 | `.env` 的 `LLM_MODEL` |
 | 改调度 | `config/settings.yaml` |
-| 改提示词 | `config/default_prompts.yaml` |
+| 改提示词（含速览写法） | `config/default_prompts.yaml` |
 | 邮件推送 | 新增 `app/notify/email.py`，在 `app/scheduler.py` 挂任务 |
 | 事件聚类 | 新增 `app/ai/cluster.py`，在 `process_pending` 之后调用 |
 | MCP 接口 | 新增 `app/web/mcp.py` |
@@ -234,13 +258,14 @@ app/
   db.py            连接、建表、信源同步
   models.py        Article / Source / DailyReport
   schemas.py       接口出参
-  fetcher/         rss.py 抓取 · dedup.py 去重 · pipeline.py 主流程与过滤
+  fetcher/         rss.py 抓取 · dedup.py 去重 · pipeline.py 主流程、过滤与配图抽取
   ai/              client.py 纯 HTTP 客户端 · prompts.py · processor.py 处理与降级
   report/          generator.py 日报生成与时间窗口
-  web/             routes.py 页面 · api.py JSON · rss.py 订阅
+  web/             routes.py 页面（热点流/单篇速览/归档）· api.py JSON · rss.py 订阅
   utils/           logger.py · text.py
 config/            默认信源 / 分类 / 提示词 / 调度
 tests/             test_config · test_fetcher · test_ai · test_report · test_api
+                    test_media（配图抽取）· test_migration（老库补列）
 scripts/           init_check.py 启动自检
 docs/              样例日报（Markdown / HTML）
 ```

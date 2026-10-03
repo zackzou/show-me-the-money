@@ -8,7 +8,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
-from app.ai.prompts import render_relevance_prompt, render_summary_prompt, render_tag_prompt
+from app.ai.prompts import (
+    render_digest_prompt,
+    render_relevance_prompt,
+    render_summary_prompt,
+    render_tag_prompt,
+)
 from app.config import Settings
 from app.models import Article
 from app.utils.logger import get_logger
@@ -31,6 +36,11 @@ def _fallback_summary(article: Article, chars: int) -> str:
     return truncate(body, chars)
 
 
+def _fallback_digest(article: Article, chars: int) -> str:
+    """LLM 不可用时的速览：直接取正文开头，好歹让页内能读。"""
+    return truncate(strip_html(article.content) or article.title, chars)
+
+
 def process_article(session: Session, article: Article, client: LLMClient, settings: Settings) -> str:
     """处理单篇文章，返回最终 status（processed / failed）。"""
     topic = settings.research_topic
@@ -41,20 +51,33 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
         if not _is_affirmative(answer):
             article.relevance = 0
             article.summary = None
+            article.digest = None
             article.tags = None
             article.status = STATUS_PROCESSED
             return STATUS_PROCESSED
 
         article.relevance = 1
         summary = client.chat(render_summary_prompt(settings.prompts, topic, article.title, excerpt))
-        tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.summary = truncate(summary, 500)
+
+        # 速览：让读者在页内读完，不用跳原站。生成失败不影响主流程。
+        digest_prompt = render_digest_prompt(settings.prompts, article.title, summary, excerpt)
+        if digest_prompt:
+            try:
+                article.digest = truncate(client.chat(digest_prompt), 400)
+            except LLMError as exc:
+                article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
+                log.warning("速览生成失败，已降级：%s（%s）", article.title[:60], exc)
+
+        tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
         article.status = STATUS_PROCESSED
         return STATUS_PROCESSED
     except LLMError as exc:
         chars = settings.prompts.fallback_summary_chars
         article.summary = _fallback_summary(article, chars)
+        if article.digest is None:
+            article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
         article.tags = None
         if article.relevance is None:
             article.relevance = 1  # 相关度未知时先算相关，避免漏掉当天内容

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -15,12 +16,17 @@ from app.fetcher.dedup import is_duplicate
 from app.fetcher.rss import fetch_feed
 from app.models import Article, Source
 from app.utils.logger import get_logger
-from app.utils.text import now_local, strip_html, truncate, unescape_text
+from app.utils.text import extract_images, now_local, strip_html, truncate, unescape_text
 
 log = get_logger(__name__)
 
 MAX_CONTENT_CHARS = 20_000
 Fetcher = Callable[..., list[dict[str, Any]]]
+
+
+def _store_images(urls: list[str]) -> str | None:
+    """图片地址以 JSON 数组存进 image_urls。"""
+    return json.dumps(urls, ensure_ascii=False) if urls else None
 
 
 def _enabled_sources(session: Session) -> list[Source]:
@@ -140,13 +146,17 @@ def run_fetch_pipeline(
                 # 只该丢这一条，不该把整批回滚掉。
                 try:
                     with session.begin_nested():
+                        raw_html = str(item.get("content") or "")
                         session.add(
                             Article(
                                 source_id=source.id,
                                 title=unescape_text(title)[:500],
                                 link=link[:1000],
-                                content=truncate(strip_html(str(item.get("content") or "")), MAX_CONTENT_CHARS),
+                                content=truncate(strip_html(raw_html), MAX_CONTENT_CHARS),
                                 published_at=item.get("published_at") or now,
+                                # 页内预览用的配图：RSS 正文里通常已经带了 <img>，
+                                # 以前入库时被 strip_html 一起丢掉了
+                                image_urls=_store_images(extract_images(raw_html, base_url=link)),
                                 status="pending",
                                 created_at=now,
                             )

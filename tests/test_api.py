@@ -58,7 +58,7 @@ def test_html_pages(client, settings: Settings, seeded_db):
     home = client.get("/")
     assert home.status_code == 200
     assert "Show Me the Money" in home.text
-    assert "还没有日报" in home.text
+    assert "这一天还没有筛选出相关报道" in home.text
 
     assert client.get("/daily/1999-01-01").status_code == 404
     assert client.get("/archive").status_code == 200
@@ -122,6 +122,7 @@ def test_invalid_date_does_not_return_500(client, seeded_db):
     assert client.get("/api/articles?date=2026-13-45").status_code == 400
     assert client.get("/daily/2026-13-45").status_code == 404
     assert client.get("/rss?date=2026-13-45").status_code == 404
+    assert client.get("/?page=999").status_code == 200  # 越界页码夹回最后一页
 
 
 def test_summary_markdown_stripped_in_page_and_rss(client, seeded_db):
@@ -133,3 +134,68 @@ def test_summary_markdown_stripped_in_page_and_rss(client, seeded_db):
 
     assert "**结论：**" not in client.get(f"/daily/{TODAY}").text
     assert "**" not in client.get("/rss").text
+
+
+def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
+    """单篇页内预览：速览 + 配图 + 正文，不用跳原站。"""
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="页内速览测试",
+            link="https://example.com/story-1",
+            summary="一句摘要",
+            digest="10月3日，某公司发布了 X，带来 Y 的变化。这是导语式速览。",
+            image_urls='["https://cdn.example.com/1.jpg", "https://cdn.example.com/2.jpg"]',
+        )
+        article_id = article.id
+
+    page = client.get(f"/story/{article_id}")
+    assert page.status_code == 200
+    assert "页内速览测试" in page.text
+    assert "这是导语式速览" in page.text          # 速览在页内可见
+    assert "https://cdn.example.com/1.jpg" in page.text  # 配图内嵌
+    assert "阅读原文" in page.text                 # 原站链接仍保留
+    assert "data-shot" in page.text               # 点击页内放大，不跳原站
+
+
+def test_story_page_404_for_missing(client):
+    assert client.get("/story/999999").status_code == 404
+
+
+def test_home_page_paginates_and_has_theme_toggle(client, seeded_db):
+    """首页分页 + 深浅色切换 + 空态文案。"""
+    with session_scope() as session:
+        for i in range(25):
+            make_article(session, title=f"分页文章{i}", link=f"https://example.com/p{i}")
+
+    # 时间倒序（同秒则按 id 倒序），每页 20 条
+    first = client.get("/")
+    assert first.status_code == 200
+    assert "分页文章24" in first.text
+    assert "分页文章4" not in first.text   # 第 1 页 = 24..5
+    assert "下一页" in first.text
+
+    second = client.get("/?page=2")
+    assert "分页文章4" in second.text
+    assert "分页文章24" not in second.text
+
+    # 越界页码夹回最后一页，不报错
+    assert client.get("/?page=999").status_code == 200
+    assert client.get("/?page=0").status_code in (200, 422)
+
+
+def test_home_shows_images_grid(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        make_article(session, title="带图文章", link="https://example.com/img",
+                     digest="速览内容", image_urls='["https://cdn.example.com/x.jpg"]')
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert 'class="shots one"' in text              # 单图走大图布局
+    assert "cdn.example.com/x.jpg" in text
+
+
+def test_dark_mode_toggle_present(client):
+    assert "smtm-theme" in client.get("/").text
+    assert 'classList.toggle("dark")' in client.get("/").text

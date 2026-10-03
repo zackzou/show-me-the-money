@@ -1,16 +1,29 @@
 {% extends "base.html" %}
 {% block content %}
-  <h1 class="text-2xl font-bold">历史日报</h1>
+
+<div class="lead">
+  <div class="kicker">ARCHIVE</div>
+  <h1>历史日报</h1>
+  <p class="meta">共 <b>{{ reports|length }}</b> 份，按日期倒序</p>
+</div>
+
+<div class="list">
   {% if reports %}
-    <ul class="mt-6 divide-y divide-slate-200 bg-white rounded-xl border border-slate-200">
-      {% for item in reports %}
-        <li class="px-5 py-4 flex items-center justify-between">
-          <a href="/daily/{{ item.date }}" class="font-medium hover:text-blue-600">{{ item.date }}</a>
-          <span class="text-sm text-slate-500">{{ item.article_count }} 篇</span>
-        </li>
-      {% endfor %}
-    </ul>
+    {% for item in reports %}
+      <article class="item" style="padding:15px 20px">
+        <div style="display:flex;align-items:center;gap:14px">
+          <a href="/daily/{{ item.date }}" style="font-weight:650;font-size:16px">{{ item.date }}</a>
+          <span class="meta" style="font-size:13px">{{ item.article_count }} 篇</span>
+          <a class="more" href="/daily/{{ item.date }}">查看 →</a>
+        </div>
+      </article>
+    {% endfor %}
   {% else %}
-    <p class="mt-4 text-sm text-slate-500">还没有历史日报。</p>
+    <div class="empty">
+      <p>还没有历史日报。</p>
+      <p style="font-size:12.5px">系统正在按调度抓取与处理，出第一份日报后这里会自动更新。</p>
+    </div>
   {% endif %}
+</div>
+
 {% endblock %}

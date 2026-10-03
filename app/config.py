@@ -60,9 +60,11 @@ class SourceConfig(BaseModel):
 
 class PromptsConfig(BaseModel):
     summary_prompt: str
+    digest_prompt: str = ""
     tag_prompt: str
     relevance_prompt: str
     fallback_summary_chars: int = 200
+    fallback_digest_chars: int = 180
 
 
 class StorageSettings(BaseModel):

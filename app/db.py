@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import SourceConfig
 from app.models import Base, Source
+from app.utils.logger import get_logger
 from app.utils.text import now_local
 
 _engine: Engine | None = None
 _session_factory: sessionmaker[Session] | None = None
 _db_file: Path | None = None
+
+log = get_logger(__name__)
 
 
 def _apply_sqlite_pragmas(engine: Engine) -> None:
@@ -31,9 +34,37 @@ def _apply_sqlite_pragmas(engine: Engine) -> None:
 # "database is locked"，让整个抓取任务失败。放到 30 秒，让它排队而不是报错。
 SQLITE_BUSY_TIMEOUT_SECONDS = 30
 
+# 新增列的轻量迁移表：列名 -> DDL 片段。
+# Base.metadata.create_all() 只建新表，**不会给已存在的表加列**，
+# 所以老用户升级后第一次启动会直接报 "no such column"。这里幂等补齐。
+_COLUMN_MIGRATIONS: dict[str, str] = {
+    "articles.digest": "TEXT",
+    "articles.image_urls": "TEXT",
+}
+
+
+def _migrate_columns(engine: Engine) -> list[str]:
+    """给已存在的表补齐新列，返回实际补上的列名。"""
+    from sqlalchemy import inspect
+    from sqlalchemy import text as sql_text
+
+    inspector = inspect(engine)
+    added: list[str] = []
+    with engine.begin() as conn:
+        existing_tables = set(inspector.get_table_names())
+        for qualified, ddl in _COLUMN_MIGRATIONS.items():
+            table, column = qualified.split(".", 1)
+            if table not in existing_tables:
+                continue
+            if column in {row["name"] for row in inspector.get_columns(table)}:
+                continue
+            conn.execute(sql_text(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}"))
+            added.append(qualified)
+    return added
+
 
 def init_db(db_file: Path | str) -> Engine:
-    """建库建表，返回 Engine（同时设置为进程默认连接）。"""
+    """建库建表 + 补齐新列，返回 Engine（同时设置为进程默认连接）。"""
     global _engine, _session_factory, _db_file
     path = Path(db_file)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -44,6 +75,9 @@ def init_db(db_file: Path | str) -> Engine:
     )
     _apply_sqlite_pragmas(engine)
     Base.metadata.create_all(engine)
+    added = _migrate_columns(engine)
+    if added:
+        log.info("数据库已补齐新列：%s", "、".join(added))
     _engine = engine
     _session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     _db_file = path

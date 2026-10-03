@@ -38,6 +38,10 @@ class Article(Base):
     content: Mapped[str | None] = mapped_column(Text, nullable=True)
     published_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 速览：两三句导语式概述，让读者在页内就能读完，不用跳原站
+    digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
+    image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)
     relevance: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")

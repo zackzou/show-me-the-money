@@ -33,6 +33,20 @@ def render_tag_prompt(prompts: PromptsConfig, title: str, summary: str) -> str:
     return _fill(prompts.tag_prompt, {"title": title, "summary": summary})
 
 
+def render_digest_prompt(prompts: PromptsConfig, title: str, summary: str, content: str) -> str:
+    """速览提示词。模板为空（老配置）时返回空串，调用方据此跳过这一步。"""
+    if not prompts.digest_prompt.strip():
+        return ""
+    return _fill(
+        prompts.digest_prompt,
+        {
+            "title": title,
+            "summary": summary or "（无）",
+            "content": truncate(content, MAX_ARTICLE_CHARS) or "（无正文）",
+        },
+    )
+
+
 def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
     return _fill(
         prompts.relevance_prompt,

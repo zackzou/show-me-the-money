@@ -1,25 +1,141 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" class="h-full">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} · Show Me the Money</title>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <meta name="description" content="按调研方向自动筛选的行业热点资讯">
+  <script>
+    // 深浅色：跟随系统，可手动切换并记住
+    (function () {
+      var saved = localStorage.getItem("smtm-theme");
+      var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
+      if (saved === "dark" || (!saved && prefersDark)) document.documentElement.classList.add("dark");
+    })();
+  </script>
+  <style>
+    :root {
+      --bg:#f6f7f9; --surface:#ffffff; --line:#e5e7eb; --line-soft:#f0f1f3;
+      --text:#111827; --muted:#6b7280; --faint:#9ca3af;
+      --accent:#2563eb; --accent-soft:#eff6ff; --chip:#f3f4f6; --chip-text:#4b5563;
+      --shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
+    }
+    .dark {
+      --bg:#0b0d10; --surface:#14171c; --line:#242a33; --line-soft:#1c2027;
+      --text:#e8eaed; --muted:#9aa3af; --faint:#6b7280;
+      --accent:#60a5fa; --accent-soft:#16233a; --chip:#1e232b; --chip-text:#c3c9d1;
+      --shadow:none;
+    }
+    * { box-sizing:border-box; }
+    html { background:var(--bg); }
+    body { margin:0; background:var(--bg); color:var(--text);
+           font-family:"PingFang SC","Hiragino Sans GB","Microsoft YaHei",-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+           -webkit-font-smoothing:antialiased; }
+    a { color:inherit; text-decoration:none; }
+    .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
+    .hd { position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent);
+          backdrop-filter:saturate(1.6) blur(10px); border-bottom:1px solid var(--line); }
+    .hd-in { display:flex; align-items:center; gap:22px; height:56px; }
+    .brand { font-weight:700; font-size:16px; letter-spacing:-.2px; }
+    .brand em { font-style:normal; color:var(--accent); }
+    .nav { display:flex; gap:18px; font-size:13.5px; color:var(--muted); }
+    .nav a:hover { color:var(--text); }
+    .nav .on { color:var(--text); font-weight:600; }
+    .sp { margin-left:auto; display:flex; align-items:center; gap:8px; }
+    .ico { width:32px; height:32px; display:grid; place-items:center; border:1px solid var(--line);
+           border-radius:8px; background:var(--surface); color:var(--muted); cursor:pointer; font-size:14px; }
+    .ico:hover { color:var(--text); }
+    .topics { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:16px 0 4px; font-size:12.5px; color:var(--faint); }
+    .chip { background:var(--chip); color:var(--chip-text); border-radius:999px; padding:4px 11px; font-size:12.5px; }
+    .lead { padding:14px 0 4px; }
+    .kicker { font-size:11.5px; letter-spacing:.14em; color:var(--accent); font-weight:700; }
+    h1 { font-size:30px; line-height:1.25; margin:8px 0 6px; letter-spacing:-.6px; }
+    .meta { font-size:13px; color:var(--muted); }
+    .meta b { color:var(--text); font-weight:600; }
+    .list { padding:10px 0 40px; }
+    .item { background:var(--surface); border:1px solid var(--line); border-radius:14px;
+            padding:18px 20px; margin-top:14px; box-shadow:var(--shadow); }
+    .item:hover { border-color:var(--faint); }
+    .t { font-size:17.5px; font-weight:650; line-height:1.45; letter-spacing:-.2px; }
+    .t:hover { color:var(--accent); }
+    .d { margin-top:7px; font-size:14px; line-height:1.78; color:var(--muted); }
+    .f { margin-top:12px; display:flex; flex-wrap:wrap; align-items:center; gap:8px;
+         font-size:12px; color:var(--faint); }
+    .tag { background:var(--accent-soft); color:var(--accent); border-radius:5px; padding:2px 8px; }
+    .src { color:var(--muted); font-weight:600; }
+    .warn { background:#fef3c7; color:#92400e; border-radius:5px; padding:2px 8px; font-size:11.5px; }
+    .more { margin-left:auto; color:var(--accent); font-size:12.5px; }
+    .pager { display:flex; justify-content:center; align-items:center; gap:8px; padding:26px 0 10px; font-size:13px; }
+    .pager a, .pager span { border:1px solid var(--line); background:var(--surface); border-radius:8px;
+                            padding:6px 13px; color:var(--muted); }
+    .pager .cur { border-color:var(--accent); color:var(--accent); font-weight:600; }
+    .empty { text-align:center; color:var(--faint); padding:70px 0; border:1px dashed var(--line); border-radius:14px; }
+    .ft { border-top:1px solid var(--line); color:var(--faint); font-size:12px; padding:22px 0 34px; }
+
+    /* 配图：一张大图 / 多张网格 —— 参考 MediaGallery 的处理方式 */
+    .shots { margin-top:14px; display:grid; gap:6px; }
+    .shots.one { grid-template-columns:1fr; }
+    .shots.two, .shots.four { grid-template-columns:1fr 1fr; }
+    .shots.many { grid-template-columns:repeat(3,1fr); }
+    .shots img { width:100%; aspect-ratio:16/10; object-fit:cover; border-radius:9px; background:var(--line-soft);
+                 cursor:zoom-in; display:block; border:1px solid var(--line); }
+    .shots.one img { aspect-ratio:auto; max-height:400px; object-fit:contain; background:var(--chip); }
+    @media (max-width:640px) { .shots.many { grid-template-columns:1fr 1fr; } h1 { font-size:24px; } }
+
+    /* 页内放大，不跳原站 */
+    .lb { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none; z-index:100;
+          align-items:center; justify-content:center; padding:26px; }
+    .lb.on { display:flex; }
+    .lb img { max-width:100%; max-height:100%; border-radius:8px; }
+    .lb-x { position:absolute; top:14px; right:18px; color:#fff; font-size:26px; cursor:pointer; line-height:1; }
+    .lb-n { position:absolute; bottom:16px; color:#ddd; font-size:13px; }
+  </style>
 </head>
-<body class="bg-slate-50 text-slate-800">
-  <header class="bg-white border-b border-slate-200">
-    <nav class="max-w-3xl mx-auto px-4 py-3 flex items-center gap-6">
-      <a href="/" class="font-bold text-lg">Show Me the Money</a>
-      <a href="/archive" class="text-sm text-slate-600 hover:text-slate-900">历史日报</a>
-      <a href="/rss" class="text-sm text-slate-600 hover:text-slate-900">RSS</a>
-      <a href="/api/health" class="text-sm text-slate-600 hover:text-slate-900 ml-auto">状态</a>
+<body class="h-full">
+<header class="hd">
+  <div class="wrap hd-in">
+    <a href="/" class="brand">Show Me the <em>Money</em></a>
+    <nav class="nav">
+      <a href="/" class="{{ 'on' if title == '热点资讯' else '' }}">热点资讯</a>
+      <a href="/archive" class="{{ 'on' if title == '历史日报' else '' }}">历史日报</a>
+      <a href="/rss">RSS</a>
     </nav>
-  </header>
-  <main class="max-w-3xl mx-auto px-4 py-8">
-    {% block content %}{% endblock %}
-  </main>
-  <footer class="max-w-3xl mx-auto px-4 pb-10 text-xs text-slate-400">
-    由 Show Me the Money 自动生成 · 每天 08:00 定稿前一日日报 · 当天每 2 小时滚动刷新
-  </footer>
-</body>
-</html>
+    <div class="sp">
+      <button class="ico" id="theme" title="切换深浅色">◐</button>
+      <a class="ico" href="/api/health" title="状态">⋯</a>
+    </div>
+  </div>
+</header>
+
+<main class="wrap">
+{% block content %}{% endblock %}
+</main>
+
+<footer class="wrap ft">
+  由 Show Me the Money 自动生成 · 每天 08:00 定稿前一日日报 · 当天每 2 小时滚动刷新
+</footer>
+
+<div class="lb" id="lb">
+  <span class="lb-x" id="lb-x">×</span>
+  <img id="lb-img" alt="">
+  <span class="lb-n" id="lb-n"></span>
+</div>
+<script>
+  // 深浅色切换
+  document.getElementById("theme").onclick = function () {
+    var dark = document.documentElement.classList.toggle("dark");
+    localStorage.setItem("smtm-theme", dark ? "dark" : "light");
+  };
+  // 图片页内放大（替代「跳原站看图」）
+  var lb = document.getElementById("lb"), lbImg = document.getElementById("lb-img"), lbN = document.getElementById("lb-n");
+  function show(src, n, total) { lbImg.src = src; lbN.textContent = total > 1 ? (n + 1) + " / " + total : ""; lb.classList.add("on"); }
+  function hide() { lb.classList.remove("on"); lbImg.src = ""; }
+  document.addEventListener("click", function (e) {
+    var img = e.target.closest("[data-shot]");
+    if (img) { show(img.getAttribute("data-shot"), +img.getAttribute("data-i") || 0, +img.getAttribute("data-n") || 1); return; }
+    if (e.target.id === "lb" || e.target.id === "lb-x") hide();
+  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });
+</script>
+{% block extra %}{% endblock %}
+</body></html>

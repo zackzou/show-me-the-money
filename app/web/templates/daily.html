@@ -1,11 +1,25 @@
 {% extends "base.html" %}
+{% from "_articles.html" import card %}
 {% block content %}
-  {% if report %}
-    <h1 class="text-2xl font-bold tracking-tight">日报 · {{ report.date }}</h1>
-    <p class="mt-2 text-sm text-slate-500">共 {{ report.article_count }} 篇与调研方向直接相关的报道</p>
-    {% include "_articles.html" %}
+
+<div class="lead">
+  <div class="kicker">DAILY DIGEST</div>
+  <h1>日报 · {{ date }}</h1>
+  <p class="meta">
+    {% if report %}共 <b>{{ report.article_count }}</b> 篇与调研方向直接相关的报道
+    {% else %}这一天没有生成日报{% endif %}
+  </p>
+</div>
+
+<div class="list">
+  {% if articles %}
+    {% for item in articles %}{{ card(item) }}{% endfor %}
   {% else %}
-    <h1 class="text-2xl font-bold">{{ date }} 没有日报</h1>
-    <p class="mt-2 text-sm text-slate-500">这一天还没有生成日报，去 <a class="text-blue-600" href="/archive">历史日报</a> 看看其它日期。</p>
+    <div class="empty">
+      <p>这一天还没有筛选出相关报道。</p>
+      <p style="font-size:12.5px">去 <a href="/archive" style="color:var(--accent)">历史日报</a> 看看其它日期。</p>
+    </div>
   {% endif %}
+</div>
+
 {% endblock %}

@@ -15,9 +15,20 @@ class ArticleOut(BaseModel):
     link: str
     published_at: datetime | None = None
     summary: str | None = None
+    digest: str | None = None
     tags: str | None = None
     relevance: int | None = None
     status: str
+
+    model_config = {"from_attributes": True}
+
+
+class ArticleDetailOut(ArticleOut):
+    """单篇页内预览用的详情：速览 + 正文纯文本 + 配图。"""
+
+    content: str | None = None
+    image_urls: list[str] = []
+    source_name: str = "未知来源"
 
     model_config = {"from_attributes": True}
 

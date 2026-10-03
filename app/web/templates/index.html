@@ -1,22 +1,45 @@
 {% extends "base.html" %}
+{% from "_articles.html" import card %}
 {% block content %}
-  {% if report %}
-    <p class="text-xs tracking-widest text-blue-600 font-semibold">LATEST REPORT</p>
-    <h1 class="mt-2 text-3xl font-bold tracking-tight">日报 · {{ report.date }}</h1>
-    <p class="mt-2 text-sm text-slate-500">
-      共 {{ report.article_count }} 篇与调研方向直接相关的报道 · 每 2 小时自动抓取与筛选并刷新当天，每天 08:00 定稿前一日
-    </p>
-    {% if topics %}
-      <div class="mt-4 flex flex-wrap items-center gap-2">
-        <span class="text-xs text-slate-400">调研方向</span>
-        {% for t in topics %}
-          <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-3 py-1">{{ t }}</span>
-        {% endfor %}
-      </div>
-    {% endif %}
-    {% include "_articles.html" %}
+
+{% if topics %}
+  <div class="topics">
+    <span>调研方向</span>
+    {% for t in topics %}<span class="chip">{{ t }}</span>{% endfor %}
+  </div>
+{% endif %}
+
+<div class="lead">
+  <div class="kicker">HOT TOPICS</div>
+  <h1>热点资讯</h1>
+  <p class="meta">
+    与调研方向直接相关的 <b>{{ total }}</b> 条报道
+    {% if date_str %}· {{ date_str }}{% endif %}
+    · 每 2 小时自动抓取筛选，当天实时更新
+  </p>
+</div>
+
+<div class="list">
+  {% if articles %}
+    {% for item in articles %}{{ card(item) }}{% endfor %}
   {% else %}
-    <h1 class="text-2xl font-bold">还没有日报</h1>
-    <p class="mt-2 text-sm text-slate-500">系统正在按调度抓取与处理，日报生成后这里会自动更新。</p>
+    <div class="empty">
+      <p>这一天还没有筛选出相关报道。</p>
+      <p style="font-size:12.5px">系统正在按调度抓取与处理，稍后自动出现。</p>
+    </div>
   {% endif %}
+</div>
+
+{% if pages > 1 %}
+  <nav class="pager">
+    {% if page > 1 %}<a href="/?page={{ page - 1 }}">上一页</a>{% else %}<span>上一页</span>{% endif %}
+    {% for p in range(1, pages + 1) %}
+      {% if p == page %}<span class="cur">{{ p }}</span>
+      {% elif p <= 3 or p > pages - 2 or (p >= page - 1 and p <= page + 1) %}<a href="/?page={{ p }}">{{ p }}</a>
+      {% elif p == 4 or p == pages - 2 %}<span>…</span>{% endif %}
+    {% endfor %}
+    {% if page < pages %}<a href="/?page={{ page + 1 }}">下一页</a>{% else %}<span>下一页</span>{% endif %}
+  </nav>
+{% endif %}
+
 {% endblock %}

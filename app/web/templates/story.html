@@ -1,0 +1,48 @@
+{% extends "base.html" %}
+{% from "_articles.html" import shots %}
+{% block content %}
+
+{% if not article %}
+  <div class="empty" style="margin-top:40px">
+    <p>这里没有内容</p>
+    <p style="font-size:12.5px"><a href="/" style="color:var(--accent)">回到热点资讯</a></p>
+  </div>
+{% else %}
+<div class="lead" style="padding-top:26px">
+  <a href="/" class="kicker" style="display:inline-block">← 热点资讯</a>
+  <h1 style="font-size:26px">{{ article.title }}</h1>
+  <div class="f" style="margin-top:10px">
+    <span class="src">{{ article.source }}</span>
+    {% if article.time %}<span>·</span><span>{{ article.time }}</span>{% endif %}
+    {% for tag in article.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+    {% if article.degraded %}<span class="warn">降级摘要</span>{% endif %}
+  </div>
+</div>
+
+{{ shots(article) }}
+
+{% if article.digest %}
+  <section class="item" style="margin-top:18px">
+    <div class="kicker">速览</div>
+    <p class="d" style="margin-top:8px;font-size:15px">{{ article.digest }}</p>
+  </section>
+{% endif %}
+
+{% if article.content_text %}
+  <section class="item" style="margin-top:14px">
+    <div class="kicker">正文开头</div>
+    <p class="d" style="margin-top:8px">{{ article.content_text }}</p>
+  </section>
+{% endif %}
+
+<section class="item" style="margin-top:14px">
+  <p style="font-size:13px;color:var(--muted);margin:0">
+    以上内容由大模型根据 RSS 正文生成，可能与原文有出入。
+  </p>
+  <a class="more" style="display:inline-block;margin-top:10px" href="{{ article.link }}" target="_blank" rel="noopener">
+    阅读原文 ↗
+  </a>
+</section>
+{% endif %}
+
+{% endblock %}

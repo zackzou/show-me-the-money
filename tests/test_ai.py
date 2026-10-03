@@ -88,7 +88,7 @@ def test_llm_client_endpoint_normalisation():
 
 
 def test_process_article_relevant(seeded_db, settings: Settings):
-    answers = iter(["yes", "这是摘要", "标签一,标签二"])
+    answers = iter(["yes", "这是摘要", "这是速览：两三句导语", "标签一,标签二"])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
@@ -101,6 +101,7 @@ def test_process_article_relevant(seeded_db, settings: Settings):
             assert status == "processed"
             assert article.relevance == 1
             assert article.summary == "这是摘要"
+            assert article.digest == "这是速览：两三句导语"
             assert article.tags == "标签一,标签二"
     finally:
         client.close()
@@ -144,7 +145,7 @@ def test_process_article_falls_back_on_llm_failure(seeded_db, settings: Settings
 
 
 def test_process_pending_counts(seeded_db, settings: Settings):
-    answers = iter(["yes", "摘要", "A,B", "no", "yes", "摘要2", "C"])
+    answers = iter(["yes", "摘要", "速览1", "A,B", "no", "yes", "摘要2", "速览2", "C"])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
