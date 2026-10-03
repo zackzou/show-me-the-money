@@ -7,9 +7,10 @@
       共 {{ report.article_count }} 篇与调研方向直接相关的报道 · 每 2 小时自动抓取与筛选并刷新当天，每天 08:00 定稿前一日
     </p>
     {% if topics %}
-      <div class="mt-4 flex flex-wrap gap-2">
+      <div class="mt-4 flex flex-wrap items-center gap-2">
+        <span class="text-xs text-slate-400">调研方向</span>
         {% for t in topics %}
-          <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-3 py-1">调研方向：{{ t }}</span>
+          <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-3 py-1">{{ t }}</span>
         {% endfor %}
       </div>
     {% endif %}

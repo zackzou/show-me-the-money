@@ -122,3 +122,14 @@ def test_invalid_date_does_not_return_500(client, seeded_db):
     assert client.get("/api/articles?date=2026-13-45").status_code == 400
     assert client.get("/daily/2026-13-45").status_code == 404
     assert client.get("/rss?date=2026-13-45").status_code == 404
+
+
+def test_summary_markdown_stripped_in_page_and_rss(client, seeded_db):
+    with session_scope() as session:
+        make_article(session, title="Markdown 摘要", link="https://example.com/md2",
+                     summary="**结论：** 重点在这里")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=client.app.state.settings)
+
+    assert "**结论：**" not in client.get(f"/daily/{TODAY}").text
+    assert "**" not in client.get("/rss").text

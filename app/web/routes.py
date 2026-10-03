@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
-from app.utils.text import split_tags
+from app.utils.text import split_tags, strip_markdown
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
@@ -50,7 +50,7 @@ def articles_of_day(session: Session, date_str: str) -> list[dict[str, Any]]:
                 "link": article.link,
                 "source": source_name or "未知来源",
                 "time": article.published_at.strftime("%m-%d %H:%M") if article.published_at else "",
-                "summary": article.summary or "",
+                "summary": strip_markdown(article.summary),
                 "tags": split_tags(article.tags),
                 "degraded": article.status == "failed",
             }

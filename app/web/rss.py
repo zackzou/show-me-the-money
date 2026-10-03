@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 from app.db import get_session
 from app.models import Article, DailyReport
 from app.report.generator import STATUS_REPORTABLE, day_window
-from app.utils.text import LOCAL_TZ, now_local, split_tags
+from app.utils.text import LOCAL_TZ, now_local, split_tags, strip_markdown
 
 rss_router = APIRouter()
 
@@ -79,7 +79,7 @@ def rss(request: Request, date: str | None = None, session: Session = Depends(ge
     for article in articles:
         tags = split_tags(article.tags)
         label = f"{article.title}（{'、'.join(tags) or '无标签'}）"
-        summary = article.summary or ""
+        summary = strip_markdown(article.summary)
         if article.status == "failed":
             summary += "（降级摘要）"
         parts.append(

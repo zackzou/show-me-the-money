@@ -17,7 +17,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.models import Article, DailyReport
 from app.utils.logger import get_logger
-from app.utils.text import now_local, split_tags
+from app.utils.text import now_local, split_tags, strip_markdown
 
 log = get_logger(__name__)
 
@@ -81,7 +81,7 @@ def _report_items(session: Session, date_str: str, *, until: datetime | None = N
             {
                 "title": article.title,
                 "source": source_name,
-                "summary": article.summary or "（无摘要）",
+                "summary": strip_markdown(article.summary) or "（无摘要）",
                 "tags": "、".join(split_tags(article.tags)) or "（无标签）",
                 "link": article.link,
                 "published_at": article.published_at.strftime("%Y-%m-%d %H:%M") if article.published_at else "",

@@ -223,3 +223,59 @@ def test_redact_masks_secrets():
     assert "***" in redact("key=sk-abcdef123456 rest")
     assert redact("Authorization: Bearer tok_1234567890") == "Authorization: ***"
     assert redact("正常报错信息") == "正常报错信息"
+
+
+def test_chat_parses_sse_response():
+    """有些网关（实测 9router）即使不声明 stream 也回 SSE，必须能解析。"""
+    import json as _json
+
+    import httpx
+
+    from app.ai.client import LLMClient, parse_sse
+
+    chunks = [
+        {"choices": [{"delta": {"content": "yes"}}]},
+        {"choices": [{"delta": {"content": "，相关"}}]},
+    ]
+    body = "".join(
+        f"event: message\ndata: {_json.dumps(c, ensure_ascii=False)}\n\n" for c in chunks
+    ) + "data: [DONE]\n\n"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert _json.loads(request.content)["stream"] is False  # 必须显式声明非流式
+        return httpx.Response(200, text=body, headers={"content-type": "text/event-stream"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        llm = LLMClient("http://gw/v1", "k", "m", client=client)
+        assert llm.chat("判断") == "yes，相关"
+    assert parse_sse(body) == "yes，相关"
+
+
+def test_chat_reads_responses_api_shape():
+    """Responses API 风格的 output_text 也能取到。"""
+    import httpx
+
+    from app.ai.client import LLMClient
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"output_text": "no"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        assert LLMClient("http://gw/v1", "k", "m", client=client).chat("判断") == "no"
+
+
+def test_chat_format_error_is_not_retried():
+    """返回 HTML 错误页这类问题重试没有意义，不能白花钱。"""
+    import httpx
+
+    from app.ai.client import LLMClient, LLMFormatError
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, text="<html>login required</html>", headers={"content-type": "text/html"})
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client, pytest.raises(LLMFormatError):
+        LLMClient("http://gw/v1", "k", "m", client=client, retries=2).chat("判断")
+    assert calls["n"] == 1

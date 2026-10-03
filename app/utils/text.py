@@ -15,6 +15,8 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _WS_RE = re.compile(r"\s+")
 _NORMALIZE_RE = re.compile(r"[^\w\u4e00-\u9fff]+")
 _TAG_SPLIT_RE = re.compile(r"[,，、;；]")
+_MD_BOLD_RE = re.compile(r"(\*\*|__)")
+_MD_LINE_RE = re.compile(r"(?m)^\s*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s*)")
 
 
 def now_local() -> datetime:
@@ -67,3 +69,16 @@ def split_tags(raw: str | None, limit: int = 5) -> list[str]:
     if not raw:
         return []
     return [part.strip() for part in _TAG_SPLIT_RE.split(raw) if part.strip()][:limit]
+
+
+def strip_markdown(text: str | None) -> str:
+    """去掉模型偶尔带出来的 Markdown 标记。
+
+    摘要是在网页/卡片里直接展示的纯文本，实测模型经常会写成
+    ``**结论：** ……`` 或 ``- 要点``，原样显示就是一屏星号。
+    """
+    if not text:
+        return ""
+    plain = _MD_LINE_RE.sub("", text)
+    plain = _MD_BOLD_RE.sub("", plain)
+    return _WS_RE.sub(" ", plain).strip()

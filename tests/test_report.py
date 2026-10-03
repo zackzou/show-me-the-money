@@ -275,3 +275,17 @@ def test_backfill_skips_days_without_articles(seeded_db, settings: Settings):
     assert filled == [(NOW - timedelta(days=2)).strftime("%Y-%m-%d")]
     with session_scope() as session:
         assert session.query(DailyReport).count() == 1
+
+
+def test_markdown_markers_stripped_from_display(seeded_db, settings: Settings):
+    """模型偶尔会吐 **结论：** 这种 Markdown，展示层要抹掉星号。"""
+    with session_scope() as session:
+        _seed(session, title="带 Markdown 的摘要", link="https://example.com/md",
+              summary="**结论：** 这是一个 **重要** 的变化。\n- 要点一\n- 要点二")
+
+    with session_scope() as session:
+        result = generate_daily_report(TODAY, session=session, settings=settings)
+
+    assert "**" not in result["content_md"]
+    assert "**" not in result["content_html"]
+    assert "结论： 这是一个 重要 的变化" in result["content_md"]
