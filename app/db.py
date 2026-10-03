@@ -40,6 +40,9 @@ SQLITE_BUSY_TIMEOUT_SECONDS = 30
 _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.digest": "TEXT",
     "articles.image_urls": "TEXT",
+    "articles.content_full": "TEXT",
+    "articles.reason": "TEXT",
+    "articles.score": "INTEGER",
 }
 
 

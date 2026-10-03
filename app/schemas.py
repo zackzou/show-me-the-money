@@ -16,6 +16,8 @@ class ArticleOut(BaseModel):
     published_at: datetime | None = None
     summary: str | None = None
     digest: str | None = None
+    reason: str | None = None
+    score: int | None = None
     tags: str | None = None
     relevance: int | None = None
     status: str
@@ -53,6 +55,7 @@ class HealthOut(BaseModel):
     sources: int
     articles: int
     with_images: int = 0
+    with_full_text: int = 0
     reports: int
     research_topics: list[str]
 

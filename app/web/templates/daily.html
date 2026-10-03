@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_articles.html" import card %}
+{% from "_articles.html" import timeline %}
 {% block content %}
 
 <div class="lead">
@@ -11,15 +11,6 @@
   </p>
 </div>
 
-<div class="list">
-  {% if articles %}
-    {% for item in articles %}{{ card(item) }}{% endfor %}
-  {% else %}
-    <div class="empty">
-      <p>这一天还没有筛选出相关报道。</p>
-      <p style="font-size:12.5px">去 <a href="/archive" style="color:var(--accent)">历史日报</a> 看看其它日期。</p>
-    </div>
-  {% endif %}
-</div>
+{{ timeline(groups, '这一天还没有筛选出相关报道。去历史日报看看其它日期。') }}
 
 {% endblock %}

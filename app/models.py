@@ -40,6 +40,12 @@ class Article(Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 速览：两三句导语式概述，让读者在页内就能读完，不用跳原站
     digest: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 正文全文：从文章页抓回来的纯文本，详情页直接展示（页内读完）
+    content_full: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 推荐理由：为什么值得看这条
+    reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 相关度评分 0~100（由相关度判断顺带产出，不额外消耗调用）
+    score: Mapped[int | None] = mapped_column(Integer, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)

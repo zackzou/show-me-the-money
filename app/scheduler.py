@@ -14,6 +14,7 @@ from app.ai.client import LLMClient
 from app.ai.processor import process_pending
 from app.config import Settings
 from app.db import session_scope
+from app.fetcher.content import backfill_content
 from app.fetcher.images import backfill_images
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
@@ -67,6 +68,19 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
     except Exception as exc:  # 日报失败不该把处理统计一起丢掉
         log.warning("今日日报刷新失败：%s", exc)
     return stats
+
+
+def run_content_job(settings: Settings) -> dict[str, Any]:
+    """抓取正文全文 —— 必须跑在处理之前，速览和推荐理由的质量都靠它。"""
+    if not settings.content.enabled:
+        return {"candidates": 0, "filled": 0, "short": 0, "failed": 0}
+    with session_scope() as session:
+        return backfill_content(
+            session,
+            limit=settings.content.batch_size,
+            timeout=settings.content.timeout_seconds,
+            min_chars=settings.content.min_chars,
+        )
 
 
 def run_media_job(settings: Settings) -> dict[str, Any]:
@@ -209,6 +223,9 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
     """按配置装配四个任务（不启动）。"""
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
     scheduler.add_job(run_fetch_job, _fetch_trigger(settings), args=[settings], id="fetch_job", replace_existing=True)
+    scheduler.add_job(
+        run_content_job, _fetch_trigger(settings), args=[settings], id="content_job", replace_existing=True
+    )
     scheduler.add_job(
         run_process_job, _process_trigger(settings), args=[settings], id="process_job", replace_existing=True
     )

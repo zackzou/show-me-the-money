@@ -6,6 +6,7 @@ from app.config import Settings
 from app.db import session_scope
 from app.report.generator import generate_daily_report
 from app.utils.text import now_local
+from app.web.routes import PAGE_SIZE
 
 from .conftest import make_article
 
@@ -137,7 +138,7 @@ def test_summary_markdown_stripped_in_page_and_rss(client, seeded_db):
 
 
 def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
-    """单篇页内预览：速览 + 配图 + 正文，不用跳原站。"""
+    """单篇页：左栏来源信息 + 右栏 AI 导读 + 完整正文，原站链接仍保留。"""
     with session_scope() as session:
         article = make_article(
             session,
@@ -145,6 +146,8 @@ def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
             link="https://example.com/story-1",
             summary="一句摘要",
             digest="10月3日，某公司发布了 X，带来 Y 的变化。这是导语式速览。",
+            reason="披露了具体数字，读者可据此判断影响面。",
+            content_full="第一段正文内容。\n\n第二段正文内容。",
             image_urls='["https://cdn.example.com/1.jpg", "https://cdn.example.com/2.jpg"]',
         )
         article_id = article.id
@@ -152,10 +155,13 @@ def test_story_page_previews_in_page(client, settings: Settings, seeded_db):
     page = client.get(f"/story/{article_id}")
     assert page.status_code == 200
     assert "页内速览测试" in page.text
-    assert "这是导语式速览" in page.text          # 速览在页内可见
-    assert "https://cdn.example.com/1.jpg" in page.text  # 配图内嵌
-    assert "阅读原文" in page.text                 # 原站链接仍保留
-    assert "data-shot" in page.text               # 点击页内放大，不跳原站
+    assert "这是导语式速览" in page.text              # AI 导读在页内可见
+    assert "第一段正文内容。" in page.text             # 正文全文逐段展示
+    assert "第二段正文内容。" in page.text
+    assert "AI 导读" in page.text
+    assert ">正文<" in page.text.replace(" ", "")
+    assert "打开 ↗" in page.text                      # 原站链接仍保留
+    assert "data-shot" in page.text                   # 配图点击页内放大
 
 
 def test_story_page_404_for_missing(client):
@@ -165,38 +171,44 @@ def test_story_page_404_for_missing(client):
 def test_home_page_paginates_and_has_theme_toggle(client, seeded_db):
     """首页分页 + 深浅色切换 + 空态文案。"""
     with session_scope() as session:
-        for i in range(25):
+        for i in range(PAGE_SIZE + 5):
             make_article(session, title=f"分页文章{i}", link=f"https://example.com/p{i}")
 
-    # 时间倒序（同秒则按 id 倒序），每页 20 条
+    # 时间倒序（同秒则按 id 倒序），每页 PAGE_SIZE 条
     first = client.get("/")
     assert first.status_code == 200
-    assert "分页文章24" in first.text
-    assert "分页文章4" not in first.text   # 第 1 页 = 24..5
+    assert f"分页文章{PAGE_SIZE + 4}" in first.text          # 最新一条在首页
+    assert "分页文章0" not in first.text                      # 剩 5 条在第二页
     assert "下一页" in first.text
+    # 时间轴结构：日期分组头 + 左侧时间列
+    assert "day-head" in first.text
+    assert "tl-time" in first.text
 
     second = client.get("/?page=2")
-    assert "分页文章4" in second.text
-    assert "分页文章24" not in second.text
+    assert "分页文章0" in second.text
+    assert f"分页文章{PAGE_SIZE + 4}" not in second.text
 
     # 越界页码夹回最后一页，不报错
     assert client.get("/?page=999").status_code == 200
     assert client.get("/?page=0").status_code in (200, 422)
 
 
-def test_home_shows_images_grid(client, settings: Settings, seeded_db):
+def test_images_only_on_story_page(client, settings: Settings, seeded_db):
+    """配图不再抢列表的版面：列表纯文字，配图放详情页正文之后。"""
     with session_scope() as session:
         make_article(session, title="带图文章", link="https://example.com/img",
-                     digest="速览内容", image_urls='["https://cdn.example.com/x.jpg"]')
+                     digest="速览内容", reason="值得看", image_urls='["https://cdn.example.com/x.jpg"]')
     with session_scope() as session:
         generate_daily_report(TODAY, session=session, settings=settings)
 
-    text = client.get("/").text
-    assert 'class="thumb"' in text                  # 列表页用缩略图，不占版面
-    assert 'class="row has-shot"' in text
-    assert "cdn.example.com/x.jpg" in text
-    # 详情页才用完整配图
-    assert 'class="shots one"' in client.get("/story/1").text
+    home = client.get("/").text
+    assert "推荐理由" in home
+    assert "值得看" in home
+    assert "cdn.example.com/x.jpg" not in home      # 列表页不放图
+
+    story = client.get("/story/1").text
+    assert "文章配图" in story
+    assert "cdn.example.com/x.jpg" in story
 
 
 def test_dark_mode_toggle_present(client):
@@ -204,8 +216,8 @@ def test_dark_mode_toggle_present(client):
     assert 'classList.toggle("dark")' in client.get("/").text
 
 
-def test_story_image_has_height_cap(client, settings: Settings, seeded_db):
-    """详情页大图必须限高：原始 og:image 常常是 2000px 高的长图，不限高会撑爆页面。"""
+def test_story_images_are_small_grid(client, settings: Settings, seeded_db):
+    """详情页配图用小网格，不能再像之前那样一张长图占满整屏。"""
     with session_scope() as session:
         make_article(session, title="长图文章", link="https://example.com/tall",
                      digest="速览", image_urls='["https://cdn.example.com/tall.jpg"]')
@@ -213,5 +225,51 @@ def test_story_image_has_height_cap(client, settings: Settings, seeded_db):
         generate_daily_report(TODAY, session=session, settings=settings)
 
     text = client.get("/story/1").text
-    assert "max-height:520px" in text
-    assert ".shots.one img { aspect-ratio:auto; }" in text
+    assert "shot-grid" in text
+    assert "minmax(190px,1fr)" in text
+
+
+def test_timeline_groups_by_date_and_shows_score(client, settings: Settings, seeded_db):
+    """时间轴结构：日期分组头 + 左侧时间 + 相关度评分 + 推荐理由。"""
+    with session_scope() as session:
+        make_article(session, title="带评分的文章", link="https://example.com/scored",
+                     digest="导语内容", reason="披露了关键数字", score=88)
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert "day-head" in text
+    assert "条" in text                      # 组头带条数
+    assert "相关度" in text
+    assert "88" in text
+    assert "推荐理由" in text
+    assert "披露了关键数字" in text
+    assert "score strong" in text            # ≥70 走强调样式
+
+
+def test_relative_time_formatting(client, settings: Settings, seeded_db):
+    from datetime import timedelta
+
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        make_article(session, title="刚刚的", link="https://example.com/just",
+                     published_at=now_local() - timedelta(minutes=3))
+        make_article(session, title="三小时前的", link="https://example.com/h3",
+                     published_at=now_local() - timedelta(hours=3))
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert "分钟前" in text
+    assert "小时前" in text
+
+
+def test_score_hidden_when_absent(client, settings: Settings, seeded_db):
+    """没有评分时不该显示「相关度」占位。"""
+    with session_scope() as session:
+        make_article(session, title="无评分", link="https://example.com/noscore", digest="导语")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    assert "相关度" not in client.get("/").text

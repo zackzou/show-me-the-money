@@ -20,6 +20,7 @@ from app.config import ConfigError, Settings, load_settings
 from app.db import init_db, seed_sources
 from app.scheduler import (
     run_backfill_reports,
+    run_content_job,
     run_fetch_job,
     run_process_job,
     shutdown_scheduler,
@@ -54,6 +55,11 @@ def _safe_startup_run(settings: Settings) -> None:
     except Exception as exc:
         log.warning("启动抓取失败：%s", exc)
         return
+    try:
+        # 先把正文抓回来：速览与推荐理由的质量都依赖正文
+        run_content_job(settings)
+    except Exception as exc:
+        log.warning("启动抓正文失败：%s", exc)
     try:
         # run_process_job 内部已经会刷新「今天」这份日报，不再重复调用
         run_process_job(settings)

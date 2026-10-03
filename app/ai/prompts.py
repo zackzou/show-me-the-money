@@ -47,6 +47,13 @@ def render_digest_prompt(prompts: PromptsConfig, title: str, summary: str, conte
     )
 
 
+def render_reason_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
+    """推荐理由。模板为空（老配置）时返回空串，调用方据此跳过。"""
+    if not prompts.reason_prompt.strip():
+        return ""
+    return _fill(prompts.reason_prompt, {"research_topic": topic, "title": title, "summary": summary or "（无）"})
+
+
 def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
     return _fill(
         prompts.relevance_prompt,

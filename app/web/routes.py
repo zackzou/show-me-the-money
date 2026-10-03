@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,8 @@ templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 
 page_router = APIRouter()
 
-PAGE_SIZE = 20
+PAGE_SIZE = 40
+WEEKDAYS = "一二三四五六日"
 
 
 def _images(raw: str | None) -> list[str]:
@@ -39,10 +41,17 @@ def _images(raw: str | None) -> list[str]:
     return [str(item) for item in parsed if isinstance(item, str) and item.startswith(("http://", "https://"))]
 
 
+def _body_blocks(raw: str | None) -> list[str]:
+    """正文全文按空行切段，供详情页逐段渲染。"""
+    if not raw:
+        return []
+    return [part.strip() for part in raw.split("\n\n") if part.strip()]
+
+
 def _day_statement(date_str: str):
     start, end = day_window(date_str)
     return (
-        select(Article, Source.name)
+        select(Article, Source.name, Source.url)
         .outerjoin(Source, Article.source_id == Source.id)
         .where(
             Article.relevance == 1,
@@ -54,28 +63,95 @@ def _day_statement(date_str: str):
     )
 
 
-def _card(article: Article, source_name: str | None) -> dict[str, Any]:
+def _host(url: str | None) -> str:
+    if not url:
+        return ""
+    trimmed = url.split("://", 1)[-1]
+    return trimmed.split("/", 1)[0]
+
+
+def _relative(value: datetime | None, now: datetime) -> str:
+    """发布时间的人话版本：刚刚 / N 分钟前 / N 小时前 / N 天前 / 日期。"""
+    if value is None:
+        return ""
+    delta = now - value
+    seconds = int(delta.total_seconds())
+    if seconds < 0:
+        return ""
+    if seconds < 60:
+        return "刚刚"
+    if seconds < 3600:
+        return f"{seconds // 60} 分钟前"
+    if seconds < 86400:
+        return f"{seconds // 3600} 小时前"
+    if seconds < 86400 * 7:
+        return f"{seconds // 86400} 天前"
+    return value.strftime("%Y-%m-%d")
+
+
+def _card(article: Article, source_name: str | None, source_url: str | None, now: datetime) -> dict[str, Any]:
+    published = article.published_at
     return {
         "id": article.id,
         "title": article.title,
         "link": article.link,
         "source": source_name or "未知来源",
-        "time": article.published_at.strftime("%m-%d %H:%M") if article.published_at else "",
+        "source_host": _host(source_url),
+        "time_hm": published.strftime("%H:%M") if published else "",
+        "time_full": published.strftime("%Y-%m-%d %H:%M") if published else "",
+        "relative": _relative(published, now),
         # 速览优先（页内就能读完），没有就退回摘要
         "digest": strip_markdown(article.digest) or strip_markdown(article.summary),
-        "summary": strip_markdown(article.summary),
+        "reason": strip_markdown(article.reason),
+        "score": article.score,
         "tags": split_tags(article.tags),
         "images": _images(article.image_urls),
         "degraded": article.status == "failed",
     }
 
 
-def articles_of_day(session: Session, date_str: str) -> list[dict[str, Any]]:
+def articles_of_day(session: Session, date_str: str, now: datetime | None = None) -> list[dict[str, Any]]:
     """某一天进日报的全部文章（卡片数据）。非法日期当作「这一天没有内容」。"""
+    now = now or now_local()
     try:
-        return [_card(article, name) for article, name in session.execute(_day_statement(date_str))]
+        rows = list(session.execute(_day_statement(date_str)))
     except ValueError:
         return []
+    return [_card(article, name, url, now) for article, name, url in rows]
+
+
+def articles_of_day_paged(
+    session: Session,
+    date_str: str,
+    page: int = 1,
+    size: int = PAGE_SIZE,
+    now: datetime | None = None,
+) -> list[dict[str, Any]]:
+    """分页取某一天的文章（首页用，避免一次渲染全部）。"""
+    now = now or now_local()
+    try:
+        statement = _day_statement(date_str).limit(size).offset(max(0, page - 1) * size)
+        rows = list(session.execute(statement))
+    except ValueError:
+        return []
+    return [_card(article, name, url, now) for article, name, url in rows]
+
+
+def group_by_date(cards: list[dict[str, Any]], date_str: str) -> list[dict[str, Any]]:
+    """按日期分组，组头显示「10月3日 ⌄ 星期六 · N 条」。"""
+    if not cards:
+        return []
+    try:
+        day = datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        return [{"date": date_str, "weekday": "", "items": cards}]
+    return [
+        {
+            "date": f"{day.month}月{day.day}日",
+            "weekday": f"星期{WEEKDAYS[day.weekday()]}",
+            "items": cards,
+        }
+    ]
 
 
 def count_of_day(session: Session, date_str: str) -> int:
@@ -96,17 +172,6 @@ def count_of_day(session: Session, date_str: str) -> int:
     )
 
 
-def articles_of_day_paged(
-    session: Session, date_str: str, page: int = 1, size: int = PAGE_SIZE
-) -> list[dict[str, Any]]:
-    """分页取某一天的文章（首页用，避免一次渲染全部）。"""
-    try:
-        statement = _day_statement(date_str).limit(size).offset(max(0, page - 1) * size)
-        return [_card(article, name) for article, name in session.execute(statement)]
-    except ValueError:
-        return []
-
-
 def _topics(request: Request) -> list[str]:
     return list(getattr(request.app.state.settings, "research_topics", []) or [])
 
@@ -121,12 +186,14 @@ def index(
     page: int = Query(1, ge=1),
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
-    """首页：热点资讯流。按时间倒序 + 分页，不用一次渲染全部。"""
+    """首页：热点资讯时间轴。按时间倒序 + 分页，不用一次渲染全部。"""
     latest = session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(1)).scalar_one_or_none()
     date_str = latest.date if latest else now_local().strftime("%Y-%m-%d")
+    now = now_local()
     total = count_of_day(session, date_str)
     pages = max(1, -(-total // PAGE_SIZE))
     page = min(page, pages)
+    cards = articles_of_day_paged(session, date_str, page, PAGE_SIZE, now)
     return templates.TemplateResponse(
         request,
         "index.html",
@@ -134,7 +201,8 @@ def index(
             request,
             report=latest,
             date_str=date_str,
-            articles=articles_of_day_paged(session, date_str, page, PAGE_SIZE),
+            groups=group_by_date(cards, date_str),
+            articles=cards,
             total=total,
             page=page,
             pages=pages,
@@ -150,29 +218,41 @@ def daily(
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
     report = session.execute(select(DailyReport).where(DailyReport.date == date)).scalar_one_or_none()
-    articles = articles_of_day(session, date)
+    now = now_local()
+    cards = articles_of_day(session, date, now)
     return templates.TemplateResponse(
         request,
         "daily.html",
-        _ctx(request, report=report, articles=articles, date=date, title=f"{date} 日报"),
+        _ctx(
+            request,
+            report=report,
+            articles=cards,
+            groups=group_by_date(cards, date),
+            date=date,
+            title=f"{date} 日报",
+        ),
         status_code=200 if report else 404,
     )
 
 
 @page_router.get("/story/{article_id}", response_class=HTMLResponse)
 def story(request: Request, article_id: int, session: Session = Depends(get_session)) -> HTMLResponse:
-    """单篇页内预览：速览 + 配图 + 正文开头，读者不用跳原站也能读完。"""
+    """单篇页内预览：左栏来源信息 + 右侧完整正文，读者不用跳原站。"""
     row = session.execute(
-        select(Article, Source.name).outerjoin(Source, Article.source_id == Source.id).where(Article.id == article_id)
+        select(Article, Source.name, Source.url)
+        .outerjoin(Source, Article.source_id == Source.id)
+        .where(Article.id == article_id)
     ).first()
     if row is None:
         return templates.TemplateResponse(
-            request, "story.html", _ctx(request, article=None, title="内容不存在"), status_code=404
+            request, "story.html", _ctx(request, item=None, title="内容不存在"), status_code=404
         )
-    article, source_name = row
-    card = _card(article, source_name)
-    card["content_text"] = truncate(article.content or article.title, 1500)
-    return templates.TemplateResponse(request, "story.html", _ctx(request, article=card, title=article.title[:40]))
+    article, source_name, source_url = row
+    now = now_local()
+    item = _card(article, source_name, source_url, now)
+    item["body_blocks"] = _body_blocks(article.content_full)
+    item["content_preview"] = truncate(article.content_full or article.content or "", 400)
+    return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
 
 
 @page_router.get("/archive", response_class=HTMLResponse)

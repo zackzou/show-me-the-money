@@ -1,37 +1,44 @@
-{% macro thumb(item) %}
-  {% if item.images %}
-    <img class="thumb" src="{{ item.images[0] }}" alt="{{ item.title }}" loading="lazy" decoding="async"
-         data-shot="{{ item.images[0] }}" data-i="0" data-n="{{ item.images|length }}">
-  {% endif %}
-{% endmacro %}
-
 {% macro card(item) %}
-  <article class="item">
-    <div class="row {{ 'has-shot' if item.images else '' }}">
-      {{ thumb(item) }}
-      <div>
+  <div class="row">
+    <div class="tl-time">{{ item.time_hm }}</div>
+    <div class="tl-main">
+      <article class="item">
+        <div class="i-head">
+          <span class="src">{{ item.source }}</span>
+          {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
+          {% if item.score is not none %}
+            <span class="score {{ 'strong' if item.score >= 70 else '' }}">相关度 <b>{{ item.score }}</b></span>
+          {% endif %}
+        </div>
         <a href="/story/{{ item.id }}"><div class="t">{{ item.title }}</div></a>
         {% if item.digest %}<p class="d">{{ item.digest }}</p>{% endif %}
-        <div class="f">
-          <span class="src">{{ item.source }}</span>
-          {% if item.time %}<span>·</span><span>{{ item.time }}</span>{% endif %}
+        {% if item.reason %}
+          <p class="why"><b>推荐理由</b>：{{ item.reason }}</p>
+        {% endif %}
+        <div class="i-foot">
+          {% if item.time_full %}<span>{{ item.time_full }}</span><span>·</span>{% endif %}
+          <span>{{ item.relative }}</span>
           {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
-          {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
-          <a class="more" href="/story/{{ item.id }}">页内速览 →</a>
+          <a class="more" href="/story/{{ item.id }}">读全文 →</a>
         </div>
-      </div>
+      </article>
     </div>
-  </article>
+  </div>
 {% endmacro %}
 
-{# 详情页用完整配图网格 #}
-{% macro shots(item) %}
-  {% if item.images %}
-    <div class="shots {{ 'one' if item.images|length == 1 else ('two' if item.images|length == 2 else ('four' if item.images|length <= 4 else 'many')) }}">
-      {% for url in item.images[:6] %}
-        <img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async"
-             data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
+{% macro timeline(groups, empty_text='这一天还没有筛选出相关报道。') %}
+  {% if groups %}
+    <div class="tl">
+      {% for g in groups %}
+        <div class="day-head">
+          <span class="caret">▼</span>
+          <span>{{ g.date }}</span>
+          <span class="meta">{{ g.weekday }} · {{ g['items']|length }} 条</span>
+        </div>
+        {% for item in g['items'] %}{{ card(item) }}{% endfor %}
       {% endfor %}
     </div>
+  {% else %}
+    <div class="empty">{{ empty_text }}</div>
   {% endif %}
 {% endmacro %}

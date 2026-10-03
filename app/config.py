@@ -61,10 +61,12 @@ class SourceConfig(BaseModel):
 class PromptsConfig(BaseModel):
     summary_prompt: str
     digest_prompt: str = ""
+    reason_prompt: str = ""
     tag_prompt: str
     relevance_prompt: str
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
+    fallback_reason_chars: int = 80
 
 
 class StorageSettings(BaseModel):
@@ -102,6 +104,17 @@ class FetcherSettings(BaseModel):
     min_content_chars: int = 0
 
 
+class ContentSettings(BaseModel):
+    """正文全文抓取（让「页内读完」成立的关键）。"""
+
+    enabled: bool = True
+    # 每轮最多抓多少篇（每篇一次请求）
+    batch_size: int = 20
+    timeout_seconds: float = 12.0
+    # 正文短于这个字数就认为没抓到，保留原来的短摘要
+    min_chars: int = 200
+
+
 class MediaSettings(BaseModel):
     """配图补齐（RSS 没给图时去文章页抓 og:image）。"""
 
@@ -135,6 +148,7 @@ class Settings(BaseModel):
     fetcher: FetcherSettings
     ai: AISettings = AISettings()
     media: MediaSettings = MediaSettings()
+    content: ContentSettings = ContentSettings()
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
     project_root: Path = Field(default=PROJECT_ROOT)
@@ -216,6 +230,7 @@ def load_settings(
         fetcher = FetcherSettings(**(raw_settings.get("fetcher") or {}))
         ai = AISettings(**(raw_settings.get("ai") or {}))
         media = MediaSettings(**(raw_settings.get("media") or {}))
+        content = ContentSettings(**(raw_settings.get("content") or {}))
         prompts = PromptsConfig(**prompts_raw)
         sources = [SourceConfig(**item) for item in sources_raw]
     except (ValidationError, TypeError) as exc:
@@ -252,6 +267,7 @@ def load_settings(
         fetcher=fetcher,
         ai=ai,
         media=media,
+        content=content,
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,

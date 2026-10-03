@@ -88,7 +88,7 @@ def test_llm_client_endpoint_normalisation():
 
 
 def test_process_article_relevant(seeded_db, settings: Settings):
-    answers = iter(["yes", "这是摘要", "这是速览：两三句导语", "标签一,标签二"])
+    answers = iter(["yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由", "标签一,标签二"])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
@@ -102,6 +102,8 @@ def test_process_article_relevant(seeded_db, settings: Settings):
             assert article.relevance == 1
             assert article.summary == "这是摘要"
             assert article.digest == "这是速览：两三句导语"
+            assert article.reason == "这是推荐理由"
+            assert article.score == 88
             assert article.tags == "标签一,标签二"
     finally:
         client.close()
@@ -145,7 +147,7 @@ def test_process_article_falls_back_on_llm_failure(seeded_db, settings: Settings
 
 
 def test_process_pending_counts(seeded_db, settings: Settings):
-    answers = iter(["yes", "摘要", "速览1", "A,B", "no", "yes", "摘要2", "速览2", "C"])
+    answers = iter(["yes 88", "摘要", "速览1", "理由1", "A,B", "no 5", "yes 72", "摘要2", "速览2", "理由2", "C"])
 
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
@@ -280,3 +282,43 @@ def test_chat_format_error_is_not_retried():
     with httpx.Client(transport=httpx.MockTransport(handler)) as client, pytest.raises(LLMFormatError):
         LLMClient("http://gw/v1", "k", "m", client=client, retries=2).chat("判断")
     assert calls["n"] == 1
+
+
+@pytest.mark.parametrize(
+    ("answer", "relevant", "score"),
+    [
+        ("yes 85", True, 85),
+        ("yes", True, None),
+        ("是的 92", True, 92),
+        ("Yes, it is relevant. 70", True, 70),
+        ("no 5", False, 5),
+        ("no", False, None),
+        ("", False, None),
+        ("yes 999", True, None),   # 越界分数直接丢弃，不能影响判定
+        ("maybe", False, None),
+    ],
+)
+def test_parse_relevance(answer, relevant, score):
+    from app.ai.processor import parse_relevance
+
+    assert parse_relevance(answer) == (relevant, score)
+
+
+def test_relevance_without_score_still_processes(seeded_db, settings: Settings):
+    """模型只给 yes 没给分数时，文章照样要正常进流程（评分是可选的）。"""
+    answers = iter(["yes", "摘要", "速览", "理由", "标签"])
+    import httpx
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(session, title="无分数文章", status="pending", relevance=None)
+            assert process_article(session, article, client, settings) == "processed"
+            assert article.relevance == 1
+            assert article.score is None
+            assert article.reason == "理由"
+    finally:
+        client.close()

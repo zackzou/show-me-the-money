@@ -1,48 +1,80 @@
 {% extends "base.html" %}
-{% from "_articles.html" import shots %}
 {% block content %}
 
-{% if not article %}
+{% if not item %}
   <div class="empty" style="margin-top:40px">
     <p>这里没有内容</p>
     <p style="font-size:12.5px"><a href="/" style="color:var(--accent)">回到热点资讯</a></p>
   </div>
 {% else %}
-<div class="lead" style="padding-top:26px">
-  <a href="/" class="kicker" style="display:inline-block">← 热点资讯</a>
-  <h1 style="font-size:25px">{{ article.title }}</h1>
-  <div class="f" style="margin-top:10px">
-    <span class="src">{{ article.source }}</span>
-    {% if article.time %}<span>·</span><span>{{ article.time }}</span>{% endif %}
-    {% for tag in article.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
-    {% if article.degraded %}<span class="warn">降级摘要</span>{% endif %}
-  </div>
+<div class="story">
+
+  <aside class="side">
+    <a href="/" class="back">← 返回</a>
+    <dl>
+      <dt>来源</dt>
+      <dd>{{ item.source }}</dd>
+      {% if item.source_host %}<dd style="color:var(--faint);font-size:12px">{{ item.source_host }}</dd>{% endif %}
+      <dt>发布时间</dt>
+      <dd>{{ item.time_full or '—' }}</dd>
+      <dd style="color:var(--faint);font-size:12px">{{ item.relative }}</dd>
+      {% if item.score is not none %}
+        <dt>相关度</dt>
+        <dd>{{ item.score }} / 100</dd>
+      {% endif %}
+      {% if item.tags %}
+        <dt>标签</dt>
+        <dd>{% for t in item.tags %}<span class="tag" style="margin-right:4px">{{ t }}</span>{% endfor %}</dd>
+      {% endif %}
+      <dt>原文</dt>
+      <dd><a href="{{ item.link }}" target="_blank" rel="noopener" style="color:var(--accent)">打开 ↗</a></dd>
+    </dl>
+  </aside>
+
+  <article>
+    <h1 class="body-title">{{ item.title }}</h1>
+    {% if item.digest %}<p class="sub">{{ item.digest }}</p>{% endif %}
+
+    <section class="sec">
+      <div class="sec-t">AI 导读</div>
+      <p class="lead-p">{{ item.digest or item.reason or '（没有生成导读）' }}</p>
+    </section>
+
+    {% if item.body_blocks %}
+      <div class="rule"></div>
+      <section class="sec">
+        <div class="sec-t plain">正文</div>
+        <div class="prose">
+          {% for block in item.body_blocks %}<p>{{ block }}</p>{% endfor %}
+        </div>
+      </section>
+    {% elif item.content_preview %}
+      <div class="rule"></div>
+      <section class="sec">
+        <div class="sec-t plain">正文开头</div>
+        <p class="d">{{ item.content_preview }}</p>
+      </section>
+    {% endif %}
+
+    {% if item.images %}
+      <section class="sec">
+        <div class="sec-t plain">文章配图</div>
+        <div class="shot-grid">
+          {% for url in item.images[:6] %}
+            <img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async"
+                 data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    <p class="tail">
+      正文由程序从原文页面提取，AI 导读与摘要由大模型生成，可能与原文有出入。
+      觉得不准确请以<a href="{{ item.link }}" target="_blank" rel="noopener" style="color:var(--accent)">原文</a>为准。
+    </p>
+  </article>
+
 </div>
-
-{{ shots(article) }}
-
-{% if article.digest %}
-  <section class="item" style="margin-top:18px">
-    <div class="kicker">速览</div>
-    <p class="d" style="margin-top:8px;font-size:15px">{{ article.digest }}</p>
-  </section>
-{% endif %}
-
-{% if article.content_text %}
-  <section class="item" style="margin-top:14px">
-    <div class="kicker">正文开头</div>
-    <p class="d" style="margin-top:8px">{{ article.content_text }}</p>
-  </section>
-{% endif %}
-
-<section class="item" style="margin-top:14px">
-  <p style="font-size:13px;color:var(--muted);margin:0">
-    以上内容由大模型根据 RSS 正文生成，可能与原文有出入。
-  </p>
-  <a class="more" style="display:inline-block;margin-top:10px" href="{{ article.link }}" target="_blank" rel="noopener">
-    阅读原文 ↗
-  </a>
-</section>
 {% endif %}
 
 {% endblock %}

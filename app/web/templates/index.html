@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_articles.html" import card %}
+{% from "_articles.html" import timeline %}
 {% block content %}
 
 {% if topics %}
@@ -15,20 +15,11 @@
   <p class="meta">
     与调研方向直接相关的 <b>{{ total }}</b> 条报道
     {% if date_str %}· {{ date_str }}{% endif %}
-    · 每 2 小时自动抓取筛选，当天实时更新
+    · 当天每 2 小时滚动更新
   </p>
 </div>
 
-<div class="list">
-  {% if articles %}
-    {% for item in articles %}{{ card(item) }}{% endfor %}
-  {% else %}
-    <div class="empty">
-      <p>这一天还没有筛选出相关报道。</p>
-      <p style="font-size:12.5px">系统正在按调度抓取与处理，稍后自动出现。</p>
-    </div>
-  {% endif %}
-</div>
+{{ timeline(groups) }}
 
 {% if pages > 1 %}
   <nav class="pager">

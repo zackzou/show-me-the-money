@@ -1,7 +1,8 @@
-"""文章处理：相关度判断 → 摘要 → 标签；LLM 不可用时降级。"""
+"""文章处理：相关度判断（顺带评分）→ 摘要 → 速览 → 推荐理由 → 标签；LLM 不可用时降级。"""
 
 from __future__ import annotations
 
+import re
 from typing import Any
 
 from sqlalchemy import select
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.ai.client import LLMClient, LLMError
 from app.ai.prompts import (
     render_digest_prompt,
+    render_reason_prompt,
     render_relevance_prompt,
     render_summary_prompt,
     render_tag_prompt,
@@ -24,11 +26,33 @@ log = get_logger(__name__)
 STATUS_PROCESSED = "processed"
 STATUS_FAILED = "failed"
 
+_SCORE_RE = re.compile(r"(\d{1,3})")
+
+# 列表页只在分数不低于这个值时强调「值得看」
+SCORE_STRONG = 70
+
+
+def parse_relevance(answer: str) -> tuple[bool, int | None]:
+    """解析相关度判断的结果：``yes 85`` → ``(True, 85)``。
+
+    容忍各种不规范输出：光一个 ``yes``、中文「是的」、分数在前、分数越界等。
+    评分是可选的 —— 模型没给就不给，不能因此把一条好内容判掉。
+    """
+    text = (answer or "").strip()
+    head = text.casefold()[:8]
+    relevant = head.startswith(("yes", "y")) or head.startswith("是")
+    match = _SCORE_RE.search(text)
+    score = None
+    if match:
+        value = int(match.group(1))
+        if 0 <= value <= 100:
+            score = value
+    return relevant, score
+
 
 def _is_affirmative(answer: str) -> bool:
-    """把 LLM 的 yes/no 回答归一化（容忍 "Yes."、"是的" 等）。"""
-    head = answer.strip().casefold()[:8]
-    return head.startswith("yes") or head.startswith("y") or head.startswith("是")
+    """只要 yes/no 判定，忽略评分。"""
+    return parse_relevance(answer)[0]
 
 
 def _fallback_summary(article: Article, chars: int) -> str:
@@ -38,46 +62,72 @@ def _fallback_summary(article: Article, chars: int) -> str:
 
 def _fallback_digest(article: Article, chars: int) -> str:
     """LLM 不可用时的速览：直接取正文开头，好歹让页内能读。"""
-    return truncate(strip_html(article.content) or article.title, chars)
+    return truncate(strip_html(article.content_full) or strip_html(article.content) or article.title, chars)
+
+
+def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
+    """跑一个「锦上添花」的 LLM 步骤；失败就用 fallback，不影响主流程。"""
+    if not prompt:
+        return fallback
+    try:
+        return client.chat(prompt)
+    except LLMError as exc:
+        log.warning("可选步骤失败，已降级（%s）", exc)
+        return fallback
 
 
 def process_article(session: Session, article: Article, client: LLMClient, settings: Settings) -> str:
     """处理单篇文章，返回最终 status（processed / failed）。"""
     topic = settings.research_topic
-    excerpt = truncate(strip_html(article.content), 2000)
+    # 优先用抓回来的正文做判断，摘要质量直接决定筛选与写作的质量
+    body = strip_html(article.content_full) or strip_html(article.content)
+    excerpt = truncate(body, 2000)
 
     try:
         answer = client.chat(render_relevance_prompt(settings.prompts, topic, article.title, excerpt))
-        if not _is_affirmative(answer):
+        relevant, score = parse_relevance(answer)
+        if not relevant:
             article.relevance = 0
+            article.score = score
             article.summary = None
             article.digest = None
+            article.reason = None
             article.tags = None
             article.status = STATUS_PROCESSED
             return STATUS_PROCESSED
 
         article.relevance = 1
+        article.score = score
+
         summary = client.chat(render_summary_prompt(settings.prompts, topic, article.title, excerpt))
         article.summary = truncate(summary, 500)
 
-        # 速览：让读者在页内读完，不用跳原站。生成失败不影响主流程。
-        digest_prompt = render_digest_prompt(settings.prompts, article.title, summary, excerpt)
-        if digest_prompt:
-            try:
-                article.digest = truncate(client.chat(digest_prompt), 400)
-            except LLMError as exc:
-                article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
-                log.warning("速览生成失败，已降级：%s（%s）", article.title[:60], exc)
+        # 速览：让读者在页内读完，不用跳原站
+        digest = _optional_llm(
+            client,
+            render_digest_prompt(settings.prompts, article.title, summary, excerpt),
+            _fallback_digest(article, settings.prompts.fallback_digest_chars),
+        )
+        article.digest = truncate(digest, 400)
+
+        # 推荐理由：回答「为什么要点开这条」
+        reason = _optional_llm(
+            client,
+            render_reason_prompt(settings.prompts, topic, article.title, summary),
+            _fallback_digest(article, settings.prompts.fallback_reason_chars),
+        )
+        article.reason = truncate(reason, 200)
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
         article.status = STATUS_PROCESSED
         return STATUS_PROCESSED
     except LLMError as exc:
-        chars = settings.prompts.fallback_summary_chars
-        article.summary = _fallback_summary(article, chars)
+        article.summary = _fallback_summary(article, settings.prompts.fallback_summary_chars)
         if article.digest is None:
             article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
+        if article.reason is None:
+            article.reason = truncate(article.summary, settings.prompts.fallback_reason_chars)
         article.tags = None
         if article.relevance is None:
             article.relevance = 1  # 相关度未知时先算相关，避免漏掉当天内容
@@ -114,6 +164,10 @@ def process_pending(
             article.status = STATUS_FAILED
             if article.summary is None:
                 article.summary = _fallback_summary(article, settings.prompts.fallback_summary_chars)
+            if article.digest is None:
+                article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
+            if article.reason is None:
+                article.reason = truncate(article.summary, settings.prompts.fallback_reason_chars)
             if article.relevance is None:
                 article.relevance = 1
             stats["crashed"] += 1

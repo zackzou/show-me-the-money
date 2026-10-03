@@ -27,6 +27,15 @@ ai:
   # 每处理多少篇提交一次，防止长任务中途失败回滚全部进度
   batch_checkpoint_every: 10
 
+content:
+  # 是否抓取正文全文（详情页页内读完靠它；每篇一次请求）
+  enabled: true
+  # 每轮最多抓多少篇
+  batch_size: 20
+  timeout_seconds: 12
+  # 正文短于这个字数视为没抓到，保留短摘要
+  min_chars: 200
+
 media:
   # 是否在处理后补齐配图（RSS 没给图时抓文章页 og:image，每篇一次请求）
   enabled: true

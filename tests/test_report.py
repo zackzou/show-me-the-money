@@ -193,6 +193,7 @@ def test_scheduler_defaults_to_interval_triggers(settings: Settings):
     jobs = {job.id: type(job.trigger).__name__ for job in build_scheduler(settings).get_jobs()}
     assert jobs == {
         "fetch_job": "IntervalTrigger",
+        "content_job": "IntervalTrigger",
         "process_job": "IntervalTrigger",
         "report_job": "CronTrigger",
         "cleanup_job": "CronTrigger",
@@ -205,6 +206,7 @@ def test_scheduler_switches_to_daily_cron_when_configured(settings: Settings):
     scheduler = build_scheduler(settings)
     jobs = {job.id: type(job.trigger).__name__ for job in scheduler.get_jobs()}
     assert jobs["fetch_job"] == "CronTrigger"
+    assert jobs["content_job"] == "CronTrigger"
     assert jobs["process_job"] == "CronTrigger"
     # 抓取每天 07:00、处理 07:30，日报仍在 08:00
     assert "hour='7', minute='0'" in str(scheduler.get_job("fetch_job").trigger)
