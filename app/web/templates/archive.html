@@ -4,26 +4,81 @@
 <div class="lead">
   <div class="kicker">ARCHIVE</div>
   <h1>历史日报</h1>
-  <p class="meta">共 <b>{{ reports|length }}</b> 份，按日期倒序</p>
+  <p class="meta">共 <b>{{ total }}</b> 份 · 点日期展开当天标题 · 按日期倒序</p>
 </div>
 
-<div class="list">
-  {% if reports %}
-    {% for item in reports %}
-      <article class="item rowline" style="padding:15px 20px;cursor:pointer">
-        <div style="display:flex;align-items:center;gap:14px">
-          <a href="/daily/{{ item.date }}" style="font-weight:650;font-size:16px">{{ item.date }}</a>
-          <span class="meta" style="font-size:13px">{{ item.article_count }} 篇</span>
-          <a class="more" href="/daily/{{ item.date }}">查看 →</a>
+{% if reports %}
+  <div class="arc">
+    {% for r in reports %}
+      <section class="arc-row" data-date="{{ r.date }}">
+        <button type="button" class="arc-head" aria-expanded="false">
+          <span class="caret" aria-hidden="true">▶</span>
+          <span class="arc-date">{{ r.date }}</span>
+          <span class="arc-week">{{ r.weekday }}</span>
+          <span class="arc-bar"><i style="width:{{ r.width }}%"></i></span>
+          <span class="arc-count">{{ r.count }} 篇</span>
+          <span class="arc-rel">{{ r.relative }}</span>
+        </button>
+        <div class="arc-panel" hidden>
+          <div class="arc-inner">
+            <p class="arc-tip">正在加载…</p>
+          </div>
+          <a class="arc-all" href="{{ r.href }}">打开 {{ r.date }} 完整日报 →</a>
         </div>
-      </article>
+      </section>
     {% endfor %}
-  {% else %}
-    <div class="empty">
-      <p>还没有历史日报。</p>
-      <p style="font-size:12.5px">系统正在按调度抓取与处理，出第一份日报后这里会自动更新。</p>
-    </div>
-  {% endif %}
-</div>
+  </div>
+{% else %}
+  <div class="empty">
+    <p>还没有历史日报。</p>
+    <p style="font-size:12.5px">系统正在按调度抓取与处理，出第一份日报后这里会自动更新。</p>
+  </div>
+{% endif %}
 
+{% endblock %}
+
+{% block extra %}
+<script>
+  // 点日期展开当天标题；同一天只加载一次，标题里的英文也跟着当前语言走
+  (function () {
+    var cache = {};
+    function renderTitles(row, items) {
+      var inner = row.querySelector(".arc-inner");
+      if (!items.length) {
+        inner.innerHTML = '<p class="arc-tip">这一天没有已入选的报道。</p>';
+        return;
+      }
+      inner.innerHTML = items.map(function (a) {
+        var t = (a.published_at || "").slice(11, 16);
+        var zh = String(a.title || "").replace(/[<>&]/g, "");
+        var en = String(a.title_en || "").replace(/[<>&]/g, "");
+        var title = en
+          ? '<span class="zh">' + zh + '</span><span class="en">' + en + "</span>"
+          : '<span class="zh">' + zh + "</span>";
+        return '<a class="arc-item" href="/story/' + a.id + '">'
+          + '<span class="arc-time">' + t + "</span>"
+          + '<span class="arc-tt">' + title + "</span></a>";
+      }).join("");
+    }
+    document.querySelectorAll(".arc-head").forEach(function (btn) {
+      btn.onclick = function () {
+        var row = btn.closest(".arc-row");
+        var panel = row.querySelector(".arc-panel");
+        var open = btn.getAttribute("aria-expanded") === "true";
+        btn.setAttribute("aria-expanded", open ? "false" : "true");
+        row.classList.toggle("open", !open);
+        panel.hidden = open;
+        if (open) return;
+        var date = row.getAttribute("data-date");
+        if (cache[date]) { renderTitles(row, cache[date]); return; }
+        fetch("/api/articles?date=" + encodeURIComponent(date) + "&limit=200")
+          .then(function (r) { return r.json(); })
+          .then(function (items) { cache[date] = items; renderTitles(row, items); })
+          .catch(function () {
+            row.querySelector(".arc-inner").innerHTML = '<p class="arc-tip">加载失败，请重试。</p>';
+          });
+      };
+    });
+  })();
+</script>
 {% endblock %}

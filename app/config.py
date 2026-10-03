@@ -72,6 +72,7 @@ class PromptsConfig(BaseModel):
     tag_prompt: str
     relevance_prompt: str
     classify_prompt: str = ""
+    translate_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80
@@ -123,6 +124,12 @@ class ContentSettings(BaseModel):
     min_chars: int = 200
 
 
+class I18nSettings(BaseModel):
+    """中英双语：默认中文，可切英文或双语。"""
+
+    enabled: bool = True
+
+
 class MediaSettings(BaseModel):
     """配图补齐（RSS 没给图时去文章页抓 og:image）。"""
 
@@ -157,6 +164,7 @@ class Settings(BaseModel):
     fetcher: FetcherSettings
     ai: AISettings = AISettings()
     media: MediaSettings = MediaSettings()
+    i18n: I18nSettings = I18nSettings()
     content: ContentSettings = ContentSettings()
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
@@ -245,6 +253,7 @@ def load_settings(
         ai = AISettings(**(raw_settings.get("ai") or {}))
         media = MediaSettings(**(raw_settings.get("media") or {}))
         content = ContentSettings(**(raw_settings.get("content") or {}))
+        i18n = I18nSettings(**(raw_settings.get("i18n") or {}))
         prompts = PromptsConfig(**prompts_raw)
         sources = [SourceConfig(**item) for item in sources_raw]
     except (ValidationError, TypeError) as exc:
@@ -283,6 +292,7 @@ def load_settings(
         ai=ai,
         media=media,
         content=content,
+        i18n=i18n,
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,

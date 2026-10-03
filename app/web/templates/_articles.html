@@ -1,3 +1,13 @@
+{# 中英双语：默认只显示中文，切到「双语」时英文显示在中文下方 #}
+{% macro bi(zh, en) %}
+  {%- if en and en|trim != zh|trim -%}
+    <span class="zh">{{ zh }}</span>
+    <span class="en">{{ en }}</span>
+  {%- else -%}
+    <span class="zh">{{ zh }}</span>
+  {%- endif -%}
+{% endmacro %}
+
 {% macro card(item) %}
   <div class="row">
     <div class="tl-time">{{ item.time_hm }}</div>
@@ -12,8 +22,8 @@
           {% endif %}
           <button class="bm" data-save="{{ item.id }}" title="收藏（存在本地浏览器）">☆</button>
         </div>
-        <a href="/story/{{ item.id }}"><div class="t">{{ item.title }}</div></a>
-        {% if item.digest %}<p class="d">{{ item.digest }}</p>{% endif %}
+        <a href="/story/{{ item.id }}"><div class="t">{{ bi(item.title, item.title_en) }}</div></a>
+        {% if item.digest %}<p class="d">{{ bi(item.digest, item.digest_en) }}</p>{% endif %}
         {% if item.category or item.tags %}
           <div class="cats">
             {% if item.category %}

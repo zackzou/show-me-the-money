@@ -45,6 +45,8 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.score": "INTEGER",
     "articles.category": "VARCHAR(20)",
     "articles.topics": "TEXT",
+    "articles.title_en": "VARCHAR(500)",
+    "articles.digest_en": "TEXT",
 }
 
 

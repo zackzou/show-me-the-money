@@ -17,6 +17,7 @@ from app.ai.prompts import (
     render_relevance_prompt,
     render_summary_prompt,
     render_tag_prompt,
+    render_translate_prompt,
 )
 from app.config import Settings
 from app.models import Article
@@ -94,6 +95,26 @@ def parse_classify(raw: str, valid: set[str]) -> tuple[str | None, list[str]]:
     return category, topics[:3]
 
 
+def looks_english(text: str) -> bool:
+    """粗判是否已经是英文（用于英文信源不必再翻一次）。"""
+    sample = (text or "")[:400]
+    if not sample:
+        return False
+    ascii_letters = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
+    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    return ascii_letters > cjk * 2 and ascii_letters > 40
+
+
+def parse_translate(raw: str) -> tuple[str | None, str | None]:
+    """解析中译英结果：第一行英文标题，第二行英文导语。"""
+    lines = [line.strip() for line in (raw or "").splitlines() if line.strip()]
+    if not lines:
+        return None, None
+    title_en = lines[0][:500] or None
+    digest_en = truncate(" ".join(lines[1:]), 400) or None
+    return title_en, digest_en
+
+
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
     """跑一个「锦上添花」的 LLM 步骤；失败就用 fallback，不影响主流程。"""
     if not prompt:
@@ -165,6 +186,25 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
             category, topics = parse_classify(raw_classify, {c.name for c in settings.categories})
             article.category = category
             article.topics = json.dumps(topics, ensure_ascii=False) if topics else None
+
+        # 中英双语。标题和导语分别判断：英文信源常见「英文标题 + 中文导语」，
+        # 整段一起判断会漏掉该翻的导语，也会给纯英文标题翻出一份一模一样的自己。
+        if settings.i18n.enabled:
+            title_needs = not looks_english(article.title)
+            digest_needs = not looks_english(summary)
+            if not title_needs and not digest_needs:
+                # 整篇本来就是英文，直接复用，不必再花一次调用
+                article.title_en = article.title
+                article.digest_en = truncate(summary, 400)
+            else:
+                raw_en = _optional_llm(
+                    client,
+                    render_translate_prompt(settings.prompts, article.title, summary),
+                    "",
+                )
+                en_title, en_digest = parse_translate(raw_en)
+                article.title_en = en_title if title_needs else article.title
+                article.digest_en = en_digest if digest_needs else truncate(summary, 400)
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None

@@ -50,6 +50,9 @@ class Article(Base):
     category: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
     # 主题（JSON 数组）：详情页右栏的「主题」区
     topics: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 英文版标题与速览：页面可在 中文 / English / 双语 之间切换
+    title_en: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    digest_en: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)

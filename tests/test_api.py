@@ -408,8 +408,9 @@ def test_card_is_whole_clickable_with_pointer_cursor(client, settings: Settings,
     assert "padding:14px 16px; box-shadow:var(--shadow); cursor:pointer" in text
     # 拉伸链接铺满整卡
     assert ".item .t::after { content:\"\"; position:absolute; inset:0;" in text
-    # 标题仍是真链接（可右键/可访问）
-    assert '<a href="/story/1"><div class="t">整卡可点测试</div></a>' in text
+    # 标题仍是真链接（可右键/可访问），内容由双语宏包一层
+    assert '<a href="/story/1"><div class="t">' in text
+    assert '<span class="zh">整卡可点测试</span>' in text
     # 卡内可点元素浮到上面
     assert ".item .cats a, .item .bm, .item .more" in text
     assert "z-index:2" in text
@@ -515,3 +516,136 @@ def test_story_body_never_renders_empty_paragraphs(client, settings: Settings, s
     assert "这是第二段正文" in prose
     # 小标题应该同时出现在目录里
     assert 'href="#sec-0"' in text
+
+
+def test_base_script_tags_are_balanced(client):
+    """回归：主 <script> 必须闭合。
+
+    之前 base.html 少了一个 </script>，导致 {% block extra %} 被塞进 script 内部 ——
+    浏览器会把后面的内容当脚本文本解析，遇到内层 <script> 直接语法报错，
+    结果全站 JS 失效（收藏页永远停在「正在读取…」、收藏按钮与 / 快捷键都不工作）。
+    """
+    import re
+
+    for path in ("/", "/saved", "/search?q=x"):
+        text = client.get(path).text
+        opens = len(re.findall(r"<script\b", text))
+        closes = len(re.findall(r"</script>", text))
+        assert opens == closes, f"{path} 的 script 标签不成对：{opens} 开 / {closes} 闭"
+        # extra block 的脚本必须落在主脚本之外
+        main_end = text.index("</script>")
+        assert 'id="saved-root"' not in text or text.index('fetch("/api/articles') > main_end
+
+
+def test_language_switcher_present(client):
+    """顶栏要有 中文 / EN / 双语 三档，默认中文。"""
+    text = client.get("/").text
+    assert 'data-lang="zh"' in text
+    assert 'data-lang="en"' in text
+    assert 'data-lang="both"' in text
+    assert 'localStorage.getItem("smtm-lang") || "zh"' in text   # 默认中文
+    # 纯 CSS 控制显隐，不来回请求服务器
+    assert 'html[data-lang="zh"] .en { display:none; }' in text
+    assert 'html[data-lang="en"] .zh { display:none; }' in text
+    assert 'html[data-lang="both"] .en' in text
+
+
+def test_card_shows_english_below_chinese(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        make_article(session, title="中文标题", title_en="English Title", link="https://example.com/bi",
+                     digest="中文导语", digest_en="English digest", category="行业")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert '<span class="zh">中文标题</span>' in text
+    assert '<span class="en">English Title</span>' in text
+    assert '<span class="zh">中文导语</span>' in text
+    assert '<span class="en">English digest</span>' in text
+    # 英文在中文之后（双语模式靠 CSS 排上下）
+    assert text.index('<span class="zh">中文标题</span>') < text.index('<span class="en">English Title</span>')
+    # 没有英文时不要留空壳
+    assert '<span class="en"></span>' not in text
+
+
+def test_story_shows_bilingual_title_and_digest(client, settings: Settings, seeded_db):
+    with session_scope() as session:
+        article = make_article(session, title="中文大标题", title_en="Big English Title",
+                               link="https://example.com/bi2", digest="中文导语", digest_en="English lead")
+        article_id = article.id
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get(f"/story/{article_id}").text
+    assert '<h1 class="body-title"><span class="zh">中文大标题</span>' in text
+    assert '<span class="en">Big English Title</span>' in text
+    assert "English lead" in text
+
+
+def test_archive_expandable_with_titles(client, settings: Settings, seeded_db):
+    """历史日报：点日期展开当天标题，并且是通过接口按需加载。"""
+    with session_scope() as session:
+        make_article(session, title="归档里的文章", link="https://example.com/ar")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/archive").text
+    assert "arc-row" in text
+    assert 'aria-expanded="false"' in text
+    assert f'data-date="{TODAY}"' in text
+    assert "arc-panel" in text
+    # 展开内容走接口按需拉，不一次性把所有标题塞进 HTML
+    assert "/api/articles?date=" in text
+    assert "归档里的文章" not in text
+    # 视觉要素：条形对比、星期、相对时间
+    assert "arc-bar" in text
+    assert "星期" in text
+
+
+def test_saved_page_has_working_script(client):
+    """收藏页脚本必须落在主 script 之外（否则整段 JS 失效，页面永远转圈）。"""
+    text = client.get("/saved").text
+    main_end = text.index("</script>")
+    assert text.index('fetch("/api/articles') > main_end
+    assert "还没有收藏" in text
+
+
+def test_lang_control_is_rendered(client):
+    """语言控件必须真的输出到页面里。
+
+    回归：曾只加了 CSS 和 JS，却忘了插控件，导致 getElementById("lang") 为 null、
+    全局脚本在 addEventListener 处抛错，收藏与收藏页一起失效。
+    """
+    text = client.get("/").text
+    assert '<div class="lang" id="lang"' in text
+    for value in ("zh", "en", "both"):
+        assert f'data-lang="{value}"' in text
+    # 取到元素后才绑定，且绑定前判空
+    assert 'if (box) box.addEventListener' in text
+
+
+def test_global_script_survives_missing_element(client):
+    """全局脚本对可选元素判空：控件缺失时不应抛错拖垮收藏等逻辑。"""
+    text = client.get("/").text
+    assert 'if (themeBtn) themeBtn.onclick' in text
+    # 每个 attach 前都有判空保护
+    assert 'var lb = document.getElementById("lb")' in text
+    main = text[text.index("smtm-saved") - 4000:]
+    assert "null.addEventListener" not in main
+    assert "null.onclick" not in main
+
+
+def test_bilingual_macro_skips_identical_english(client, settings: Settings, seeded_db):
+    """英文信源的标题/导语本来就是英文，不该在双语模式里显示两遍一样的内容。"""
+    with session_scope() as session:
+        make_article(session, title="An English only headline about agents", link="https://example.com/en",
+                     title_en="An English only headline about agents",
+                     digest="An English only digest about agents",
+                     digest_en="An English only digest about agents", category="行业")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert text.count('<span class="zh">An English only headline about agents</span>') == 1
+    assert '<span class="en">An English only headline about agents</span>' not in text
+    assert '<span class="en">An English only digest about agents</span>' not in text

@@ -141,6 +141,7 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
     return {
         "id": article.id,
         "title": article.title,
+        "title_en": article.title_en or "",
         "link": article.link,
         "source": source_name or "未知来源",
         "source_host": _host(source_url),
@@ -150,6 +151,7 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "relative": _relative(published, now),
         # 速览优先（页内就能读完），没有就退回摘要
         "digest": strip_markdown(article.digest) or strip_markdown(article.summary),
+        "digest_en": strip_markdown(article.digest_en),
         "reason": strip_markdown(article.reason),
         "score": article.score,
         "category": article.category or "",
@@ -451,5 +453,29 @@ def _related(session: Session, article: Article, now: datetime, *, limit: int = 
 
 @page_router.get("/archive", response_class=HTMLResponse)
 def archive(request: Request, session: Session = Depends(get_session)) -> HTMLResponse:
-    reports = list(session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(100)).scalars())
-    return templates.TemplateResponse(request, "archive.html", _ctx(request, reports=reports, title="历史日报"))
+    """历史日报：按日期倒序列出，点日期展开当天标题（内容按需再拉，不一次性塞满页面）。"""
+    reports = list(session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(120)).scalars())
+    now = now_local()
+    rows = []
+    peak = max((row.article_count for row in reports), default=0) or 1
+    for row in reports:
+        label, weekday = _date_label(row.date)
+        rows.append(
+            {
+                "date": row.date,
+                "label": label,
+                "weekday": weekday,
+                "count": row.article_count,
+                # 用条形长度直观对比哪天抓得多
+                "width": max(6, round(row.article_count / peak * 100)),
+                "relative": _relative(
+                    datetime.strptime(row.date, "%Y-%m-%d").replace(hour=12), now
+                ),
+                "href": f"/daily/{row.date}",
+            }
+        )
+    return templates.TemplateResponse(
+        request,
+        "archive.html",
+        _ctx(request, reports=rows, total=len(rows), title="历史日报"),
+    )

@@ -89,7 +89,10 @@ def test_llm_client_endpoint_normalisation():
 
 def test_process_article_relevant(seeded_db, settings: Settings):
     answers = iter(
-        ["yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由", "模型\nOpenAI, 大模型", "标签一,标签二"]
+        [
+            "yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由",
+            "模型\nOpenAI, 大模型", "English Title\nEnglish digest here", "标签一,标签二",
+        ]
     )
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -107,6 +110,8 @@ def test_process_article_relevant(seeded_db, settings: Settings):
             assert article.reason == "这是推荐理由"
             assert article.category == "模型"
             assert article.topics == '["OpenAI", "大模型"]'
+            assert article.title_en == "English Title"
+            assert article.digest_en == "English digest here"
             assert article.score == 88
             assert article.tags == "标签一,标签二"
     finally:
@@ -153,9 +158,9 @@ def test_process_article_falls_back_on_llm_failure(seeded_db, settings: Settings
 def test_process_pending_counts(seeded_db, settings: Settings):
     answers = iter(
         [
-            "yes 88", "摘要", "速览1", "理由1", "模型\nOpenAI", "A,B",
+            "yes 88", "摘要", "速览1", "理由1", "模型\nOpenAI", "EN Title 1\nEN digest 1", "A,B",
             "no 5",
-            "yes 72", "摘要2", "速览2", "理由2", "产品\nAI Agent", "C",
+            "yes 72", "摘要2", "速览2", "理由2", "产品\nAI Agent", "EN Title 2\nEN digest 2", "C",
         ]
     )
 
@@ -316,7 +321,7 @@ def test_parse_relevance(answer, relevant, score):
 
 def test_relevance_without_score_still_processes(seeded_db, settings: Settings):
     """模型只给 yes 没给分数时，文章照样要正常进流程（评分是可选的）。"""
-    answers = iter(["yes", "摘要", "速览", "理由", "行业\n云计算", "标签"])
+    answers = iter(["yes", "摘要", "速览", "理由", "行业\n云计算", "EN title\nEN digest", "标签"])
     import httpx
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -350,3 +355,57 @@ def test_parse_classify(raw, category, topics):
     from app.ai.processor import parse_classify
 
     assert parse_classify(raw, {"一手", "模型", "产品", "行业", "论文", "教程", "观点"}) == (category, topics)
+
+
+@pytest.mark.parametrize(
+    ("text", "english"),
+    [
+        ("Meta 开源 Muse 模型代码，计划将这一 AI 嵌入消费设备", False),
+        ("Meta open-sources the Muse model code to let anyone embed it in consumer devices", True),
+        ("", False),
+    ],
+)
+def test_looks_english(text, english):
+    from app.ai.processor import looks_english
+
+    assert looks_english(text) is english
+
+
+def test_parse_translate():
+    from app.ai.processor import parse_translate
+
+    assert parse_translate("English Title\nEnglish digest line") == ("English Title", "English digest line")
+    assert parse_translate("Only Title") == ("Only Title", None)
+    assert parse_translate("") == (None, None)
+
+
+def test_english_source_skips_translation(seeded_db, settings: Settings):
+    """整篇英文的信源不必再翻一次，省一次调用；英文直接复用原文。"""
+    import httpx
+
+    en_summary = (
+        "Google will end free access to its Flash and Pro models, "
+        "a move that tightens monetization for large language model providers."
+    )
+    answers = iter(["yes 80", en_summary, "English digest", "reason", "产品\\nAI", "标签"])
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session,
+                title="An English headline about AI agents shipping to production this week",
+                status="pending",
+                relevance=None,
+            )
+            assert process_article(session, article, client, settings) == "processed"
+            assert article.title_en == article.title, "纯英文标题直接复用原文，不翻"
+            assert article.digest_en == en_summary, "纯英文导语直接复用摘要原文"
+            assert calls["n"] == 6  # relevance/summary/digest/reason/classify/tags，没有 translate
+    finally:
+        client.close()

@@ -21,6 +21,11 @@ llm:
   max_retries: 2
   temperature: 0.3
 
+i18n:
+  # 是否生成英文标题与英文导语（页面可在 中文 / English / 双语 间切换）。
+  # 关掉可以省一次 LLM 调用。
+  enabled: true
+
 ai:
   # 每个调度周期最多处理多少篇 pending（每篇要花 2~3 次 LLM 调用）
   batch_size: 60

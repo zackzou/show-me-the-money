@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% from "_articles.html" import bi %}
 {% block content %}
 
 {% if not item %}
@@ -32,7 +33,7 @@
   </aside>
 
   <article>
-    <h1 class="body-title">{{ item.title }}</h1>
+    <h1 class="body-title">{{ bi(item.title, item.title_en) }}</h1>
     {% if item.category or item.topics %}
       <p class="sub">
         {% if item.category %}{{ item.category }}{% endif %}
@@ -42,7 +43,7 @@
 
     <section class="sec">
       <div class="sec-t">AI 导读</div>
-      <p class="lead-p">{{ item.digest or item.reason or '（没有生成导读）' }}</p>
+      <p class="lead-p">{{ bi(item.digest or item.reason or '（没有生成导读）', item.digest_en) }}</p>
     </section>
 
     {% if item.body_blocks %}
