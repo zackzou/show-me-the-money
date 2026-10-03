@@ -376,3 +376,17 @@ def test_card_shows_category_and_clickable_tags(client, settings: Settings, seed
     assert f"?cat={quote('行业')}" in text
     assert "?tag=OpenAI" in text
     assert "#OpenAI" in text
+
+
+def test_story_subtitle_is_not_duplicate_of_digest(client, settings: Settings, seeded_db):
+    """斜体位置放分类/主题定位，不该把 AI 导读的内容再重复一遍。"""
+    with session_scope() as session:
+        make_article(session, title="不重复测试", link="https://example.com/dup",
+                     digest="这是导语内容，只该出现一次。", category="行业",
+                     topics='["云计算"]')
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/story/1").text
+    assert text.count("这是导语内容，只该出现一次。") == 1
+    assert "行业 · 云计算" in text

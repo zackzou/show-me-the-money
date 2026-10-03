@@ -23,7 +23,12 @@
 
   <article>
     <h1 class="body-title">{{ item.title }}</h1>
-    {% if item.digest %}<p class="sub">{{ item.digest }}</p>{% endif %}
+    {% if item.category or item.topics %}
+      <p class="sub">
+        {% if item.category %}{{ item.category }}{% endif %}
+        {%- if item.topics %} · {{ item.topics|join(" / ") }}{% endif %}
+      </p>
+    {% endif %}
 
     <section class="sec">
       <div class="sec-t">AI 导读</div>
