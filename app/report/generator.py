@@ -6,11 +6,13 @@
 
 from __future__ import annotations
 
+import time
 from datetime import datetime, timedelta
 from typing import Any
 
 from jinja2 import Template
 from sqlalchemy import delete, select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.config import Settings
@@ -24,6 +26,10 @@ log = get_logger(__name__)
 # 进日报的状态：processed 是 LLM 处理成功，failed 是 LLM 不可用时的降级摘要。
 # 降级文章同样要出现在日报里，否则「LLM 挂了不影响日报产出」就是空话。
 STATUS_REPORTABLE = ("processed", "failed")
+
+# 覆盖写日报是「先删后插」，与另一个进程撞上时可能拿不到 SQLite 写锁
+REPORT_WRITE_ATTEMPTS = 3
+REPORT_WRITE_BACKOFF_SECONDS = 3.0
 
 REPORT_HTML_TEMPLATE = Template(
     """<!doctype html>
@@ -125,6 +131,9 @@ def generate_daily_report(
 
     ``until`` 截断时间窗上界：``None`` 出整天，传当前时刻则出「今天实时」。
     同一天重复调用会覆盖旧结果，所以滚动刷新是安全的。
+
+    覆盖写是「先删后插」，如果此时另一个进程（定时任务 + 手动触发）也在写同一天，
+    SQLite 可能拿不到写锁。这里重试几次而不是让整次生成失败。
     """
     date_str = date or now_local().strftime("%Y-%m-%d")
     topic = settings.research_topic if settings is not None else ""
@@ -158,5 +167,19 @@ def generate_daily_report(
 
     if session is not None:
         return _build(session)
-    with session_scope() as scoped:
-        return _build(scoped)
+
+    for attempt in range(REPORT_WRITE_ATTEMPTS):
+        try:
+            with session_scope() as scoped:
+                return _build(scoped)
+        except OperationalError as exc:
+            if "locked" not in str(exc).lower() or attempt == REPORT_WRITE_ATTEMPTS - 1:
+                raise
+            time.sleep(REPORT_WRITE_BACKOFF_SECONDS)
+            log.warning(
+                "日报写入被占用，%.1fs 后重试（%s/%s）",
+                REPORT_WRITE_BACKOFF_SECONDS,
+                attempt + 1,
+                REPORT_WRITE_ATTEMPTS,
+            )
+    raise RuntimeError("日报生成失败")  # pragma: no cover - 上面必然 return 或 raise

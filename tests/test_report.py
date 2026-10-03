@@ -289,3 +289,44 @@ def test_markdown_markers_stripped_from_display(seeded_db, settings: Settings):
     assert "**" not in result["content_md"]
     assert "**" not in result["content_html"]
     assert "结论： 这是一个 重要 的变化" in result["content_md"]
+
+
+def test_generate_daily_report_retries_when_db_locked(seeded_db, settings: Settings, monkeypatch):
+    """并发生成同一天日报时，写锁冲突应该重试而不是整次失败。"""
+    import app.report.generator as gen
+
+    calls = {"n": 0}
+    real = gen.session_scope
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise gen.OperationalError("SELECT 1", {}, Exception("database is locked"))
+        return real()
+
+    monkeypatch.setattr(gen, "session_scope", flaky)
+    monkeypatch.setattr(gen.time, "sleep", lambda _s: None)
+
+    with session_scope() as session:
+        _seed(session, title="锁重试文章", link="https://example.com/lock-1")
+
+    result = generate_daily_report(TODAY, settings=settings)
+
+    assert result["article_count"] == 1
+    assert calls["n"] == 2
+
+
+def test_generate_daily_report_gives_up_after_attempts(seeded_db, settings: Settings, monkeypatch):
+    """一直拿不到锁就老实抛错，不要无限重试。"""
+    import app.report.generator as gen
+
+    monkeypatch.setattr(gen, "REPORT_WRITE_ATTEMPTS", 2)
+
+    def always_locked():
+        raise gen.OperationalError("SELECT 1", {}, Exception("database is locked"))
+
+    monkeypatch.setattr(gen, "session_scope", always_locked)
+    monkeypatch.setattr(gen.time, "sleep", lambda _s: None)
+
+    with pytest.raises(gen.OperationalError):
+        generate_daily_report(TODAY, settings=settings)
