@@ -102,6 +102,15 @@ class FetcherSettings(BaseModel):
     min_content_chars: int = 0
 
 
+class MediaSettings(BaseModel):
+    """配图补齐（RSS 没给图时去文章页抓 og:image）。"""
+
+    enabled: bool = True
+    # 每轮最多补多少篇（每篇一次 HTTP 请求，别把信源网站打疼）
+    batch_size: int = 20
+    timeout_seconds: float = 10.0
+
+
 class AISettings(BaseModel):
     """单次处理任务的规模控制（每篇文章要花 2~3 次 LLM 调用）。"""
 
@@ -125,6 +134,7 @@ class Settings(BaseModel):
     web: WebSettings
     fetcher: FetcherSettings
     ai: AISettings = AISettings()
+    media: MediaSettings = MediaSettings()
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
     project_root: Path = Field(default=PROJECT_ROOT)
@@ -205,6 +215,7 @@ def load_settings(
         web = WebSettings(**(raw_settings.get("web") or {}))
         fetcher = FetcherSettings(**(raw_settings.get("fetcher") or {}))
         ai = AISettings(**(raw_settings.get("ai") or {}))
+        media = MediaSettings(**(raw_settings.get("media") or {}))
         prompts = PromptsConfig(**prompts_raw)
         sources = [SourceConfig(**item) for item in sources_raw]
     except (ValidationError, TypeError) as exc:
@@ -240,6 +251,7 @@ def load_settings(
         web=web,
         fetcher=fetcher,
         ai=ai,
+        media=media,
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,

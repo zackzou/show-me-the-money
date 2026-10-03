@@ -115,6 +115,8 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `fetcher.max_age_days` | `14` | 只收最近 N 天发布的内容。挡掉「一次返回整个历史」的归档型 feed |
 | `fetcher.max_items_per_source` | `60` | 单个信源单次最多入库条数（成本闸门） |
 | `fetcher.min_content_chars` | `0` | 正文短于该长度视为「只有标题」丢弃，`0` = 不限制 |
+| `media.enabled` | `true` | 是否在处理后补齐配图 |
+| `media.batch_size` | `20` | 每轮最多补多少篇（每篇一次请求） |
 | `ai.batch_size` | `60` | 每轮最多处理多少篇 pending，每篇要花 2~3 次 LLM 调用 |
 | `storage.retention_days` | `30` | 数据保留天数 |
 
@@ -135,8 +137,10 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 - **日报按自然日切分，且一份日报只管一天。** 08:00 出的是「昨天」的定稿；今天那份每 2 小时滚动刷新到当前时刻。这样当天任何时间发布的文章都不会被漏掉（早先版本只出「当天 00:00 到生成时刻」的内容，下午和晚上的文章会永远不属于任何一份日报）。
 - **LLM 不可用不会让日报消失。** 摘要会降级为正文开头 200 字，并标注「降级：LLM 不可用」。
-- **配图不再被丢掉。** 入库时从 RSS 正文抽 `<img src/data-src/srcset>`（滤掉追踪像素与占位图），
-  页面直接显示；升级旧库会自动补上 `image_urls` / `digest` 两列，不需要你手动改数据库。
+- **配图不再被丢掉。** 两级取图：① 入库时从 RSS 正文抽 `<img src/data-src/srcset>`；
+  ② RSS 没给图时（实测默认信源大多是纯文本 description），处理完再去文章页抓 `og:image`，
+  每轮限量 `media.batch_size` 篇，查过没有的会标记、不重复请求。
+  滤掉追踪像素、占位图与站点 logo。升级旧库会自动补上 `image_urls` / `digest` 两列。
 - **停机后会自动补齐缺失日期的日报。**
 
 ---
@@ -203,7 +207,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 26 个文件零告警、75 个测试全绿、覆盖率 89%。
+当前状态：`ruff` 无告警、`mypy` 26 个文件零告警、79 个测试全绿、覆盖率 89%。
 
 ---
 

@@ -52,6 +52,7 @@ class HealthOut(BaseModel):
     database: str
     sources: int
     articles: int
+    with_images: int = 0
     reports: int
     research_topics: list[str]
 

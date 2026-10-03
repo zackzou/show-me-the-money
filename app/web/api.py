@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from app import __version__
 from app.db import get_session
+from app.fetcher.images import count_with_images
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleOut, HealthOut, ReportDetail, ReportOut
@@ -60,6 +61,7 @@ def health(request: Request, session: Session = Depends(get_session)) -> HealthO
         database="ok",
         sources=session.query(Source).count(),
         articles=session.query(Article).count(),
+        with_images=count_with_images(session),
         reports=session.query(DailyReport).count(),
         research_topics=list(getattr(settings, "research_topics", []) or []),
     )

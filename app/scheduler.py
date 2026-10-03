@@ -14,6 +14,7 @@ from app.ai.client import LLMClient
 from app.ai.processor import process_pending
 from app.config import Settings
 from app.db import session_scope
+from app.fetcher.images import backfill_images
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
 from app.report.generator import STATUS_REPORTABLE, day_window, generate_daily_report
@@ -56,11 +57,28 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
     finally:
         client.close()
     log.info("处理完成：%s", stats)
-    # 处理完顺手刷新「今天」这份日报，首页就能实时看到当天热点；失败不影响处理结果。
+    # 处理完顺手补图（只给相关文章补，每轮限量）与刷新今日日报；任何一步失败都不影响处理结果。
+    try:
+        run_media_job(settings)
+    except Exception as exc:
+        log.warning("补齐配图失败：%s", exc)
     try:
         run_today_report_job(settings)
     except Exception as exc:  # 日报失败不该把处理统计一起丢掉
         log.warning("今日日报刷新失败：%s", exc)
+    return stats
+
+
+def run_media_job(settings: Settings) -> dict[str, Any]:
+    """给「相关但没图」的文章补首图（RSS 没带图时抓 og:image）。"""
+    if not settings.media.enabled:
+        return {"candidates": 0, "filled": 0, "not_found": 0, "failed": 0}
+    with session_scope() as session:
+        stats = backfill_images(
+            session,
+            limit=settings.media.batch_size,
+            timeout=settings.media.timeout_seconds,
+        )
     return stats
 
 

@@ -27,6 +27,13 @@ ai:
   # 每处理多少篇提交一次，防止长任务中途失败回滚全部进度
   batch_checkpoint_every: 10
 
+media:
+  # 是否在处理后补齐配图（RSS 没给图时抓文章页 og:image，每篇一次请求）
+  enabled: true
+  # 每轮最多补多少篇
+  batch_size: 20
+  timeout_seconds: 10
+
 fetcher:
   timeout_seconds: 15
   max_retries: 2
