@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import httpx
 
 from app.fetcher.content import extract_article_text, fetch_article_text
@@ -96,14 +98,14 @@ def test_backfill_content_marks_empty_so_it_does_not_retry(seeded_db):
 
     import app.fetcher.content as mod
 
-    original = mod.fetch_article_text
+    original = mod.fetch_article_document
     mocked = httpx.Client(transport=httpx.MockTransport(handler))
-    mod.fetch_article_text = lambda url, **kw: original(url, min_chars=50, client=mocked)
+    mod.fetch_article_document = lambda url, **kw: original(url, min_chars=50, client=mocked)
     try:
         with session_scope() as session:
             stats = backfill_content(session, limit=5)
     finally:
-        mod.fetch_article_text = original
+        mod.fetch_article_document = original
 
     assert stats["candidates"] == 1
     assert stats["short"] == 1
@@ -114,3 +116,115 @@ def test_backfill_content_marks_empty_so_it_does_not_retry(seeded_db):
     with session_scope() as session:
         assert backfill_content(session, limit=5)["candidates"] == 0  # 不重复请求
     assert calls["n"] == 1
+
+
+# 正文内联配图：原站（图1 的 AIHOT）就是把图夹在段落之间，所以位置必须跟着一起抓
+INLINE = """
+<html><body><article>
+  <p>第一段正文，内容足够长，可以通过抽取器的长度门槛。</p>
+  <p><img src="/img/lead.jpg" width="900" height="474"></p>
+  <p>第二段正文，同样足够长，应该出现在第一张图之后。</p>
+  <p><img src="https://cdn.example.com/chart.png"></p>
+  <p>第三段正文，这一段也足够长，用来验证第二张图出现的位置。</p>
+  <img src="/static/logo.png" class="logo">
+  <img src="/img/lead.jpg">
+</article></body></html>
+"""
+
+
+def test_extract_article_document_keeps_inline_image_positions():
+    from app.fetcher.content import extract_article_document
+
+    text, images = extract_article_document(
+        INLINE, base_url="https://news.example.com/a/1.html", min_chars=20
+    )
+    blocks = text.split("\n\n")
+    assert len(blocks) == 3
+    # 图 1 夹在第 1 段后，图 2 夹在第 2 段后；相对地址补成绝对地址
+    assert images == [
+        {"i": 1, "url": "https://news.example.com/img/lead.jpg"},
+        {"i": 2, "url": "https://cdn.example.com/chart.png"},
+    ]
+    assert blocks[0].startswith("第一段正文")
+    assert blocks[2].startswith("第三段正文")
+
+
+def test_extract_article_document_drops_icons_and_repeats():
+    from app.fetcher.content import extract_article_document
+
+    _, images = extract_article_document(INLINE, base_url="https://news.example.com/", min_chars=20)
+    urls = [item["url"] for item in images]
+    assert not any("logo" in url for url in urls)  # 站点 logo 不进正文
+    assert len(urls) == len(set(urls))  # 同一张图重复出现只留一次
+
+
+def test_extract_article_document_without_images_matches_text():
+    from app.fetcher.content import extract_article_document, extract_article_text
+
+    text, images = extract_article_document(PAGE, min_chars=50)
+    assert images == []
+    assert text == extract_article_text(PAGE, min_chars=50)
+
+
+def test_backfill_content_stores_body_images(seeded_db):
+    import app.fetcher.content as mod
+    from app.db import session_scope
+    from app.fetcher.content import backfill_content
+    from app.models import Article
+    from tests.conftest import make_article
+
+    with session_scope() as session:
+        article = make_article(session, link="https://example.com/inline", content_full=None)
+        article_id = article.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=INLINE)
+
+    original = mod.fetch_article_document
+    mocked = httpx.Client(transport=httpx.MockTransport(handler))
+    mod.fetch_article_document = lambda url, **kw: original(url, min_chars=20, client=mocked)
+    try:
+        with session_scope() as session:
+            stats = backfill_content(session, limit=5)
+    finally:
+        mod.fetch_article_document = original
+
+    assert stats["with_images"] == 1
+    with session_scope() as session:
+        stored = json.loads(session.get(Article, article_id).body_images)
+    assert stored[0]["url"].endswith("/img/lead.jpg")
+
+
+def test_backfill_body_images_fills_positions_only(seeded_db):
+    """老数据补内联配图：只写位置，已经在库里的正文不重写。"""
+    import app.fetcher.content as mod
+    from app.db import session_scope
+    from app.fetcher.content import backfill_body_images
+    from app.models import Article
+    from tests.conftest import make_article
+
+    original_text = "这是一段已经在库里的正文，字符数足够多，不应该被重新抓取覆盖掉。"
+    with session_scope() as session:
+        article = make_article(session, link="https://example.com/old", content_full=original_text)
+        article_id = article.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, text=INLINE)
+
+    original = mod.fetch_article_document
+    mocked = httpx.Client(transport=httpx.MockTransport(handler))
+    mod.fetch_article_document = lambda url, **kw: original(url, min_chars=20, client=mocked)
+    try:
+        with session_scope() as session:
+            stats = backfill_body_images(session, limit=5)
+    finally:
+        mod.fetch_article_document = original
+
+    assert stats["filled"] == 1
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        assert stored.content_full == original_text
+        assert json.loads(stored.body_images)[0]["url"].endswith("/img/lead.jpg")
+        # 标记成数组（含空数组）之后就不再重复请求
+        with session_scope() as session:
+            assert backfill_body_images(session, limit=5)["candidates"] == 0

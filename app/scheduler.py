@@ -14,7 +14,7 @@ from app.ai.client import LLMClient
 from app.ai.processor import backfill_translations, process_pending
 from app.config import Settings
 from app.db import session_scope
-from app.fetcher.content import backfill_content
+from app.fetcher.content import backfill_body_images, backfill_content
 from app.fetcher.images import backfill_images
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
@@ -111,7 +111,13 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
             limit=settings.media.batch_size,
             timeout=settings.media.timeout_seconds,
         )
-    return stats
+        # 正文内联配图：老数据都没有位置，顺手补齐，详情页才能像原站那样把图插进正文
+        inline = backfill_body_images(
+            session,
+            limit=settings.media.batch_size,
+            timeout=settings.media.timeout_seconds,
+        )
+    return {"cover": stats, "inline": inline}
 
 
 def run_report_job(settings: Settings) -> dict[str, Any]:

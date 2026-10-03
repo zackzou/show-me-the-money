@@ -75,6 +75,7 @@ class PromptsConfig(BaseModel):
     translate_prompt: str = ""
     translate_content_prompt: str = ""
     translate_title_zh_prompt: str = ""
+    translate_digest_zh_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80

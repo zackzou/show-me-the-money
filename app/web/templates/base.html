@@ -351,8 +351,21 @@
     .sec-t.plain { color:var(--faint); }
     .lead-p { font-size:17.5px; line-height:2.05; color:var(--text); }
     .rule { height:1px; background:var(--line); margin:34px 0; }
-    .prose p { margin:0 0 24px; font-size:17px; line-height:2.05; color:var(--text); }
-    .prose h3 { margin:38px 0 16px; font-size:19px; font-weight:650; line-height:1.5; color:var(--text); }
+    /* 正文字号与行距对齐参考站 aihot.news 的 .prose（18px / 1.8 / 段距 1.2em），
+       中文正文再补一点点字距，不然整段看着比原站松 */
+    .prose p { margin:0 0 1.2em; font-size:18px; line-height:1.8; letter-spacing:.012em; color:var(--text); }
+    .prose h3 { margin:1.8em 0 .7em; font-size:1.1em; font-weight:650; line-height:1.4; color:var(--text); }
+    /* 正文内联配图：原站就是把图夹在段落之间，这里保持同样的节奏。
+       宽度按原图、居中排（参考站 .prose img 的 margin-inline:auto）——
+       硬拉满整栏的话，一张竖版梗图能占掉三屏 */
+    .prose .shot { margin:1.5em 0; }
+    .prose .shot img { display:block; max-width:100%; height:auto; margin:0 auto;
+                       border-radius:10px; background:var(--chip); cursor:zoom-in; }
+    .rel-sec { margin-top:36px; }
+    .rel-list { margin:0; padding-left:1.15em; list-style:disc; }
+    .rel-list li { margin:9px 0; font-size:14.5px; line-height:1.8; color:var(--muted); }
+    .rel-list a { color:var(--muted); }
+    .rel-list a:hover { color:var(--accent); }
     .tail { margin-top:44px; padding-top:22px; border-top:1px solid var(--line); font-size:13px; color:var(--faint); }
     /* 本文目录（左栏） */
     .toc { margin-top:10px; border-left:2px solid var(--line); padding-left:12px; }

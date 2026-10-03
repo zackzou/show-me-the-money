@@ -85,6 +85,13 @@ def render_translate_content_prompt(prompts: PromptsConfig, text: str) -> str:
     return _fill(prompts.translate_content_prompt, {"text": text})
 
 
+def render_translate_digest_zh_prompt(prompts: PromptsConfig, text: str) -> str:
+    """英译中速览（AI 导读）。模板为空（老配置）时返回空串。"""
+    if not prompts.translate_digest_zh_prompt.strip():
+        return ""
+    return _fill(prompts.translate_digest_zh_prompt, {"text": text})
+
+
 def render_relevance_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
     return _fill(
         prompts.relevance_prompt,

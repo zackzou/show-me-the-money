@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from urllib.parse import quote
 
 from app.config import Settings
@@ -488,7 +489,7 @@ def test_story_columns_are_balanced(client, seeded_db):
     """三栏比例：正文列要最宽，左右栏窄一些。"""
     text = client.get("/").text
     assert "grid-template-columns:216px minmax(0,1fr) 300px" in text
-    assert ".prose p { margin:0 0 24px; font-size:17px; line-height:2.05" in text
+    assert ".prose p { margin:0 0 1.2em; font-size:18px; line-height:1.8" in text
 
 
 def test_story_body_never_renders_empty_paragraphs(client, settings: Settings, seeded_db):
@@ -799,6 +800,7 @@ def test_digest_brief_has_no_double_punctuation():
 
     class FakeArticle:
         digest = "导读第一句已经以句号结尾。第二句也以句号结尾。"
+        digest_zh = ""
         reason = "推荐理由的第一句内容，还有第二句。"
         summary = ""
         content = ""
@@ -817,6 +819,7 @@ def test_digest_brief_does_not_repeat_same_text():
 
     class FakeArticle:
         digest = "同一句话在这里出现了两次。"
+        digest_zh = ""
         reason = "同一句话在这里出现了两次。"
         summary = ""
         content = ""
@@ -879,3 +882,92 @@ def test_topics_json_used_in_detail_api(client, settings: Settings, seeded_db):
         article_id = article.id
     body = client.get(f"/api/articles/{article_id}").json()
     assert body["topics_list"] == ["AI Agent", "隐私权限"]
+
+
+def test_story_renders_body_images_between_paragraphs(client, settings: Settings, seeded_db):
+    """正文配图要插在段落之间（原站 AIHOT 的做法），不是另开一个配图区块。"""
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="内联配图",
+            link="https://example.com/inline-shot",
+            digest="导读",
+            content_full=(
+                "第一段正文，字符数足够不会被判成小标题。\n\n"
+                "第二段正文，同样足够长，应该排在第一张图后面。"
+            ),
+            body_images=json.dumps(
+                [{"i": 1, "url": "https://cdn.example.com/one.png"}, {"i": 0, "url": "https://cdn.example.com/top.png"}],
+                ensure_ascii=False,
+            ),
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    prose = text.split('class="prose')[1].split("</section>")[0]
+    # 头图在第一段之前，正文图在第一段之后
+    assert prose.index("top.png") < prose.index("第一段正文")
+    assert prose.index("第一段正文") < prose.index("one.png") < prose.index("第二段正文")
+    # 正文里已经有配图，就不要再单开「文章配图」区块
+    assert "文章配图" not in text
+
+
+def test_story_keeps_cover_gallery_when_body_has_no_images(client, settings: Settings, seeded_db):
+    """只有封面图时仍保留配图区块，否则读者在页内一张图也看不到。"""
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="只有封面",
+            link="https://example.com/cover-only",
+            digest="导读",
+            content_full="这一段正文字符数足够长，应该被当成正文渲染出来。",
+            image_urls=json.dumps(["https://cdn.example.com/cover.png"]),
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert "文章配图" in text
+    assert "cover.png" in text
+
+
+def test_story_puts_related_at_the_bottom_without_truncating(client, settings: Settings, seeded_db):
+    """相关阅读移到正文末尾（原站的位置），标题给全，不再按 42 字硬砍。"""
+    long_title = "标题很长很长很长的英文文章标题用来验证它不会再被截断到四十二个字符而是完整显示出来"
+    with session_scope() as session:
+        first = make_article(
+            session, title="主体文章", link="https://example.com/subject", category="行业动态", digest="导读"
+        )
+        make_article(session, title=long_title, link="https://example.com/neighbour", category="行业动态")
+        first_id = first.id
+
+    text = client.get(f"/story/{first_id}").text
+    # 出现在正文区块之后，而不是右栏里
+    assert text.index("相关阅读") > text.index("AI 导读")
+    # 整条标题都在（老模板是 r.title[:42] 硬砍，读者只能看到半句）
+    assert "《" + long_title + "》" in text
+    # 右栏不再重复一份
+    assert text.count("相关阅读") == 1
+
+
+def test_english_mode_still_shows_something_when_title_en_missing(client, settings: Settings, seeded_db):
+    """回归：只有中文标题、没有英文版时，切到英文不能是一条空标题。
+
+    处理早期失败（限流）的文章压根没轮到写 ``title_en``，而模板里没有 ``en``
+    就什么都不显示 —— 英文模式会整条空掉。
+    """
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="The dawn of the age of the exoskeleton",
+            link="https://example.com/no-title-en",
+            title_zh="外骨骼时代开启",
+            digest="Mountain rescue crews are now hiking in powered exoskeletons in the Pacific Northwest.",
+            digest_zh="山岳救援队开始穿着动力外骨骼进入美西北部荒野。",
+            relevance=1,
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    assert "《外骨骼时代开启》" not in text  # 详情页标题不是书名号
+    assert '<span class="zh">外骨骼时代开启</span>' in text
+    assert '<span class="en">The dawn of the age of the exoskeleton</span>' in text

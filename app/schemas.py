@@ -23,6 +23,7 @@ class ArticleOut(BaseModel):
     title_en: str | None = None
     title_zh: str | None = None
     digest_en: str | None = None
+    digest_zh: str | None = None
     content_zh: str | None = None
     tags: str | None = None
     relevance: int | None = None

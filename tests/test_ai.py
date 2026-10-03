@@ -396,9 +396,18 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
         "Google will end free access to its Flash and Pro models, "
         "a move that tightens monetization for large language model providers."
     )
-    # 纯英文信源：正文与摘要复用原文不翻，但标题要补一个中文标题 → 6 次 + 1 次标题
-    # 纯英文信源：正文与摘要复用原文不翻；标题要先补中文标题，标签在最后
-    answers = iter(["yes 80", en_summary, "English digest", "reason", "产品\\nAI", "苹果收紧隐私设置", "标签"])
+    # 纯英文信源：正文与摘要复用原文不翻（没有中译英那一跳），
+    # 但标题与导读都要补中文版 → 6 次 + 中文标题 + 中文导读
+    answers = iter([
+        "yes 80",
+        en_summary,
+        "English digest",
+        "reason",
+        "产品\\nAI",
+        "苹果收紧隐私设置",
+        "谷歌将结束对 Flash 与 Pro 模型的免费访问",
+        "标签",
+    ])
     calls = {"n": 0}
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -417,9 +426,11 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
             assert process_article(session, article, client, settings) == "processed"
             assert article.title_en == article.title, "纯英文标题直接复用原文，不翻"
             assert article.digest_en == en_summary, "纯英文导语直接复用摘要原文"
-            # relevance/summary/digest/reason/classify/tags + 英译中标题，没有中译英那一跳
-            assert calls["n"] == 7
+            # relevance/summary/digest/reason/classify + 中文标题 + 中文导读 + tags
+            assert calls["n"] == 8
             assert article.title_zh == "苹果收紧隐私设置"
+            # 中文模式下导读读的是中文版，不是那段英文
+            assert article.digest_zh == "谷歌将结束对 Flash 与 Pro 模型的免费访问"
     finally:
         client.close()
 
@@ -514,6 +525,11 @@ def test_backfill_translations_fills_missing_only(seeded_db, settings: Settings)
         zh = make_article(session, title="中文标题", status="processed", relevance=1, content_full="这是一段中文原文。")
         en.content_zh = None
         zh.content_zh = None
+        # 标题与导读的中文版上一轮已经补好了，这一轮只缺正文译文
+        en.title_zh = "苹果收紧 macOS 隐私设置"
+        en.digest_zh = "苹果将修改 macOS 隐私设置。"
+        zh.title_zh = ""
+        zh.digest_zh = ""
         en_id, zh_id = en.id, zh.id
         session.commit()
 
@@ -522,7 +538,7 @@ def test_backfill_translations_fills_missing_only(seeded_db, settings: Settings)
     try:
         with session_scope() as session:
             stats = backfill_translations(session, client, settings, limit=10)
-            assert stats["filled"] == 1
+            assert stats["contents"] == 1
             assert stats["skipped"] == 1
             assert session.get(Article, en_id).content_zh
             # 中文原文标成空串，表示「已确认无需翻译」，下一轮不会再扫它
@@ -561,5 +577,124 @@ def test_translate_title_skips_chinese_and_no_template(seeded_db, settings: Sett
         empty.prompts.translate_title_zh_prompt = ""
         assert translate_title_to_chinese(client, empty.prompts, "An English headline long enough to pass") is None
         assert called["n"] == 0
+    finally:
+        client.close()
+
+
+def test_translate_digest_to_chinese_needs_a_translation(settings: Settings):
+    """英文导读要翻；中文导读、英文原样吐回，都不算成功。"""
+    import httpx
+
+    from app.ai.processor import translate_digest_to_chinese
+
+    def reply(content: str):
+        return _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": content}}]}), retries=0)
+
+    assert translate_digest_to_chinese(reply("苹果收紧隐私设置。"), settings.prompts, "苹果收紧隐私设置。") is None
+    english = reply("Apple tightens privacy settings for third-party developers.")
+    try:
+        # 模型把英文原样吐回来 = 没翻，写进库里就再也不会重试了
+        assert translate_digest_to_chinese(english, settings.prompts, "Apple tightens privacy settings.") is None
+    finally:
+        english.close()
+
+    chinese = reply("导读\n苹果表示将修改 macOS 的隐私设置，保护用户数据不被滥用。")
+    try:
+        out = translate_digest_to_chinese(
+            chinese, settings.prompts, "Apple says it is changing its macOS privacy settings."
+        )
+        # 模型甩的那行小标题要去掉，正文一句都不能少
+        assert out == "苹果表示将修改 macOS 的隐私设置，保护用户数据不被滥用。"
+    finally:
+        chinese.close()
+
+
+def test_backfill_translations_fills_digest_and_title(seeded_db, settings: Settings):
+    """中英双版本要一次补齐：中文标题、中文导读、中文正文缺哪个补哪个。"""
+    import httpx
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="English headline that is definitely long enough to count as English text",
+            status="processed",
+            relevance=1,
+            content_full="Apple says it is changing its macOS privacy settings for developers today.",
+            digest="Apple says it is changing its macOS privacy settings for developers.",
+        )
+        article.digest_en = article.digest
+        # 正文译文已经有中文版，这一轮只缺标题与导读；
+        # title_en 故意留空 —— 处理早期失败的文章根本没轮到写它，
+        # 拿它当条件会让这类文章永远等不到中文标题
+        article.content_zh = "苹果表示将修改 macOS 的隐私设置。"
+        article_id = article.id
+        session.commit()
+
+    reply = {"choices": [{"message": {"content": "苹果表示将修改 macOS 的隐私设置，避免第三方滥用。"}}]}
+    client = _client(lambda r: httpx.Response(200, json=reply), retries=0)
+    try:
+        with session_scope() as session:
+            stats = backfill_translations(session, client, settings, limit=10)
+            assert stats["titles"] == 1
+            assert stats["digests"] == 1
+            stored = session.get(Article, article_id)
+            assert stored.title_zh
+            assert "苹果" in stored.digest_zh
+            # 再跑一轮不该重复处理
+            assert backfill_translations(session, client, settings, limit=10)["candidates"] == 0
+    finally:
+        client.close()
+
+
+def test_backfill_translations_rotates_failed_candidates(seeded_db, settings: Settings):
+    """上游限流时，最新的那几篇不能把名额占满 —— 重试次数少的优先。"""
+    import httpx
+    from sqlalchemy import select
+
+    with session_scope() as session:
+        for index in range(3):
+            article = make_article(
+                session,
+                title=f"English headline number {index} that is long enough to count as English",
+                status="processed",
+                relevance=1,
+                content_full="Apple says it is changing its macOS privacy settings for developers today.",
+            )
+            article.title_en = article.title
+            # 前两篇已经反复失败过，最后一篇还没试过（发布时间也最新）
+            article.i18n_attempts = 5 if index < 2 else 0
+        session.commit()
+
+    # 全部翻译失败（限流）
+    client = _client(lambda r: httpx.Response(429, text="rate limited"), retries=0)
+    try:
+        with session_scope() as session:
+            before = {a.id: a.i18n_attempts for a in session.execute(select(Article)).scalars()}
+            backfill_translations(session, client, settings, limit=1)
+            after = {a.id: a.i18n_attempts for a in session.execute(select(Article)).scalars()}
+    finally:
+        client.close()
+    # 名额给了还没试过的那篇（发布时间也最新），而不是又去撞反复失败的两篇
+    assert [i for i in after if after[i] > before[i]] == [max(before)]
+
+
+def test_short_english_title_still_gets_a_chinese_one(settings: Settings):
+    """回归：短英文标题也必须翻。
+
+    ``looks_english`` 要求 40 个字母以上，``The dawn of the age of the exoskeleton``
+    只有 30 个字母，早先被判成「不是英文」→ 不翻 → 详情页在中文模式下顶着英文标题。
+    """
+    import httpx
+
+    from app.ai.processor import translate_title_to_chinese
+
+    short = "The dawn of the age of the exoskeleton"
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "外骨骼时代开启"}}]}), retries=0
+    )
+    try:
+        assert translate_title_to_chinese(client, settings.prompts, short) == "外骨骼时代开启"
+        # 已经有汉字的标题不浪费调用
+        assert translate_title_to_chinese(client, settings.prompts, "外骨骼时代开启") is None
     finally:
         client.close()

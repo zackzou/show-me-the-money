@@ -76,8 +76,8 @@ def _topics_json(raw: str | None) -> list[str]:
 
 
 def _digest_with_fallback(article: Article) -> str:
-    """早报汇总：导读优先，太短就补推荐理由，再不够才退回摘要。"""
-    brief = brief_digest(article.digest or "")
+    """早报汇总：中文导读优先，太短就补推荐理由，再不够才退回摘要。"""
+    brief = brief_digest(article.digest_zh or article.digest or "")
     if len(brief) >= _BRIEF_MIN_CHARS or not brief:
         return brief
     extra = brief_digest(article.reason or article.summary or "", limit=_BRIEF_DIGEST_CHARS - len(brief))

@@ -48,7 +48,10 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.title_en": "VARCHAR(500)",
     "articles.title_zh": "VARCHAR(500)",
     "articles.digest_en": "TEXT",
+    "articles.digest_zh": "TEXT",
     "articles.content_zh": "TEXT",
+    "articles.body_images": "TEXT",
+    "articles.i18n_attempts": "INTEGER NOT NULL DEFAULT 0",
 }
 
 

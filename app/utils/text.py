@@ -171,8 +171,19 @@ def looks_english(text: str | None) -> bool:
     if not sample:
         return False
     ascii_letters = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
-    cjk = sum(1 for ch in sample if "\u4e00" <= ch <= "\u9fff")
+    cjk = sum(1 for ch in sample if "一" <= ch <= "鿿")
     return ascii_letters > cjk * 2 and ascii_letters > 40
+
+
+def is_chinese_text(text: str | None) -> bool:
+    """这段文字里有没有汉字 —— 不设长度门槛。
+
+    ``looks_english`` 要求 40 个字母以上，短标题会被判成「不是英文」：
+    ``The dawn of the age of the exoskeleton`` 只有 30 个字母，于是它的中文标题
+    永远翻不出来，详情页在「中文」模式下还是顶着英文。而「要不要翻」这个问题
+    本来就跟长短无关 —— 看有没有汉字就够了。
+    """
+    return any("一" <= ch <= "鿿" for ch in (text or "")[:400])
 
 
 # 早报片段的汇总上限：微信早报一行约 22 个汉字，3~5 行就在这个量级

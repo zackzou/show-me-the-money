@@ -18,13 +18,14 @@ from app.ai.prompts import (
     render_summary_prompt,
     render_tag_prompt,
     render_translate_content_prompt,
+    render_translate_digest_zh_prompt,
     render_translate_prompt,
     render_translate_title_zh_prompt,
 )
 from app.config import PromptsConfig, Settings
 from app.models import Article
 from app.utils.logger import get_logger
-from app.utils.text import looks_english, split_tags, strip_html, truncate
+from app.utils.text import is_chinese_text, looks_english, split_tags, strip_html, strip_markdown, truncate
 
 _TAG_SPLIT_RE = re.compile(r"[,，、;；]")
 
@@ -128,11 +129,36 @@ def parse_title_zh(raw: str) -> str | None:
 
 
 def translate_title_to_chinese(client: LLMClient, prompts: PromptsConfig, title: str) -> str | None:
-    """英文标题译成中文。中文标题或模板为空时返回 ``None``（不浪费调用）。"""
-    if not title or not looks_english(title):
+    """标题译成中文。已经有汉字或模板为空时返回 ``None``（不浪费调用）。
+
+    这里用「有没有汉字」判断，不能用 ``looks_english``：它要求 40 个字母以上，
+    ``The dawn of the age of the exoskeleton`` 这种短标题会被判成「不是英文」，
+    中文标题就永远翻不出来。
+    """
+    if not title or is_chinese_text(title):
         return None
     raw = _optional_llm(client, render_translate_title_zh_prompt(prompts, title), "")
     return parse_title_zh(raw)
+
+
+def translate_digest_to_chinese(client: LLMClient, prompts: PromptsConfig, digest: str) -> str | None:
+    """英文速览（AI 导读）译成中文。中文导读、模板为空、或模型原样吐回英文时返回 ``None``。
+
+    模型偶尔会在译文前面加一行小标题，先去掉；剩下的原样保留 —— 导读本来
+    就只有两三句，压缩或合并只会把信息压掉。
+    """
+    text = (digest or "").strip()
+    if not text or is_chinese_text(text):
+        return None
+    raw = _optional_llm(client, render_translate_digest_zh_prompt(prompts, text), "").strip()
+    if not raw:
+        return None
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    if len(lines) > 1 and len(lines[0]) <= 20 and lines[0][-1] not in "。！？.!?：:":
+        lines = lines[1:]
+    result = strip_markdown(" ".join(lines))
+    # 拿回一段英文等于没翻，别把它当成功写进库里（写进去就再也不会重试了）
+    return None if not result or looks_english(result) else result
 
 
 def translate_to_chinese(
@@ -249,8 +275,10 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
         # 中英双语。标题和导语分别判断：英文信源常见「英文标题 + 中文导语」，
         # 整段一起判断会漏掉该翻的导语，也会给纯英文标题翻出一份一模一样的自己。
         if settings.i18n.enabled:
-            title_needs = not looks_english(article.title)
-            digest_needs = not looks_english(summary)
+            # 判「要不要翻」只看有没有汉字，与长短无关：
+            # 短英文标题会被 looks_english 判成「不是英文」，于是白白翻一次英文→英文
+            title_needs = is_chinese_text(article.title)
+            digest_needs = is_chinese_text(summary)
             if not title_needs and not digest_needs:
                 # 整篇本来就是英文，直接复用，不必再花一次调用
                 article.title_en = article.title
@@ -264,9 +292,18 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
                 en_title, en_digest = parse_translate(raw_en)
                 article.title_en = en_title if title_needs else article.title
                 article.digest_en = en_digest if digest_needs else truncate(summary, 400)
-            # 英文信源补一个中文标题：中文模式与早报片段都用它
+            # 英文信源补一套中文版：标题、速览、正文一个都不能少。
+            # 少了任何一样，「中文」模式下就会在标题 / 导读 / 正文其中一处
+            # 露出英文，看起来像没处理完。
             if not title_needs:
                 article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title)
+            if not is_chinese_text(article.digest or ""):
+                article.digest_zh = translate_digest_to_chinese(
+                    client, settings.prompts, article.digest or ""
+                )
+            else:
+                # 本来就是中文，标成已处理，补译那一轮就不会再来扫它
+                article.digest_zh = article.digest_zh or ""
             # 英文原文正文整篇译成中文，中文模式下才读得到中文
             if settings.i18n.translate_content:
                 article.content_zh = translate_to_chinese(
@@ -346,44 +383,78 @@ def backfill_translations(
     *,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """给「英文正文但还没中文译文」的文章补译。
+    """把中英双版本补齐：中文标题、中文速览、中文正文，一个都不能缺。
 
-    为什么需要单独一轮：正文翻译是可选步骤，失败（限流、网络抖动）时只丢译文，
-    文章本身照样处理完 —— 于是 ``content_zh`` 就一直是空，中文模式下又变回整页英文，
-    而且再也没有人回来补。这里定期扫一遍把它填上。
+    为什么需要单独一轮：翻译是可选步骤，失败（限流、网络抖动）时只丢译文，
+    文章本身照样处理完 —— 于是 ``title_zh`` / ``digest_zh`` / ``content_zh``
+    就一直是空，「中文」模式下又在标题、导读、正文里露出英文，而且再也没人
+    回来补。这里定期扫一遍把它们填上。
+
+    两个坑：
+
+    1. **中文原文要当场把三个字段都标成已处理。** 只写 ``content_zh=""`` 的话，
+       ``title_zh`` / ``digest_zh`` 还是 NULL，这篇每轮都会被重新捞回来，白占名额。
+    2. **重试次数少的优先。** 一旦上游限流，最新的那几篇会一直失败；
+       按发布时间倒序取前 N 篇的话，它们会把名额占满，排在后面的永远轮不到。
     """
-    if not settings.i18n.enabled or not settings.i18n.translate_content:
-        return {"candidates": 0, "filled": 0, "skipped": 0}
+    if not settings.i18n.enabled:
+        return {"candidates": 0, "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
+    wants_content = settings.i18n.translate_content
     rows = list(
         session.execute(
             select(Article)
             .where(
-                # 正文译文或中文标题缺一个都补
-                (Article.content_zh.is_(None)) | (Article.title_zh.is_(None) & Article.title_en.isnot(None)),
+                # 中文标题 / 中文速览缺一个都补；正文译文按开关决定补不补
+                Article.digest_zh.is_(None)
+                | Article.title_zh.is_(None)
+                | (Article.content_zh.is_(None) & wants_content),
                 Article.content_full.isnot(None),
                 Article.relevance == 1,
-                # 已经有中文译文的没必要再翻
                 Article.link.notlike("http://localhost%"),
             )
-            .order_by(Article.published_at.desc(), Article.id.desc())
+            .order_by(Article.i18n_attempts.asc(), Article.published_at.desc(), Article.id.desc())
             .limit(limit)
         ).scalars()
     )
-    stats = {"candidates": len(rows), "filled": 0, "skipped": 0}
+    stats = {"candidates": len(rows), "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
     for article in rows:
         source = article.content_full or ""
         if not looks_english(source):
-            # 中文原文不需要译文，标成已处理，别每轮都来扫
+            # 中文原文不需要译文，三个字段一起标成已处理，别每轮都来扫
             article.content_zh = ""
+            article.digest_zh = article.digest_zh or ""
+            article.title_zh = article.title_zh or ""
             stats["skipped"] += 1
             continue
+        article.i18n_attempts = (article.i18n_attempts or 0) + 1
+        # 不看 title_en：处理早期失败的文章根本没轮到写 title_en，
+        # 拿它当条件会让这类文章永远等不到中文标题
         if not article.title_zh:
-            article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title or "")
-        translated = translate_to_chinese(client, settings.prompts, source)
-        if translated:
-            article.content_zh = translated
-            stats["filled"] += 1
+            title_zh = translate_title_to_chinese(client, settings.prompts, article.title or "")
+            if title_zh:
+                article.title_zh = title_zh
+                stats["titles"] += 1
+        if not article.digest_zh:
+            if not is_chinese_text(article.digest or ""):
+                digest_zh = translate_digest_to_chinese(client, settings.prompts, article.digest or "")
+                if digest_zh:
+                    article.digest_zh = digest_zh
+                    stats["digests"] += 1
+            else:
+                # 没有导读、或导读本来就是中文：标成已处理，别每轮都来扫
+                article.digest_zh = ""
+        if wants_content and not article.content_zh:
+            translated = translate_to_chinese(client, settings.prompts, source)
+            if translated:
+                article.content_zh = translated
+                stats["contents"] += 1
     session.flush()
-    if stats["filled"]:
-        log.info("补齐中文正文 %d 篇（候选 %d 篇）", stats["filled"], stats["candidates"])
+    if any(stats[key] for key in ("titles", "digests", "contents")):
+        log.info(
+            "补齐中文版：标题 %d、速览 %d、正文 %d（候选 %d 篇）",
+            stats["titles"],
+            stats["digests"],
+            stats["contents"],
+            stats["candidates"],
+        )
     return stats

@@ -21,8 +21,8 @@ from app.db import get_session
 from app.fetcher.content import is_real_body
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
+from app.utils.text import is_chinese_text, now_local, split_tags, strip_markdown, truncate
 from app.utils.text import looks_english as is_english
-from app.utils.text import now_local, split_tags, strip_markdown, truncate
 from app.web.search import (
     SCOPE_FULL,
     SCOPE_META,
@@ -60,6 +60,53 @@ def _topics_of(article: Article) -> list[str]:
     except (TypeError, ValueError):
         return []
     return [str(item) for item in parsed if isinstance(item, str)]
+
+
+def _body_image_anchors(raw: str | None) -> list[tuple[int, str]]:
+    """读 body_images：返回 ``[(接在第几段之后, 地址), ...]``。坏数据一律当没有。"""
+    if not raw:
+        return []
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    out: list[tuple[int, str]] = []
+    for item in parsed if isinstance(parsed, list) else []:
+        if not isinstance(item, dict):
+            continue
+        index, url = item.get("i"), item.get("url")
+        if isinstance(index, int) and isinstance(url, str) and url.startswith(("http://", "https://")):
+            out.append((index, url))
+    return out
+
+
+def _image_slots(anchors: list[tuple[int, str]], block_count: int) -> list[list[str]]:
+    """把锚点摊成按段落序号取用的列表，长度是 ``block_count + 1``。
+
+    第 0 项是正文第一段之前的图（头图），第 n 项是第 n 段之后的图 ——
+    模板里 ``slots[loop.index]`` 就能直接取，不用在 Jinja 里算位置。
+    """
+    slots: list[list[str]] = [[] for _ in range(block_count + 1)]
+    for index, url in anchors:
+        if 0 <= index <= block_count:
+            slots[index].append(url)
+    return slots
+
+
+def _shift_image_slots(slots: list[list[str]], source_blocks: int, target_blocks: int) -> list[list[str]]:
+    """把配图位置按比例挪到译文对应的段落上。
+
+    译文是分段翻的，失败的那几段会被丢掉，所以译文段数与原文对不上，
+    段号不能直接搬。图片跟着它在全文里的相对位置走，误差只在一两段之内，
+    总比所有图堆在开头或结尾好。
+    """
+    flat = [(index, url) for index, group in enumerate(slots) for url in group]
+    if source_blocks <= 0 or target_blocks <= 0:
+        return _image_slots([], target_blocks)
+    if source_blocks == target_blocks:
+        return _image_slots(flat, target_blocks)
+    shifted = [(min(target_blocks, round(index / source_blocks * target_blocks)), url) for index, url in flat]
+    return _image_slots(shifted, target_blocks)
 
 
 # 像小标题的段落：短、不以句末标点结尾、不是纯数字
@@ -143,9 +190,12 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
     return {
         "id": article.id,
         # 中文标题优先：英文信源译过来的标题读起来才像中文
+        # 中文标题优先：英文信源译过来的标题读起来才像中文
         "title": article.title_zh or article.title,
         "title_zh": article.title_zh or "",
-        "title_en": article.title_en or "",
+        # title_en 缺失时退回原文：处理早期失败的文章压根没轮到写它，
+        # 而模板里没有 en 就没有任何东西可显示 —— 切到英文会是一条空标题
+        "title_en": article.title_en or ("" if is_chinese_text(article.title) else article.title),
         "link": article.link,
         "source": source_name or "未知来源",
         "source_host": _host(source_url),
@@ -153,9 +203,10 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "date_key": published.strftime("%Y-%m-%d") if published else "",
         "time_full": published.strftime("%Y-%m-%d %H:%M") if published else "",
         "relative": _relative(published, now),
-        # 速览优先（页内就能读完），没有就退回摘要
-        "digest": strip_markdown(article.digest) or strip_markdown(article.summary),
-        "digest_en": strip_markdown(article.digest_en),
+        # 速览优先（页内就能读完），没有就退回摘要；中文模式读中文版导读
+        "digest": strip_markdown(article.digest_zh or article.digest) or strip_markdown(article.summary),
+        "digest_zh": strip_markdown(article.digest_zh),
+        "digest_en": strip_markdown(article.digest_en or article.digest),
         "reason": strip_markdown(article.reason),
         "score": article.score,
         "category": article.category or "",
@@ -428,14 +479,24 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     item["body_blocks"] = marked
     item["toc"] = table_of_contents(marked)
     item["content_preview"] = truncate(original, 400)
+    # 正文内联配图：按原站的做法插在段落之间，位置随抓取时一起存下来
+    anchors = _body_image_anchors(article.body_images)
+    item["shots"] = _image_slots(anchors, len(marked))
+    item["has_body_images"] = bool(anchors)
     # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文
     translated = article.content_zh or ""
     item["has_translation"] = bool(translated.strip())
-    item["body_blocks_zh"] = mark_headings(_body_blocks(translated)) if item["has_translation"] else []
+    marked_zh = mark_headings(_body_blocks(translated)) if item["has_translation"] else []
+    item["body_blocks_zh"] = marked_zh
     item["content_preview_zh"] = truncate(translated, 400) if item["has_translation"] else ""
+    item["shots_zh"] = _shift_image_slots(item["shots"], len(marked), len(marked_zh))
     # 没有译文时要说清楚，避免「中文模式却整页英文」看着像坏了
     item["body_is_foreign"] = bool(original.strip()) and not item["has_translation"] and is_english(original)
     item["body_missing"] = not original.strip()
+    # 导读同理：英文原文还没有中文导读时，页面上说清楚，别让「中文」模式看着像坏了
+    item["digest_missing_zh"] = (
+        is_english(article.digest or "") and not str(article.digest_zh or "").strip()
+    )
     return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
 
 

@@ -85,7 +85,8 @@ def _report_items(session: Session, date_str: str, *, until: datetime | None = N
         degraded = article.status == "failed"
         items.append(
             {
-                "title": article.title,
+                # 中文标题优先：日报是中文的，英文信源顶上英文标题会非常突兀
+                "title": article.title_zh or article.title,
                 "source": source_name,
                 "summary": strip_markdown(article.summary) or "（无摘要）",
                 "tags": "、".join(split_tags(article.tags)) or "（无标签）",

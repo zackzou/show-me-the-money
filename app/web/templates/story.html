@@ -48,14 +48,21 @@
     {% endif %}
 
     <section class="sec">
-      <div class="sec-t">AI 导读</div>
+      <div class="sec-t">AI 导读{% if item.digest_missing_zh %}<span class="t-note">原文为英文，中文导读还在翻译队列里</span>{% endif %}</div>
       <p class="lead-p">{{ bi(item.digest or item.reason or '（没有生成导读）', item.digest_en) }}</p>
     </section>
 
     {# 正文：中文/双语读译文，英文读原文；没有译文时退回原文并说明原因 #}
-    {% macro prose(blocks) %}
+    {# 配图按原站的做法插在段落之间：body_images 记的是「接在第几段之后」 #}
+    {% macro prose(blocks, slots) %}
+      {% for url in slots[0] %}
+        <figure class="shot"><img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async" data-shot="{{ url }}"></figure>
+      {% endfor %}
       {% for block in blocks %}
         {% if block.heading %}<h3 id="sec-{{ block.i }}">{{ block.text }}</h3>{% else %}<p>{{ block.text }}</p>{% endif %}
+        {% for url in slots[loop.index] %}
+          <figure class="shot"><img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async" data-shot="{{ url }}"></figure>
+        {% endfor %}
       {% endfor %}
     {% endmacro %}
 
@@ -63,17 +70,17 @@
       <div class="rule"></div>
       <section class="sec">
         <div class="sec-t plain">正文<span class="t-zh">中文译文</span>{% if item.body_blocks %}<span class="t-en">英文原文</span>{% endif %}</div>
-        <div class="prose zh">{{ prose(item.body_blocks_zh) }}</div>
+        <div class="prose zh">{{ prose(item.body_blocks_zh, item.shots_zh) }}</div>
         {% if item.body_blocks %}
           {# 有译文时原文也要跟着语言切换走：中文模式读译文，双语模式上下对照 #}
-          <div class="prose en">{{ prose(item.body_blocks) }}</div>
+          <div class="prose en">{{ prose(item.body_blocks, item.shots) }}</div>
         {% endif %}
       </section>
     {% elif item.body_blocks %}
       <div class="rule"></div>
       <section class="sec">
         <div class="sec-t plain">正文{% if item.body_is_foreign %}<span class="t-note">原文为英文，暂无中文译文</span>{% endif %}</div>
-        <div class="prose orig">{{ prose(item.body_blocks) }}</div>
+        <div class="prose orig">{{ prose(item.body_blocks, item.shots) }}</div>
       </section>
     {% elif item.content_preview %}
       <div class="rule"></div>
@@ -94,7 +101,8 @@
       </section>
     {% endif %}
 
-    {% if item.images %}
+    {# 只有封面图、没有正文配图时才单开一个区块：图不在正文里，硬塞进去反而看不懂配的是哪一段 #}
+    {% if item.images and not item.has_body_images %}
       <section class="sec">
         <div class="sec-t plain">文章配图</div>
         <div class="shot-grid">
@@ -103,6 +111,20 @@
                  data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
           {% endfor %}
         </div>
+      </section>
+    {% endif %}
+
+    {# 相关阅读：按原站的做法放在正文最后（AIHOT 就是正文末尾的一个
+       「相关阅读：」小节），标题给全，不再按字数硬砍 —— 砍掉的那截
+       恰好是判断这条讲什么的关键信息。 #}
+    {% if item.related %}
+      <section class="sec rel-sec">
+        <div class="sec-t plain">相关阅读</div>
+        <ul class="rel-list">
+          {% for r in item.related[:4] %}
+            <li><a href="/story/{{ r.id }}">《{{ r.title }}》</a></li>
+          {% endfor %}
+        </ul>
       </section>
     {% endif %}
 
@@ -145,15 +167,6 @@
         <div class="rail-h">标签</div>
         {% for t in item.tags %}
           <a class="rail-tag" href="/?tag={{ t|urlencode }}">#{{ t }}</a>
-        {% endfor %}
-      </div>
-    {% endif %}
-
-    {% if item.related %}
-      <div class="rail-sec">
-        <div class="rail-h">相关阅读</div>
-        {% for r in item.related[:4] %}
-          <a href="/story/{{ r.id }}" style="display:block;font-size:12.5px;line-height:1.6;color:var(--muted);margin-bottom:7px">{{ r.title[:42] }}</a>
         {% endfor %}
       </div>
     {% endif %}

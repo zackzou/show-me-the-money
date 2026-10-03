@@ -12,6 +12,8 @@ InfoQ 7 字），靠它生成的内容就是「标题复读」。要让「页内
 
 from __future__ import annotations
 
+import html as html_lib
+import json
 import re
 from typing import Any
 
@@ -19,6 +21,7 @@ import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.fetcher.images import looks_like_junk_image, src_of
 from app.models import Article
 from app.utils.logger import get_logger
 from app.utils.text import strip_html
@@ -39,6 +42,8 @@ _DROP_RE = re.compile(rf"<({ '|'.join(_DROP_BLOCKS) })\b[^>]*>.*?</\1>", re.I | 
 _SELF_CLOSING_DROP_RE = re.compile(rf"<({ '|'.join(_DROP_BLOCKS) })\b[^>]*/?>", re.I)
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.S)
 _TAG_RE = re.compile(r"<[^>]+>")
+_P_BLOCK_RE = re.compile(r"<p\b[^>]*>.*?</p>", re.I | re.S)
+_IMG_TAG_RE = re.compile(r"<img\b[^>]*>", re.I)
 _ATTRS_RE = re.compile(r"\s(?:id|class|style|data-[\w-]+|aria-[\w-]+)\s*=\s*(?:\"[^\"]*\"|'[^']*'|[^\s>]+)", re.I)
 _BLOCK_SPLIT_RE = re.compile(rf"</?(?:{_BLOCK_TAGS})\b[^>]*>", re.I)
 _CJK_RE = re.compile(r"[\u4e00-\u9fff]")
@@ -133,13 +138,72 @@ def _paragraph_tags(html_text: str) -> list[str]:
     不去挑「正文容器」：正则匹配嵌套 div 会被截断（量子位 51 个 div 全部只拿到 4 段残句），
     而 ``<p>`` 不嵌套，是最稳的正文信号。非正文区域基本不用 ``<p>``。
     """
-    out: list[str] = []
-    for raw in re.findall(r"<p\b[^>]*>(.*?)</p>", html_text, re.I | re.S):
+    return _paragraphs_with_images(html_text, "")[0]
+
+
+def _paragraphs_with_images(html_text: str, base_url: str) -> tuple[list[str], list[tuple[int, str]]]:
+    """抽段落的同时记下正文里图片的位置。
+
+    一次解析拿到两样东西，段落下标与图片位置天然对齐 —— 分两趟扫同一个
+    HTML 的话，过滤规则一旦改动，两边的下标就对不上了，图片会插错地方。
+
+    返回的 ``(n, 图片地址)`` 表示「接在前 n 段之后」；``n = 0`` 是正文第一段
+    之前（原站把头图放在正文开头的情况）。
+    """
+    events: list[tuple[int, str, re.Match[str]]] = []
+    events.extend((m.start(), "p", m) for m in _P_BLOCK_RE.finditer(html_text))
+    events.extend((m.start(), "img", m) for m in _IMG_TAG_RE.finditer(html_text))
+    events.sort(key=lambda event: event[0])
+
+    paragraphs: list[str] = []
+    images: list[tuple[int, str]] = []
+    seen: set[str] = set()
+    for _, kind, match in events:
+        if kind == "img":
+            url = _abs_image_url(match.group(0), base_url)
+            if url and url not in seen:
+                seen.add(url)
+                images.append((len(paragraphs), url))
+            continue
+        raw = match.group(0)
         text = strip_html(_ATTRS_RE.sub("", raw)).strip()
+        # 先记图再判段：``<p><img></p>`` 这种纯图段落自身会被滤掉，
+        # 但它里面的图要留下，挂到前一段后面
         if len(text) < _MIN_PARAGRAPH_CHARS or _is_junk(text):
             continue
-        out.append(text)
-    return out
+        paragraphs.append(text)
+    return paragraphs, images
+
+
+def _abs_image_url(tag: str, base_url: str) -> str | None:
+    """取 ``<img>`` 的可用地址：过滤图标类资源，并补成绝对地址。"""
+    url = html_lib.unescape(src_of(tag))
+    if not url or looks_like_junk_image(url=url, tag=tag):
+        return None
+    try:
+        return str(httpx.URL(base_url).join(url)) if base_url else url
+    except (httpx.InvalidURL, ValueError):
+        return None
+
+
+def _best_source(cleaned: str, min_chars: int) -> str:
+    """挑出最可能装正文的 HTML 片段。
+
+    先看 ``<article>`` / ``<main>``，不够长再退回整篇；返回的是**原始片段**
+    而不是段落列表 —— 图片要挂在段落之间，只给段落就丢了位置。
+    """
+    best = ""
+    best_len = 0
+    for tag in _CONTENT_TAGS:
+        for block in re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", cleaned, re.I | re.S):
+            length = sum(len(p) for p in _paragraph_tags(block))
+            if length > best_len:
+                best, best_len = block, length
+    if best_len < min_chars:
+        whole = sum(len(p) for p in _paragraph_tags(cleaned))
+        if whole > best_len:
+            best, best_len = cleaned, whole
+    return best
 
 
 def extract_article_text(html_text: str, *, min_chars: int = 200) -> str:
@@ -149,16 +213,7 @@ def extract_article_text(html_text: str, *, min_chars: int = 200) -> str:
     cleaned = _clean(html_text)
 
     # 优先用 <article> 里的段落；不够长再退回全文段落
-    best: list[str] = []
-    for tag in _CONTENT_TAGS:
-        for block in re.findall(rf"<{tag}\b[^>]*>(.*?)</{tag}>", cleaned, re.I | re.S):
-            paragraphs = _paragraph_tags(block)
-            if sum(len(p) for p in paragraphs) > sum(len(p) for p in best):
-                best = paragraphs
-    if sum(len(p) for p in best) < min_chars:
-        whole = _paragraph_tags(cleaned)
-        if sum(len(p) for p in whole) > sum(len(p) for p in best):
-            best = whole
+    best = _paragraph_tags(_best_source(cleaned, min_chars))
     if not best:
         best = _paragraphs(_pick_container(cleaned))
     if not best:
@@ -171,6 +226,56 @@ def extract_article_text(html_text: str, *, min_chars: int = 200) -> str:
         deduped.append(text)
     text = "\n\n".join(deduped).strip()
     return text[:MAX_CONTENT_CHARS] if len(text) >= min_chars else ""
+
+
+# 正文里最多留几张内联配图。再多就不是「读文章」，而是翻相册了
+MAX_INLINE_IMAGES = 12
+
+
+def extract_article_document(
+    html_text: str, *, base_url: str = "", min_chars: int = 200
+) -> tuple[str, list[dict[str, Any]]]:
+    """抓正文 + 正文里配图的位置，返回 ``(正文, [{"i": 段落下标, "url": 地址}])``。
+
+    原站（图1 的 AIHOT、量子位、IT之家）都是把配图**插在正文段落之间**的，
+    单独开一个「文章配图」区块既割裂又看不出图配的是哪一段。这里按原站的
+    做法把位置一起存下来，详情页照着插回正文。
+
+    挑不出正文时返回 ``("", [])``，与 ``extract_article_text`` 口径一致。
+    """
+    if not html_text or _TAGLIKE_RE.search(html_text[:200]) is None:
+        return "", []
+    cleaned = _clean(html_text)
+    source = _best_source(cleaned, min_chars)
+    if not source:
+        return "", []
+
+    paragraphs, images = _paragraphs_with_images(source, base_url)
+    if not paragraphs:
+        # 没有 <p> 的页面走块级兜底，这时位置信息拿不到，图就整体略过
+        return "", []
+
+    deduped: list[str] = []
+    dropped_at: list[int] = []  # 被去重掉的段落下标
+    for index, text in enumerate(paragraphs):
+        if deduped and deduped[-1] == text:  # 模板常把同一段渲染两次
+            dropped_at.append(index)
+            continue
+        deduped.append(text)
+    text = "\n\n".join(deduped).strip()
+    if len(text) < min_chars:
+        return "", []
+
+    anchors: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for position, url in images:
+        if len(anchors) >= MAX_INLINE_IMAGES or url in seen:
+            continue
+        seen.add(url)
+        # 锚点说的是「前 n 段之后」，去重掉的段要一并扣掉，否则图片会插到后面去
+        shifted = position - sum(1 for index in dropped_at if index < position)
+        anchors.append({"i": shifted, "url": url})
+    return text[:MAX_CONTENT_CHARS], anchors
 
 
 def _pick_container(html_text: str) -> str:
@@ -188,6 +293,17 @@ def _pick_container(html_text: str) -> str:
         if score > best_score:
             best_div, best_score = div, score
     return best_div or html_text
+
+
+def _decode(response: httpx.Response) -> str:
+    """按 utf-8 / gb18030 / latin-1 依次试解码（国内站点还有 GB2312）。"""
+    raw = response.content[:MAX_HTML_BYTES]
+    for encoding in ("utf-8", "gb18030", "latin-1"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="ignore")
 
 
 def fetch_article_text(
@@ -208,18 +324,37 @@ def fetch_article_text(
         response = http.get(url)
         if response.status_code >= 400:
             return ""
-        raw = response.content[:MAX_HTML_BYTES]
-        for encoding in ("utf-8", "gb18030", "latin-1"):
-            try:
-                decoded = raw.decode(encoding)
-                break
-            except UnicodeDecodeError:
-                continue
-        else:
-            decoded = raw.decode("utf-8", errors="ignore")
-        return extract_article_text(decoded, min_chars=min_chars)
+        return extract_article_text(_decode(response), min_chars=min_chars)
     except (httpx.HTTPError, ValueError):
         return ""
+    finally:
+        if owns:
+            http.close()
+
+
+def fetch_article_document(
+    url: str,
+    *,
+    timeout: float = 12.0,
+    min_chars: int = 200,
+    client: httpx.Client | None = None,
+) -> tuple[str, list[dict[str, Any]]]:
+    """抓正文 + 正文里配图的位置（一次请求拿全，图片地址要按原页 URL 补绝对）。"""
+    owns = client is None
+    http = client or httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": DEFAULT_UA},
+    )
+    try:
+        response = http.get(url)
+        if response.status_code >= 400:
+            return "", []
+        return extract_article_document(
+            _decode(response), base_url=str(response.url), min_chars=min_chars
+        )
+    except (httpx.HTTPError, ValueError):
+        return "", []
     finally:
         if owns:
             http.close()
@@ -249,7 +384,7 @@ def backfill_content(
             .limit(limit)
         ).scalars()
     )
-    stats = {"candidates": len(rows), "filled": 0, "short": 0, "failed": 0}
+    stats = {"candidates": len(rows), "filled": 0, "short": 0, "failed": 0, "with_images": 0}
     if not rows:
         return stats
 
@@ -261,21 +396,33 @@ def backfill_content(
     ) as client:
         for article in rows:
             try:
-                text = fetch_article_text(article.link, timeout=timeout, min_chars=min_chars, client=client)
+                text, images = fetch_article_document(
+                    article.link, timeout=timeout, min_chars=min_chars, client=client
+                )
             except Exception as exc:  # 兜底：抓正文失败绝不能影响抓取/处理
                 stats["failed"] += 1
                 log.debug("抓正文失败：%s（%r）", article.link[:80], exc)
                 continue
             if text:
                 article.content_full = text
+                # 正文里的配图连同段落位置一起存，详情页照位置插回正文
+                article.body_images = json.dumps(images, ensure_ascii=False) if images else "[]"
                 stats["filled"] += 1
+                if images:
+                    stats["with_images"] += 1
             else:
                 # 标记成空串：查过了确实没有，不要每轮重查
                 article.content_full = ""
                 stats["short"] += 1
     session.flush()
     if stats["filled"]:
-        log.info("抓回正文 %d 篇（候选 %d 篇、无正文 %d 篇）", stats["filled"], stats["candidates"], stats["short"])
+        log.info(
+            "抓回正文 %d 篇（候选 %d 篇、无正文 %d 篇、含配图 %d 篇）",
+            stats["filled"],
+            stats["candidates"],
+            stats["short"],
+            stats["with_images"],
+        )
     return stats
 
 
@@ -287,3 +434,62 @@ def count_with_full_text(session: Session) -> int:
         ).scalar()
         or 0
     )
+
+
+def backfill_body_images(
+    session: Session,
+    *,
+    limit: int = 20,
+    timeout: float = 12.0,
+    min_chars: int = 200,
+) -> dict[str, Any]:
+    """给「已经有正文、但还没有内联配图位置」的文章补一次位置。
+
+    正文里插图是后来才有的，老数据全都没有 ``body_images``。重新抓一遍文章页
+    就能把位置算出来 —— 正文本身已经在库里，不用重写，也不用重新入库。
+    """
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(
+                Article.body_images.is_(None),
+                Article.content_full.isnot(None),
+                Article.content_full != "",
+                Article.relevance == 1,
+                Article.link.notlike("http://localhost%"),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    stats = {"candidates": len(rows), "filled": 0, "empty": 0, "failed": 0}
+    if not rows:
+        return stats
+
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": DEFAULT_UA},
+        limits=httpx.Limits(max_connections=6),
+    ) as client:
+        for article in rows:
+            try:
+                _, images = fetch_article_document(
+                    article.link, timeout=timeout, min_chars=min_chars, client=client
+                )
+            except Exception as exc:  # 兜底：补图失败绝不能影响主流程
+                stats["failed"] += 1
+                log.debug("补正文配图失败：%s（%r）", article.link[:80], exc)
+                continue
+            # 空数组表示「查过了，正文里确实没有图」，别每轮都重查
+            article.body_images = json.dumps(images, ensure_ascii=False) if images else "[]"
+            stats["filled" if images else "empty"] += 1
+    session.flush()
+    if stats["filled"]:
+        log.info(
+            "补正文内联配图 %d 篇（候选 %d 篇、正文无图 %d 篇）",
+            stats["filled"],
+            stats["candidates"],
+            stats["empty"],
+        )
+    return stats

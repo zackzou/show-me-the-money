@@ -55,10 +55,17 @@ class Article(Base):
     # 中文版标题：英文信源译过来，中文模式（以及早报片段）才不至于顶着英文标题
     title_zh: Mapped[str | None] = mapped_column(String(500), nullable=True)
     digest_en: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 中文版速览（AI 导读）：英文信源的导读默认也是英文的，中文模式必须有中文版
+    digest_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 中文版正文：英文原文整篇译过来，中文模式下不至于整页英文
     content_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 正文内联配图（JSON 数组 [{"i": 接在第几段之后, "url": 地址}]）：
+    # 按原站的做法插在段落之间，而不是另开一个配图区块
+    body_images: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 中英双语的翻译重试次数：限流失败的候选要能轮换出去，不然永远轮不到它们
+    i18n_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     tags: Mapped[str | None] = mapped_column(String(500), nullable=True)
     relevance: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")

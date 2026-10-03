@@ -106,7 +106,7 @@ def _attr(tag: str, name: str) -> str:
     return ""
 
 
-def _src_of(tag: str) -> str:
+def src_of(tag: str) -> str:
     for match in _SRC_ATTR_RE.finditer(tag):
         url = (match.group(1) or match.group(2) or match.group(3) or "").strip()
         if url:
@@ -282,7 +282,7 @@ def collect_image_candidates(html_text: str, *, base_url: str = "") -> list[str]
     candidates: list[str] = []
     for tag in _IMG_TAG_RE.findall(html_text):
         # 属性值里的 &amp; 必须还原成 &，否则拿到的 URL 直接 404
-        url = html_lib.unescape(_src_of(tag))
+        url = html_lib.unescape(src_of(tag))
         if not url or looks_like_junk_image(url=url, tag=tag):
             continue
         candidates.append(_abs(url))
