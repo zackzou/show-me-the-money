@@ -1,25 +1,37 @@
-{% macro shots(item) %}
+{% macro thumb(item) %}
   {% if item.images %}
-    <div class="shots {{ 'one' if item.images|length == 1 else ('two' if item.images|length == 2 else ('four' if item.images|length <= 4 else 'many')) }}">
-      {% for url in item.images[:4] %}
-        <img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async"
-             data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
-      {% endfor %}
-    </div>
+    <img class="thumb" src="{{ item.images[0] }}" alt="{{ item.title }}" loading="lazy" decoding="async"
+         data-shot="{{ item.images[0] }}" data-i="0" data-n="{{ item.images|length }}">
   {% endif %}
 {% endmacro %}
 
 {% macro card(item) %}
   <article class="item">
-    <a href="/story/{{ item.id }}"><div class="t">{{ item.title }}</div></a>
-    {{ shots(item) }}
-    {% if item.digest %}<p class="d">{{ item.digest }}</p>{% endif %}
-    <div class="f">
-      <span class="src">{{ item.source }}</span>
-      {% if item.time %}<span>·</span><span>{{ item.time }}</span>{% endif %}
-      {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
-      {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
-      <a class="more" href="/story/{{ item.id }}">页内速览 →</a>
+    <div class="row {{ 'has-shot' if item.images else '' }}">
+      {{ thumb(item) }}
+      <div>
+        <a href="/story/{{ item.id }}"><div class="t">{{ item.title }}</div></a>
+        {% if item.digest %}<p class="d">{{ item.digest }}</p>{% endif %}
+        <div class="f">
+          <span class="src">{{ item.source }}</span>
+          {% if item.time %}<span>·</span><span>{{ item.time }}</span>{% endif %}
+          {% for tag in item.tags %}<span class="tag">{{ tag }}</span>{% endfor %}
+          {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
+          <a class="more" href="/story/{{ item.id }}">页内速览 →</a>
+        </div>
+      </div>
     </div>
   </article>
+{% endmacro %}
+
+{# 详情页用完整配图网格 #}
+{% macro shots(item) %}
+  {% if item.images %}
+    <div class="shots {{ 'one' if item.images|length == 1 else ('two' if item.images|length == 2 else ('four' if item.images|length <= 4 else 'many')) }}">
+      {% for url in item.images[:6] %}
+        <img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async"
+             data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
+      {% endfor %}
+    </div>
+  {% endif %}
 {% endmacro %}

@@ -192,8 +192,11 @@ def test_home_shows_images_grid(client, settings: Settings, seeded_db):
         generate_daily_report(TODAY, session=session, settings=settings)
 
     text = client.get("/").text
-    assert 'class="shots one"' in text              # 单图走大图布局
+    assert 'class="thumb"' in text                  # 列表页用缩略图，不占版面
+    assert 'class="row has-shot"' in text
     assert "cdn.example.com/x.jpg" in text
+    # 详情页才用完整配图
+    assert 'class="shots one"' in client.get("/story/1").text
 
 
 def test_dark_mode_toggle_present(client):
