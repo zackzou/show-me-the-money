@@ -239,7 +239,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 27 个文件零告警、101 个测试全绿、覆盖率 89%。
+当前状态：`ruff` 无告警、`mypy` 27 个文件零告警、102 个测试全绿、覆盖率 89%。
 
 ---
 

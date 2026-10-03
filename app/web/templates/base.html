@@ -55,18 +55,22 @@
     .list { padding:10px 0 40px; }
     /* ── 热点时间轴 ────────────────────────────────────────── */
     .tl { position:relative; padding:6px 0 40px; }
-    .tl::before { content:""; position:absolute; left:78px; top:6px; bottom:0;
+    /* 竖线对齐圆点圆心：时间列 92px + gap 12px，卡片左边缘在 104px，圆点圆心再往左 3.5px */
+    .tl::before { content:""; position:absolute; left:100px; top:0; bottom:26px;
                   width:1px; background:var(--line); }
     .day-head { display:flex; align-items:center; gap:8px; margin:0 0 4px; font-size:15px; font-weight:650; }
     .day-head .caret { color:var(--faint); font-size:11px; }
     .day-head .meta { font-size:13px; font-weight:400; color:var(--faint); }
 
-    .row { display:grid; grid-template-columns:66px 1fr; gap:0 24px; position:relative; }
+    .row { display:grid; grid-template-columns:92px 1fr; gap:0 12px; position:relative; }
     .row + .row { margin-top:4px; }
+    /* 时间是 5 个字符（HH:MM），留足宽度并禁止换行，否则会被截成「10:3」 */
     .tl-time { text-align:right; padding:16px 0 0; font-size:12.5px; color:var(--faint);
-               font-variant-numeric:tabular-nums; line-height:1.4; }
+               font-variant-numeric:tabular-nums; line-height:1.4;
+               white-space:nowrap; overflow:visible; }
     .tl-main { position:relative; padding:0 0 14px; }
-    .tl-main::before { content:""; position:absolute; left:-28px; top:20px; width:7px; height:7px;
+    /* 圆点横向落在竖线上（92+12-5-3.5 ≈ 95.5，加上 .tl 的 padding 偏移由 left 校正） */
+    .tl-main::before { content:""; position:absolute; left:-7.5px; top:19px; width:7px; height:7px;
                        border-radius:50%; background:var(--accent); box-shadow:0 0 0 3px var(--bg); }
     .item { background:var(--surface); border:1px solid var(--line); border-radius:12px;
             padding:14px 16px; box-shadow:var(--shadow); }
@@ -95,6 +99,7 @@
       .tl::before { left:9px; } .row { grid-template-columns:1fr; }
       .tl-time { text-align:left; padding:12px 0 0 22px; }
       .tl-main::before { left:6px; top:16px; }
+      .side { position:static; }
     }
 
     .pager { display:flex; justify-content:center; align-items:center; gap:8px; padding:20px 0 10px; font-size:13px; }

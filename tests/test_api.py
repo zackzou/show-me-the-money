@@ -273,3 +273,17 @@ def test_score_hidden_when_absent(client, settings: Settings, seeded_db):
         generate_daily_report(TODAY, session=session, settings=settings)
 
     assert "相关度" not in client.get("/").text
+
+
+def test_timeline_time_not_truncated_and_dot_aligned(client, settings: Settings, seeded_db):
+    """时间列必须放得下 HH:MM（曾被截成「10:3」），且圆点要与竖线对齐。"""
+    with session_scope() as session:
+        make_article(session, title="时间轴对齐", link="https://example.com/tl", digest="导语")
+    with session_scope() as session:
+        generate_daily_report(TODAY, session=session, settings=settings)
+
+    text = client.get("/").text
+    assert "tl-time" in text
+    # 时间列右对齐且禁止换行，宽度留给 5 个字符
+    assert "white-space:nowrap" in text
+    assert "grid-template-columns:92px 1fr" in text
