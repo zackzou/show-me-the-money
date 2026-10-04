@@ -110,3 +110,13 @@ def test_llm_extra_headers_rejects_bad_json(bad: str):
 def test_llm_extra_headers_rejects_non_string_values():
     with pytest.raises(ConfigError):
         load_settings(env={**VALID, "LLM_EXTRA_HEADERS": '{"a": 1}'}, config_dir=CONFIG_DIR)
+
+
+def test_llm_fallback_models_default_is_empty():
+    assert load_settings(env=VALID, config_dir=CONFIG_DIR).llm.fallback_models == []
+
+
+def test_llm_fallback_models_parsed_from_env():
+    env = {**VALID, "LLM_FALLBACK_MODELS": "wb/hy3, ag/gemini-3-flash "}
+    settings = load_settings(env=env, config_dir=CONFIG_DIR)
+    assert settings.llm.fallback_models == ["wb/hy3", "ag/gemini-3-flash"]

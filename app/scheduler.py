@@ -50,6 +50,7 @@ def _llm_client(settings: Settings) -> LLMClient:
         retries=settings.llm.max_retries,
         temperature=settings.llm.temperature,
         extra_headers=settings.llm.extra_headers,
+        fallback_models=settings.llm.fallback_models,
     )
 
 

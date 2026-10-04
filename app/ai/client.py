@@ -164,7 +164,7 @@ def parse_sse(body: str) -> str:
 
 
 class LLMClient:
-    """极简 chat 客户端：带超时与重试，不依赖 openai SDK。"""
+    """极简 chat 客户端：带超时、重试与多模型 fallback，不依赖 openAI SDK。"""
 
     def __init__(
         self,
@@ -177,10 +177,13 @@ class LLMClient:
         temperature: float = 0.3,
         extra_headers: dict[str, str] | None = None,
         client: httpx.Client | None = None,
+        fallback_models: list[str] | None = None,
     ) -> None:
         self.base = base.rstrip("/")
         self.key = key
         self.model = model
+        # 主模型 429/503/401 时按顺序试备选，总尝试次数不变（不额外多花调用）
+        self.models = [model] + [m for m in (fallback_models or []) if m and m != model]
         self.timeout = timeout
         self.retries = retries
         self.temperature = temperature
@@ -213,29 +216,46 @@ class LLMClient:
         """发一次 chat 请求，返回回复文本。
 
         返回体格式不对（HTML 错误页、SSE、Responses 风格）时抛 ``LLMFormatError``，
-        它不会被重试 —— 重试也还是同样的错，白花钱。
+        它不会被重试 —— 同一个模型重试也还是同样的错；但会换下一个模型试
+        （不同网关路径的格式可能不一样），所有模型都失败才抛出来。
+        总尝试次数还是 ``retries + 1``，模型之间轮换，不额外多花调用。
         """
+        last_error: Exception | None = None
+        attempts = self.retries + 1
+        for attempt in range(attempts):
+            model = self.models[attempt % len(self.models)]
+            if model != self.model and attempt > 0:
+                log.info("主模型 %s 不可用，试 %s（第 %d 次）", self.model, model, attempt + 1)
+            try:
+                return self._chat_once(prompt, model)
+            except LLMFormatError as exc:
+                # 单模型时格式错误重试没有意义（同一个错）；有备选才换模型试，
+                # 不同网关路径的格式可能不一样
+                if len(self.models) == 1:
+                    raise
+                last_error = exc
+                log.warning("LLM 调用失败（%s，第 %d 次）：%s", model, attempt + 1, exc)
+                if attempt < attempts - 1:
+                    time.sleep(min(2.0**attempt, 4.0))
+            except (httpx.HTTPError, ValueError, LLMError) as exc:
+                last_error = exc
+                log.warning("LLM 调用失败（%s，第 %d 次）：%s", model, attempt + 1, exc)
+                if attempt < attempts - 1:
+                    time.sleep(min(2.0**attempt, 4.0))
+        raise LLMError(f"调用大模型失败：{last_error}")
+
+    def _chat_once(self, prompt: str, model: str) -> str:
+        """用指定模型发一次请求。"""
         payload = {
-            "model": self.model,
+            "model": model,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": self.temperature,
             "stream": False,
         }
-        last_error: Exception | None = None
-        for attempt in range(self.retries + 1):
-            try:
-                response = self._http().post(self.endpoint, json=payload)
-                if response.status_code >= 400:
-                    raise LLMError(f"HTTP {response.status_code}: {redact(response.text)}")
-                return self._extract(response)
-            except LLMFormatError:
-                raise
-            except (httpx.HTTPError, ValueError, LLMError) as exc:
-                last_error = exc
-                log.warning("LLM 调用失败（第 %d 次）：%s", attempt + 1, exc)
-                if attempt < self.retries:
-                    time.sleep(min(2.0**attempt, 4.0))
-        raise LLMError(f"调用大模型失败：{last_error}")
+        response = self._http().post(self.endpoint, json=payload)
+        if response.status_code >= 400:
+            raise LLMError(f"HTTP {response.status_code}: {redact(response.text)}")
+        return self._extract(response)
 
     def _extract(self, response: httpx.Response) -> str:
         """从响应里取出文本，兼容 JSON / SSE / Responses API。"""

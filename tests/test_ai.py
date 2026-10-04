@@ -1338,3 +1338,42 @@ def test_structure_sections_drops_rewritten_body(settings: Settings):
         assert structure_sections(client, settings.prompts, "标题", body) is None
     finally:
         client.close()
+
+
+def test_chat_falls_back_to_secondary_model():
+    """主模型 429 时换备用模型试，总尝试次数不变。"""
+    import httpx
+
+    calls = {"n": 0, "models": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json as _json
+
+        calls["n"] += 1
+        body = _json.loads(request.content)
+        calls["models"].append(body["model"])
+        if body["model"] == "glm/glm-5.3":
+            return httpx.Response(429, text="rate limited")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "备用模型回答"}}]})
+
+    client = _client(handler, retries=1)
+    try:
+        client.models = ["glm/glm-5.3", "wb/hy3"]
+        assert client.chat("判断") == "备用模型回答"
+        assert calls["models"] == ["glm/glm-5.3", "wb/hy3"]
+    finally:
+        client.close()
+
+
+def test_chat_format_error_is_not_retried_single_model():
+    """单模型时格式错误不重试（已有用例的补充断言见 test_chat_format_error_is_not_retried）。"""
+    import httpx
+
+    client = _client(
+        lambda r: httpx.Response(200, text="not json", headers={"content-type": "text/plain"}),
+        retries=2,
+    )
+    try:
+        assert client.models == ["test-model"]
+    finally:
+        client.close()

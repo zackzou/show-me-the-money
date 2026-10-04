@@ -36,6 +36,9 @@ class UserSettings(BaseSettings):
     llm_api_base: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    # 备用模型（英文逗号分隔）：主模型 429/503/401 时按顺序试，不额外多花调用。
+    # 例如 LLM_FALLBACK_MODELS="wb/hy3"
+    llm_fallback_models: str = ""
     # 网关自定义请求头，JSON 对象字符串，例如
     # LLM_EXTRA_HEADERS={"x-9router-token-saver":"off"}
     llm_extra_headers: str = ""
@@ -49,6 +52,7 @@ class LLMSettings(BaseModel):
     api_base: str
     api_key: str
     model: str
+    fallback_models: list[str] = []
     timeout_seconds: float = 60.0
     max_retries: int = 2
     temperature: float = 0.3
@@ -332,6 +336,7 @@ def load_settings(
         api_base=user.llm_api_base.strip(),
         api_key=user.llm_api_key.strip(),
         model=user.llm_model.strip(),
+        fallback_models=[m.strip() for m in user.llm_fallback_models.split(",") if m.strip()],
         timeout_seconds=float((raw_settings.get("llm") or {}).get("timeout_seconds", 60)),
         max_retries=int((raw_settings.get("llm") or {}).get("max_retries", 2)),
         temperature=float((raw_settings.get("llm") or {}).get("temperature", 0.3)),

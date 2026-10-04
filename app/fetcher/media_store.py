@@ -230,13 +230,20 @@ def localize_anchors(
     media_dir: str | Path = "",
     client: httpx.Client | None = None,
     max_images: int = 12,
+    stats: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """把 body_images 锚点逐个本地化：下不到、太小的一律丢掉。
 
     返回新列表（不改输入），条目 ``{"i": n, "url": 原地址, "local": "/img/.."}``。
     ``local`` 为空的会被调用方丢掉 —— 展示侧只认有 local 的。
+
+    ``stats`` 传入字典时带回计数：``kept`` 留下、``too_small`` 太小永久丢、
+    ``failed`` 没下下来（限流/抖动，下轮还值得再试）。调用方靠它区分
+    「标空不再来」和「原样保留下轮重试」。
     """
     out: list[dict[str, Any]] = []
+    failed = 0
+    small = 0
     for item in anchors:
         if len(out) >= max_images:
             break
@@ -251,12 +258,32 @@ def localize_anchors(
             out.append({"i": index, "url": url, "local": item["local"]})
             continue
         try:
-            local = localize_one(url, referer=referer, media_dir=media_dir, client=client)
+            data = download_image(url, referer=referer, client=client)
         except Exception as exc:  # 单张图失败不影响其它图
-            log.debug("图片本地化失败：%s（%r）", url[:80], exc)
+            log.debug("图片下载失败：%s（%r）", url[:80], exc)
+            failed += 1
             continue
-        if local:
-            out.append({"i": index, "url": url, "local": local})
+        if not data:
+            failed += 1
+            continue
+        size = measure(data)
+        if not size or size[0] < BODY_MIN_WIDTH or size[1] < BODY_MIN_HEIGHT:
+            small += 1
+            continue
+        try:
+            name = save_image(data, url, media_dir)
+        except OSError as exc:
+            log.debug("图片落盘失败：%s（%r）", url[:80], exc)
+            failed += 1
+            continue
+        if name:
+            out.append({"i": index, "url": url, "local": f"/img/{name}"})
+        else:
+            small += 1
+    if stats is not None:
+        stats["kept"] = len(out)
+        stats["too_small"] = small
+        stats["failed"] = failed
     return out
 
 

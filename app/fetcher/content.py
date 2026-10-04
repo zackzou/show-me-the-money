@@ -373,15 +373,32 @@ def _store_body_anchors(
     referer: str = "",
     media_dir: Path | None = None,
     client: httpx.Client | None = None,
-) -> bool:
+) -> str:
     """存内联配图锚点。有 media_dir 就逐张下载本地化（下不到/太小的丢掉）。
 
-    返回有没有图（调用方据此统计）。空数组表示「查过了没有」，别每轮重查。
+    返回 ``saved`` / ``empty`` / ``retry``，三者的区别对调用方很重要：
+
+    - ``saved``  存下了（可能有图，也可能部分成功）；
+    - ``empty``  确定没有可用图（本来就没图，或全被尺寸门槛滤掉），
+      已写 ``[]`` 标记查过了，调用方不该再为它重排；
+    - ``retry``  这轮一张都没下下来且**不是**因为太小 —— 源站在限流/抖动。
+      这时**不写库**，原样保留，下轮再来。误写成 ``[]`` 就等于把这些图永久丢了
+      （实测量子位长文 12 张图会在源站抖动时整篇清空）。
     """
     if media_dir is not None and anchors:
-        anchors = localize_anchors(anchors, referer=referer, media_dir=media_dir, client=client)
+        probe: dict[str, int] = {}
+        localized = localize_anchors(
+            anchors, referer=referer, media_dir=media_dir, client=client, stats=probe
+        )
+        if localized:
+            anchors = localized
+        elif probe.get("failed", 0) > 0 and not probe.get("too_small", 0):
+            return "retry"
+        else:
+            # 全因太小被丢（徽章/头像/图标）：确定没有可用图
+            anchors = []
     article.body_images = json.dumps(anchors, ensure_ascii=False) if anchors else "[]"
-    return bool(anchors)
+    return "saved" if anchors else "empty"
 
 
 def backfill_content(
@@ -427,11 +444,15 @@ def backfill_content(
             if text:
                 article.content_full = text
                 # 正文里的配图连同段落位置一起存，详情页照位置插回正文
-                if _store_body_anchors(
+                outcome = _store_body_anchors(
                     article, images, referer=article.link or "",
                     media_dir=media_dir, client=client,
-                ):
+                )
+                if outcome == "saved":
                     stats["with_images"] += 1
+                elif outcome == "retry":
+                    # 下载没成功：留 NULL，下轮 backfill_body_images 会再来
+                    article.body_images = None
                 stats["filled"] += 1
             else:
                 # 标记成空串：查过了确实没有，不要每轮重查
@@ -564,6 +585,11 @@ def count_with_full_text(session: Session) -> int:
     )
 
 
+# 两个分支统计的名字不同：新抓的算「新定位」，已定位的算「已本地化」
+_COUNTER_FRESH = {"saved": "filled", "empty": "empty", "retry": "failed"}
+_COUNTER_LEGACY = {"saved": "localized", "empty": "empty", "retry": "failed"}
+
+
 def backfill_body_images(
     session: Session,
     *,
@@ -571,6 +597,7 @@ def backfill_body_images(
     timeout: float = 12.0,
     min_chars: int = 200,
     media_dir: Path | None = None,
+    client: httpx.Client | None = None,
 ) -> dict[str, Any]:
     """给「已经有正文、但还没有内联配图位置」的文章补一次位置。
 
@@ -594,6 +621,10 @@ def backfill_body_images(
             .limit(limit)
         ).scalars()
     )
+    # 旧格式锚点（只有远端 url）：位置已经算对了，这里只做「下载到本地 + 滤掉小图」。
+    # **不限 relevance**：判为不相关的文章详情页照样能直接访问（/story/<id>），
+    # 早先这里跟着 fresh 一起筛了 relevance==1，结果这些页面的图一直在引用原站 ——
+    # 量子位 CDN 对非本站 Referer 直接 403，读者看到的是一片裂图。
     legacy = (
         list(
             session.execute(
@@ -602,7 +633,6 @@ def backfill_body_images(
                     Article.body_images.isnot(None),
                     Article.body_images != "[]",
                     Article.body_images.notlike('%"local"%'),
-                    Article.relevance == 1,
                     Article.link.notlike("http://localhost%"),
                 )
                 .order_by(Article.published_at.desc(), Article.id.desc())
@@ -617,48 +647,57 @@ def backfill_body_images(
     if not rows:
         return stats
 
-    with httpx.Client(
+    owns = client is None
+    http = client or httpx.Client(
         timeout=timeout,
         follow_redirects=True,
         headers={"User-Agent": DEFAULT_UA},
         limits=httpx.Limits(max_connections=6),
-    ) as client:
+    )
+    try:
         for index, article in enumerate(rows):
             if article.body_images is None:
                 try:
                     _, images = fetch_article_document(
-                        article.link, timeout=timeout, min_chars=min_chars, client=client
+                        article.link, timeout=timeout, min_chars=min_chars, client=http
                     )
                 except Exception as exc:  # 兜底：补图失败绝不能影响主流程
                     stats["failed"] += 1
                     log.debug("补正文配图失败：%s（%r）", article.link[:80], exc)
                     continue
                 # 空数组表示「查过了，正文里确实没有图」，别每轮都重查
-                if _store_body_anchors(
+                outcome = _store_body_anchors(
                     article, images, referer=article.link or "",
-                    media_dir=media_dir, client=client,
-                ):
-                    stats["filled"] += 1
-                else:
-                    stats["empty"] += 1
+                    media_dir=media_dir, client=http,
+                )
+                # fresh 分支：新抓到正文并顺带定位了图
+                stats[_COUNTER_FRESH[outcome]] += 1
+                if outcome == "retry":
+                    # 下载没成功：body_images 仍是 NULL，下轮照样会被捞到
+                    article.body_images = None
             else:
                 # 旧格式：只本地化，不重抓（位置已经是对的）
                 try:
                     old = json.loads(article.body_images or "[]")
                 except (TypeError, ValueError):
                     old = []
-                if _store_body_anchors(
-                    article, old if isinstance(old, list) else [],
-                    referer=article.link or "", media_dir=media_dir, client=client,
-                ):
-                    stats["localized"] += 1
-                else:
-                    # 全是小图/下不到：标空，别每轮都来
-                    article.body_images = "[]"
-                    stats["empty"] += 1
+                if not isinstance(old, list):
+                    old = []
+                outcome = _store_body_anchors(
+                    article, old,
+                    referer=article.link or "", media_dir=media_dir, client=http,
+                )
+                # legacy 分支：已定位的图被换成本地文件
+                stats[_COUNTER_LEGACY[outcome]] += 1
+                if outcome == "retry":
+                    # 不写库，原样保留下轮再试（别标 []，那等于把图永久丢了）
+                    article.body_images = json.dumps(old, ensure_ascii=False)
             if index % 5 == 4:
                 # 单张下载慢：中途提交，别把写锁占到最后
                 session.commit()
+    finally:
+        if owns:
+            http.close()
     session.flush()
     if stats["filled"]:
         log.info(

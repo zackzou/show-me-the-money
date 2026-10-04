@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import struct
+import tempfile
 import zlib
+from pathlib import Path
 
 import httpx
 
@@ -131,3 +134,141 @@ def test_body_min_threshold_kills_badges():
     assert BODY_MIN_WIDTH <= 300
     assert BODY_MIN_HEIGHT <= 600
     assert media_store.BODY_MIN_WIDTH == BODY_MIN_WIDTH
+
+
+def test_localize_anchors_reports_failed_vs_too_small(tmp_path):
+    """区分「下不下来」与「太小被丢」：前者值得下轮重试，后者永久没有。"""
+    def handler(request: httpx.Request) -> httpx.Response:
+        url = str(request.url)
+        if "badge" in url:
+            return httpx.Response(200, content=_png(120, 20), headers={"content-type": "image/png"})
+        return httpx.Response(404)
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    # 全是 404 → failed>0，too_small=0
+    probe: dict[str, int] = {}
+    localize_anchors(
+        [{"i": 0, "url": "https://example.com/a.png"}],
+        media_dir=tmp_path, client=client, stats=probe,
+    )
+    assert probe["kept"] == 0
+    assert probe["failed"] == 1
+    assert probe["too_small"] == 0
+
+    # 全是徽章 → too_small>0
+    probe2: dict[str, int] = {}
+    localize_anchors(
+        [{"i": 0, "url": "https://example.com/badge1.png"}],
+        media_dir=tmp_path, client=client, stats=probe2,
+    )
+    assert probe2["kept"] == 0
+    assert probe2["too_small"] == 1
+
+
+def test_store_body_anchors_keeps_original_when_download_fails(seeded_db):
+    """回归：下载全失败时不能把已有锚点标成 [] —— 那等于把图永久丢了。
+
+    实测量子位长文 12 张图在源站抖动时被整篇清空，页面从此再无配图。
+    """
+    from app.db import session_scope
+    from app.fetcher.content import _store_body_anchors
+    from app.models import Article
+    from tests.conftest import make_article
+
+    anchors = [
+        {"i": 4, "url": "https://i.qbitai.com/a.png"},
+        {"i": 8, "url": "https://i.qbitai.com/b.png"},
+    ]
+    with session_scope() as session:
+        article = make_article(
+            session, title="下载失败要保留", link="https://example.com/keep",
+            content_full="正文段落，" * 40,
+            body_images=json.dumps(anchors, ensure_ascii=False),
+        )
+        article_id = article.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(404)
+
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            outcome = _store_body_anchors(
+                stored, anchors, referer="https://example.com/keep",
+                media_dir=tmp_path_for(), client=client,
+            )
+        assert outcome == "retry"
+        # 关键：库里的锚点原封不动
+        assert json.loads(stored.body_images) == anchors
+
+
+def test_store_body_anchors_marks_empty_when_all_too_small(seeded_db):
+    """全是徽章/头像时确定没有可用图，标 [] 让它不再被反复捞回。"""
+    from app.db import session_scope
+    from app.fetcher.content import _store_body_anchors
+    from app.models import Article
+    from tests.conftest import make_article
+
+    anchors = [{"i": 0, "url": "https://camo.example.com/abc"}]
+    with session_scope() as session:
+        article = make_article(
+            session, title="全徽章", link="https://example.com/badge",
+            content_full="正文段落，" * 40,
+            body_images=json.dumps(anchors, ensure_ascii=False),
+        )
+        article_id = article.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_png(120, 20), headers={"content-type": "image/png"})
+
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            outcome = _store_body_anchors(
+                stored, anchors, referer="https://example.com/badge",
+                media_dir=tmp_path_for(), client=client,
+            )
+        assert outcome == "empty"
+        assert stored.body_images == "[]"
+
+
+def tmp_path_for() -> Path:
+    """每张图一个临时目录，避免不同用例的文件互相污染。"""
+    return Path(tempfile.mkdtemp(prefix="wb-imgtest-"))
+
+
+def test_backfill_localizes_irrelevant_articles_too(seeded_db):
+    """回归：不相关（relevance=0）的文章详情页也要本地化配图。
+
+    它的 /story/<id> 照样能直接打开，而量子位 CDN 对非本站 Referer 直接 403 ——
+    早先 legacy 分支跟着 fresh 一起筛了 relevance==1，这些页面的图就一直在引用原站。
+    """
+    from app.db import session_scope
+    from app.fetcher.content import backfill_body_images
+    from app.models import Article
+    from tests.conftest import make_article
+
+    anchors = [{"i": 4, "url": "https://i.qbitai.com/a.png"}]
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="不相关但有图",
+            link="https://example.com/irrelevant",
+            status="processed",
+            relevance=0,
+            content_full="正文段落，" * 60,
+            body_images=json.dumps(anchors, ensure_ascii=False),
+        )
+        article_id = article.id
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=_png(640, 254), headers={"content-type": "image/png"})
+
+    media_dir = tmp_path_for()
+    mock = httpx.Client(transport=httpx.MockTransport(handler), follow_redirects=True)
+    with session_scope() as session:
+        stats = backfill_body_images(session, limit=10, media_dir=media_dir, client=mock)
+        assert stats["localized"] == 1
+        stored = session.get(Article, article_id)
+        assert '"local"' in stored.body_images
+        assert "i.qbitai.com" in stored.body_images  # 原地址仍留着（排错/回退用）
