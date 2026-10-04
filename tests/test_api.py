@@ -1464,25 +1464,37 @@ def test_sources_delete_keeps_articles(client, seeded_db):
 
 
 def test_deleted_source_disappears_from_list_and_fetch(client, seeded_db):
-    """删掉的源不再出现在管理页，也不再被抓取。"""
+    """删掉的源不再出现在**在用列表**、不再被抓取，但**能撤回**。
+
+    早先只有 restore 路由、页面上没有任何入口：源从列表里消失后既看不到也
+    恢复不了，同地址重新添加还会撞上那条隐藏的旧行报「已存在」。
+    """
     from app.fetcher.pipeline import _enabled_sources
 
     with session_scope() as session:
         from app.models import Source
 
         source_id = session.execute(select(Source.id)).scalar_one()
-        before = session.execute(select(Source)).scalars().all()
-        assert any(s.id == source_id for s in before)
         fetchable = [s.id for s in _enabled_sources(session)]
 
     client.post(f"/sources/{source_id}/delete", follow_redirects=False)
 
     page = client.get("/sources")
-    assert "测试源" not in page.text
+    # 在用列表里没有了：删除按钮和启用开关都不该再出现
+    assert f"/sources/{source_id}/enable" not in page.text
+    assert f"/sources/{source_id}/delete" not in page.text
+    # 但「已删除」区里能看见，而且能撤回
+    assert f"/sources/{source_id}/restore" in page.text
     with session_scope() as session:
         after = [s.id for s in _enabled_sources(session)]
     assert source_id in fetchable
     assert source_id not in after
+
+    # 撤回后回到在用列表，也重新被抓取；历史文章的来源不受影响
+    client.post(f"/sources/{source_id}/restore", follow_redirects=False)
+    assert f"/sources/{source_id}/restore" not in client.get("/sources").text
+    with session_scope() as session:
+        assert source_id in [s.id for s in _enabled_sources(session)]
 
 
 def test_deleted_source_can_be_restored(client, seeded_db):

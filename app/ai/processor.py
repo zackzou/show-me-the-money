@@ -144,6 +144,12 @@ def parse_translate(raw: str) -> tuple[str | None, str | None]:
 TRANSLATE_CHUNK_CHARS = 2600
 # 单块至少要有这么多字符才单独成块（否则碎片会被并到上一块）
 TRANSLATE_CHUNK_MIN_CHARS = 400
+# 单块最多试几次。网关偶尔会把输出截断在半句上（实测停在「…在7」），
+# 长度校验会拒掉，先重试一次（多数截断是随机的）。
+TRANSLATE_CHUNK_ATTEMPTS = 2
+# 写不出来的块最多再对半拆几层（见 _rewrite_chunk）。拆到 3 层 ≈ 8 段原文，
+# 再深就说明这段本身有问题，不该无限拆下去。
+MAX_REWRITE_SPLIT_DEPTH = 3
 # 参与翻译的正文长度上限（与抓取时的上限对齐）
 MAX_CONTENT_CHARS = 40_000
 # 重写后的中文长度下限（占原文的比例）。
@@ -315,6 +321,43 @@ def chunk_for_rewrite(paragraphs: list[str], *, budget: int = TRANSLATE_CHUNK_CH
     return chunks
 
 
+def _rewrite_chunk(
+    client: LLMClient, prompts: PromptsConfig, chunk: str, *, depth: int = 0
+) -> tuple[str, bool]:
+    """把一块重写成中文；返回 ``(译文, 是否可用)``。
+
+    会**自适应拆块**：网关对某些块的输出会莫名其妙被截断（实测 183 的第二块
+    稳定停在 343 字、半个数字上，重试三次结果一样 —— 不是随机抖动，是这块本身
+    触到了上游的输出上限）。单纯重试没用，只有把这块**对半拆开**再试才写得完。
+
+    拆到 ``MAX_REWRITE_SPLIT_DEPTH`` 层还写不出来就放弃（返回空），
+    由调用方按「整篇或没有」处理。
+    """
+    translated = ""
+    for _ in range(TRANSLATE_CHUNK_ATTEMPTS):
+        translated = _optional_llm(
+            client, render_translate_content_prompt(prompts, chunk), ""
+        ).strip()
+        ratio = len(translated) / len(chunk) if chunk else 0.0
+        # 太短=被截断/压成摘要，太长=在扩写复述；两种都不该写进库
+        if translated and _TRANSLATE_MIN_RATIO <= ratio <= _TRANSLATE_MAX_RATIO:
+            return translated, True
+        translated = ""
+
+    parts = chunk.split("\n\n")
+    if depth >= MAX_REWRITE_SPLIT_DEPTH or len(parts) < 2:
+        return "", False
+    middle = len(parts) // 2
+    pieces = ["\n\n".join(parts[:middle]), "\n\n".join(parts[middle:])]
+    done: list[str] = []
+    for piece in pieces:
+        text, ok = _rewrite_chunk(client, prompts, piece, depth=depth + 1)
+        if not ok:
+            return "", False
+        done.append(text)
+    return "\n\n".join(done), True
+
+
 def translate_to_chinese(
     client: LLMClient,
     prompts: PromptsConfig,
@@ -339,21 +382,22 @@ def translate_to_chinese(
     out: list[str] = []
     failed = 0
     for chunk in chunks:
-        translated = _optional_llm(
-            client, render_translate_content_prompt(prompts, chunk), ""
-        ).strip()
-        ratio = len(translated) / len(chunk) if chunk else 0.0
-        # 太短=没写完，太长=在扩写复述；两种都不该写进库
-        if not translated or ratio < _TRANSLATE_MIN_RATIO or ratio > _TRANSLATE_MAX_RATIO:
+        translated, ok = _rewrite_chunk(client, prompts, chunk)
+        if ok:
+            out.append(translated)
+        else:
             failed += 1
-            continue
-        out.append(translated)
     if not out:
         return None
-    result = "\n\n".join(out)
     if failed:
-        log.info("正文重写有 %d/%d 块未成功，保留已写部分", failed, len(chunks))
-    return result
+        # 全有或全无。早先这里是「丢掉失败的块、保留成功的」，于是文章 259 会出现
+        # 只有最后三分之一的中文正文 —— 开头直接断掉，读者看到的是一段残篇，
+        # 而页面完全看不出它不完整（实测压缩比 0.09）。
+        # 残篇比没有译文更糟：没有译文时页面会明说「原文为英文，暂无中文译文」。
+        log.info("正文重写有 %d/%d 块未成功，整篇不采用（宁可显示原文也不要残篇）",
+                 failed, len(chunks))
+        return None
+    return "\n\n".join(out)
 
 
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:

@@ -116,19 +116,37 @@ def _rows(session: Session) -> list[dict[str, Any]]:
     sources = list(
         session.execute(select(Source).where(Source.deleted == 0).order_by(Source.id)).scalars()
     )
-    return [
-        {
-            "id": row.id,
-            "name": row.name,
-            "url": row.url,
-            "type": row.type,
-            "lang": row.lang,
-            "enabled": bool(row.enabled),
-            "created": row.created_at.strftime("%Y-%m-%d") if row.created_at else "",
-            **_source_stats(session, row.id),
-        }
-        for row in sources
-    ]
+    return [_row(session, row) for row in sources]
+
+
+def _deleted_rows(session: Session) -> list[dict[str, Any]]:
+    """已软删除的源。
+
+    之前只有 ``/sources/{id}/restore`` 这个路由，页面上**没有任何入口**能点它 ——
+    删除后源就从列表里消失了，用户既看不到也恢复不了；再手动添加同一个 URL 还会
+    撞上那条隐藏的旧行、报「已存在」。删掉的源必须能看见、能撤回。
+    """
+    # 只按 id 倒序：表里没有 deleted_at（Source 只有 deleted 这个软删标记），
+    # 为了显示一个删除日期去加列、给存量库补迁移，不值当。
+    rows = list(
+        session.execute(
+            select(Source).where(Source.deleted != 0).order_by(Source.id.desc())
+        ).scalars()
+    )
+    return [_row(session, row) for row in rows]
+
+
+def _row(session: Session, row: Source) -> dict[str, Any]:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "url": row.url,
+        "type": row.type,
+        "lang": row.lang,
+        "enabled": bool(row.enabled),
+        "created": row.created_at.strftime("%Y-%m-%d") if row.created_at else "",
+        **_source_stats(session, row.id),
+    }
 
 
 def _render(request: Request, session: Session, *, notice: dict[str, str] | None = None,
@@ -136,7 +154,13 @@ def _render(request: Request, session: Session, *, notice: dict[str, str] | None
     return templates.TemplateResponse(
         request,
         "sources.html",
-        _ctx(request, nav="sources", sources=_rows(session), notice=notice or {}),
+        _ctx(
+            request,
+            nav="sources",
+            sources=_rows(session),
+            deleted_sources=_deleted_rows(session),
+            notice=notice or {},
+        ),
         status_code=status,
     )
 

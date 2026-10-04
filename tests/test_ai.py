@@ -1222,26 +1222,42 @@ def test_translate_chunk_gate_fits_chinese_density(seeded_db, settings: Settings
 
     body = "\n\n".join("English paragraph content that is long enough to pass the gate." for _ in range(4))
     assert len(body) > 200
-    # 0.35 的整句译文要收
-    good = "完整译文。" * (len(body) * 35 // 100 // 5)
-    assert 0.3 <= len(good) / len(body) < 0.4
-    client = _client(
-        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": good}}]}), retries=0
-    )
+
+    def reply_of(prompt: str, percent: int) -> str:
+        """按**输入长度**按比例产出译文 —— 真实模型的输出长度跟着输入走，
+        固定长度的假译文一遇到「自适应拆块」就会失真。"""
+        src = prompt.split("英文原文：", 1)[-1]
+        want = max(1, int(len(src) * percent / 100))
+        unit = "完整译文内容。"
+        return (unit * (want // len(unit) + 1))[:want]
+
+    def make(percent: int):
+        def handler(request: httpx.Request) -> httpx.Response:
+            prompt = request.content.decode("utf-8", "ignore")
+            return httpx.Response(
+                200,
+                json={"choices": [{"message": {"content": reply_of(prompt, percent)}}]},
+            )
+
+        return _client(handler, retries=0)
+
+    client = make(40)
     try:
-        assert translate_to_chinese(client, settings.prompts, body) == good
+        assert translate_to_chinese(client, settings.prompts, body)
     finally:
         client.close()
-    # 0.26 的电报体照样丢掉
-    bad = "电报体 " * (len(body) * 26 // 100 // 4)
-    client2 = _client(
-        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": bad.strip()}}]}),
-        retries=0,
-    )
+
+    bad = make(12)   # 压成摘要，低于 0.25
     try:
-        assert translate_to_chinese(client2, settings.prompts, body) is None
+        assert translate_to_chinese(bad, settings.prompts, body) is None
     finally:
-        client2.close()
+        bad.close()
+
+    huge = make(400)  # 扩写复述，高于 1.3
+    try:
+        assert translate_to_chinese(huge, settings.prompts, body) is None
+    finally:
+        huge.close()
 
 
 def test_generate_brief_zh_writes_fluent_sentence(settings: Settings):
@@ -1473,3 +1489,68 @@ def test_backfill_translations_also_builds_sections(seeded_db, settings: Setting
 
         sections = json.loads(stored.body_sections_zh)
         assert [s["h"] for s in sections] == ["背景", "进展"]
+
+
+def test_translate_to_chinese_is_all_or_nothing(seeded_db, settings: Settings):
+    """回归：正文重写必须「整篇或没有」，不能只留一半。
+
+    早先是「丢掉失败的块、保留成功的」，实测文章 259 只留下了最后三分之一的中文
+    正文（压缩比 0.09）—— 开头直接断掉，而页面完全看不出它不完整。
+    残篇比没有译文更糟：没有译文时页面会明说「原文为英文，暂无中文译文」。
+    """
+    import httpx
+
+    body = "\n\n".join(f"English body paragraph {i} with enough text to matter." for i in range(80))
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        prompt = request.content.decode("utf-8", "ignore")
+        src = prompt.split("英文原文：", 1)[-1]
+        # 第二块（从 paragraph 40 开始）**永远**写不出来：重试与拆块都救不回来，
+        # 模拟上游对这个块有硬性输出上限
+        if "paragraph 40 " in src:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "摘要。"}}]})
+        want = max(1, int(len(src) * 0.4))
+        unit = "这是一段足够长的中文译文，"
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": (unit * (want // len(unit) + 1))[:want]}}]}
+        )
+
+    client = _client(handler, retries=0)
+    try:
+        assert translate_to_chinese(client, settings.prompts, body) is None
+        assert calls["n"] >= 3, "写不出来的块应该重试并拆块试过"
+    finally:
+        client.close()
+
+
+def test_translate_chunk_retries_truncated_output(seeded_db, settings: Settings):
+    """回归：被网关截断的块要重试，而不是整篇作废。
+
+    实测 183 的第二块输出停在半个数字上（「…在7」），长度校验正确地拒掉了它，
+    但早先没有人重试 —— 截断是随机的，那一篇就永远补不上译文。
+    """
+    import httpx
+
+    body = "\n\n".join(f"English body paragraph {i} long enough to matter here." for i in range(80))
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        prompt = request.content.decode("utf-8", "ignore")
+        src = prompt.split("英文原文：", 1)[-1]
+        want = max(1, int(len(src) * 0.4))
+        unit = "这是一段足够长的中文译文，"
+        good = (unit * (want // len(unit) + 1))[:want]
+        # 第 2 块第一次被网关截断，重试就好
+        text = "截断了" if calls["n"] == 2 else good
+        return httpx.Response(200, json={"choices": [{"message": {"content": text}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        out = translate_to_chinese(client, settings.prompts, body)
+        assert out, "截断的块重试后应该能补上整篇"
+        assert calls["n"] >= 3, "应该至少重试过一次"
+    finally:
+        client.close()

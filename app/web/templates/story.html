@@ -259,7 +259,20 @@
               overflow:hidden; display:flex; }
   .jump-bar i { display:block; width:100%; height:0; border-radius:3px; background:var(--accent);
                 transition:height .12s linear; }
-  @media (max-width:1180px) { .jump { display:none; } }
+  /* 窄屏**不要隐藏**这条：长文恰恰在手机上最难翻，藏掉等于白做。
+     之前的 @media(max-width:1180px){display:none} 让它在 1180px 以下整个消失，
+     而自动检查只看了 [hidden] 属性、没看 computed style，所以一直没被发现。
+     改成缩小 + 半透明，既不挡正文也一直可用。 */
+  @media (max-width:1180px) {
+    .jump { padding:5px 4px; gap:5px; right:6px; opacity:.72; }
+    .jump:hover { opacity:1; }
+    .jump button { width:26px; height:26px; font-size:13px; }
+    .jump-bar { width:3px; height:32px; }
+  }
+  /* 极窄屏：靠边贴紧，别压到正文 */
+  @media (max-width:420px) {
+    .jump { right:2px; opacity:.6; }
+  }
 </style>
 <script>
   // 悬浮跳转：只在正文足够长时出现，滚动位置同步成一条进度线

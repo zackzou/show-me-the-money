@@ -194,14 +194,23 @@ def record_usage(settings: Settings, event: dict[str, Any]) -> None:
         log.debug("用量记录写入失败：%r", exc)
 
 
-def read_usage(settings: Settings, *, limit: int = 400) -> list[dict[str, Any]]:
+def read_usage(settings: Settings, *, limit: int | None = None) -> list[dict[str, Any]]:
+    """读用量日志（最新在前）。
+
+    ``limit=None`` 表示**全量读**：分页要按总数算页数，只截最后 N 条的话，
+    页数和「共多少条」都会跟着少算 —— 日志一旦超过 N 条，最老的记录就成了
+    永远翻不到、也没人知道它存在的黑洞（实测 718 条被砍到 400 条、72 页
+    变 40 页）。文件是纯追加的 JSONL，全量读的开销可以接受。
+    """
     path = _usage_path(settings)
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()[-limit:]
+        raw = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return []
+    if limit is not None:
+        raw = raw[-limit:]
     out: list[dict[str, Any]] = []
-    for line in lines:
+    for line in raw:
         try:
             row = json.loads(line)
         except ValueError:
@@ -304,6 +313,14 @@ def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any
     """真的发一次请求测连通性，并把用量（含 token 明细）记一条。"""
     started = time.time()
     prompt = PROBE_PROMPT
+    captured: dict[str, Any] = {}
+
+    def sink(**kwargs: Any) -> None:
+        # 先攒住，等拿到**真实耗时**再统一写一条。
+        # 早先这里直接把 sink 接到 record_llm_call，失败时又自己补记一条 ——
+        # 一次失败的连通性测试在日志里就成了两条，看着像跑了两次。
+        captured.update(kwargs)
+
     client = LLMClient(
         base,
         key,
@@ -312,24 +329,39 @@ def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any
         retries=0,
         temperature=0.3,
         extra_headers=settings.llm.extra_headers,
-        usage_sink=lambda **kw: record_llm_call(settings, **kw),
+        usage_sink=sink,
     )
+    ok = True
+    text = ""
+    error = ""
     try:
         text = client.chat(prompt)
     except LLMError as exc:
-        elapsed = int((time.time() - started) * 1000)
-        record_usage(settings, {
-            "kind": "probe", "model": model, "base": base, "ok": False,
-            "error": str(exc)[:300], "ms": elapsed, "prompt_chars": len(prompt),
-        })
-        return {"ok": False, "error": str(exc)[:300], "ms": elapsed}
+        ok = False
+        error = str(exc)[:300]
     finally:
         client.close()
+
+    elapsed = int((time.time() - started) * 1000)
+    numbers = dict(captured.get("usage") or {})
+    event: dict[str, Any] = {
+        "kind": "probe", "model": model, "base": base, "ok": ok,
+        "error": error, "ms": elapsed,
+        "prompt_chars": len(prompt), "reply_chars": len(text),
+        "input_tokens": int(numbers.get("input") or 0),
+        "output_tokens": int(numbers.get("output") or 0),
+        "cached_tokens": int(numbers.get("cached") or 0),
+        "reasoning_tokens": int(numbers.get("reasoning") or 0),
+        "total_tokens": int(numbers.get("total") or 0),
+    }
+    record_usage(settings, event)
+    if not ok:
+        return {"ok": False, "error": error, "ms": elapsed}
     return {
         "ok": True,
         "reply": text.strip()[:120],
-        "ms": int((time.time() - started) * 1000),
-        "usage": dict(client.last_usage),
+        "ms": elapsed,
+        "usage": numbers,
     }
 
 

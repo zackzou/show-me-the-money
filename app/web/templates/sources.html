@@ -80,6 +80,27 @@
   <p class="ftip">
     停用 = 后台不再抓新的；删除 = 从此不再出现，已经入库的文章和译文仍然可以正常阅读。
   </p>
+
+  {% if deleted_sources %}
+  <details class="trash">
+    <summary>已删除的信源（{{ deleted_sources|length }}）— 点开可以撤回</summary>
+    <ul class="slist">
+      {% for s in deleted_sources %}
+      <li class="srow dead">
+        <div class="sinfo">
+          <strong>{{ s.name }}</strong>
+          <span class="surl">{{ s.url }}</span>
+          <span class="smeta">{{ s.total }} 篇已入库 · 添加于 {{ s.created or "未知" }}</span>
+        </div>
+        <form method="post" action="/sources/{{ s.id }}/restore" class="sact">
+          <button type="submit" class="mini">撤回</button>
+        </form>
+      </li>
+      {% endfor %}
+    </ul>
+    <p class="ftip">删除只是把它藏起来，已入库文章的来源不会丢。同一地址重新添加也可以直接恢复。</p>
+  </details>
+  {% endif %}
 </section>
 
 {% endblock %}
@@ -91,6 +112,13 @@
   .notice.ok { border-color:rgba(31,138,90,.45); background:rgba(31,138,90,.07); color:var(--text); }
   .notice.error { border-color:rgba(200,60,50,.45); background:rgba(200,60,50,.07); }
   .notice.warn { border-color:rgba(190,140,20,.45); background:rgba(190,140,20,.08); }
+  .trash { margin-top:18px; border:1px solid var(--line); border-radius:10px; padding:12px 14px;
+           background:var(--surface); }
+  .trash > summary { cursor:pointer; font-size:13.5px; font-weight:600; color:var(--muted); }
+  .trash > summary:hover { color:var(--text); }
+  .trash .slist { margin-top:12px; }
+  .srow.dead { opacity:.72; }
+  .srow.dead .sinfo strong { text-decoration:line-through; text-decoration-color:var(--faint); }
   .addform { display:flex; flex-direction:column; gap:11px; }
   .frow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
   .frow input[type=url] { flex:1 1 340px; min-width:0; }
