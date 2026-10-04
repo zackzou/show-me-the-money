@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">SETTINGS</div>
+  <h1>模型设置</h1>
+  <p class="meta">
+    改完点「保存」立即生效，下一个抓取/处理任务就用新的配置，<b>不需要重启</b>。
+    保存前会自动做一次真实请求测连通性 —— 不通就不保存，免得任务整片降级成英文。
+  </p>
+</div>
+
+{% if notice.text %}
+  <p class="notice {{ notice.kind }}">{{ notice.text }}</p>
+{% endif %}
+
+{% if result.reply %}
+  <p class="probe-ok">模型回复：<code>{{ result.reply }}</code>{% if result.ms %} · {{ result.ms }}ms{% endif %}</p>
+{% endif %}
+
+<section class="sec">
+  <div class="sec-t">厂商预设</div>
+  <div class="presets">
+    {% for p in presets %}
+      <button type="button" class="preset" data-base="{{ p.base }}"
+              data-models="{{ p.models|join(',') }}" data-name="{{ p.name }}"
+              {% if p.note %}title="{{ p.note }}"{% endif %}>
+        <b>{{ p.name }}</b>
+        <em>{{ p.models[0] }}</em>
+      </button>
+    {% endfor %}
+  </div>
+  <p class="ftip">点一下自动填 Base URL 和模型名；下面的列表都可以改成任意值（任何 OpenAI 兼容接口都能用）。</p>
+</section>
+
+<section class="sec">
+  <div class="sec-t">API 配置</div>
+  <form class="cfg" method="post" action="/settings" id="cfg-form">
+    <label class="fld">
+      <span>API Base URL</span>
+      <input type="text" name="api_base" id="f-base" required
+             value="{{ current.api_base }}" placeholder="https://api.openai.com/v1" autocomplete="off" spellcheck="false">
+      <em>OpenAI 兼容接口的根地址。填到 <code>/v1</code> 为止即可，程序自己拼 <code>/chat/completions</code>。</em>
+    </label>
+
+    <label class="fld">
+      <span>API Key</span>
+      <input type="password" name="api_key" id="f-key"
+             placeholder="{{ '留空 = 沿用当前密钥 ' ~ current.api_key_masked if current.has_key else '粘贴你的密钥' }}"
+             autocomplete="off" spellcheck="false">
+      <em>
+        {% if current.has_key %}当前：<code>{{ current.api_key_masked }}</code>。留空表示不改动它。
+        {% else %}没有配置密钥，本地模型（Ollama）随便填一个即可。
+        {% endif %}
+      </em>
+    </label>
+
+    <label class="fld">
+      <span>模型</span>
+      <input type="text" name="model" id="f-model" required list="model-list"
+             value="{{ current.model }}" placeholder="gpt-4o" autocomplete="off" spellcheck="false">
+      <datalist id="model-list"></datalist>
+      <em>必须是服务商控制台里列出的模型 id，不是显示名。</em>
+    </label>
+
+    <label class="fld">
+      <span>备用模型（可选）</span>
+      <input type="text" name="fallback_models" id="f-fallback"
+             value="{{ current.fallback_models }}" placeholder="glm-4-flash, deepseek-chat"
+             autocomplete="off" spellcheck="false">
+      <em>英文逗号分隔。主模型限流/不可用时按顺序自动顺延，总尝试次数不变。</em>
+    </label>
+
+    <div class="btns">
+      <button type="submit" class="primary">保存并生效</button>
+      <button type="submit" formaction="/settings/test" formnovalidate class="ghost">仅测试连接</button>
+    </div>
+  </form>
+</section>
+
+<section class="sec">
+  <div class="sec-t">用量记录（简单版）</div>
+  <p class="ftip" style="margin:0 0 12px">
+    累计 <b>{{ usage.total_calls }}</b> 次调用 · 约 <b>{{ usage.total_tokens }}</b> tokens
+    （只统计设置页的测试请求；抓取/处理任务的调用暂未逐条记录）
+  </p>
+  {% if usage.days %}
+    <table class="utbl">
+      <thead><tr><th>日期</th><th>调用</th><th>成功</th><th>失败</th><th>tokens</th></tr></thead>
+      <tbody>
+        {% for day, st in usage.days %}
+          <tr>
+            <td>{{ day }}</td><td>{{ st.calls }}</td><td>{{ st.ok }}</td>
+            <td class="{{ 'bad' if st.fail else '' }}">{{ st.fail }}</td><td>{{ st.tokens }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  {% endif %}
+
+  {% if usage.recent %}
+    <div class="sec-t plain" style="margin-top:22px">最近 20 条</div>
+    <ul class="ulog">
+      {% for r in usage.recent %}
+        <li class="{{ 'ok' if r.ok else 'bad' }}">
+          <span class="u-at">{{ r.at }}</span>
+          <span class="u-model">{{ r.model }}</span>
+          <span class="u-res">{{ '正常 ' ~ (r.ms|string) ~ 'ms' if r.ok else (r.error or '')[:80] }}</span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="ftip">还没有记录。点上面的「测试连接」就会有一条。</p>
+  {% endif %}
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .notice { margin:18px 0 4px; padding:12px 15px; border-radius:9px; font-size:13.5px; line-height:1.7;
+            border:1px solid var(--line); }
+  .notice.ok { border-color:rgba(31,138,90,.45); background:rgba(31,138,90,.07); color:var(--text); }
+  .notice.error { border-color:rgba(200,60,50,.45); background:rgba(200,60,50,.07); }
+  .probe-ok { margin:12px 0 0; padding:10px 14px; border-radius:8px; font-size:13px;
+             background:var(--chip); color:var(--muted); }
+  .probe-ok code { color:var(--text); }
+  .presets { display:flex; flex-wrap:wrap; gap:8px; }
+  .preset { display:flex; flex-direction:column; gap:3px; align-items:flex-start; cursor:pointer;
+            padding:9px 13px; border:1px solid var(--line); border-radius:9px;
+            background:var(--surface); font-family:inherit; text-align:left; }
+  .preset:hover { border-color:var(--accent); }
+  .preset b { font-size:13px; color:var(--text); font-weight:600; }
+  .preset em { font-size:11.5px; color:var(--faint); font-style:normal; }
+  .cfg { display:flex; flex-direction:column; gap:16px; }
+  .fld { display:flex; flex-direction:column; gap:6px; }
+  .fld > span { font-size:12.5px; font-weight:600; color:var(--muted); }
+  .fld input { padding:10px 13px; border:1px solid var(--line); border-radius:9px;
+               background:var(--surface); color:var(--text); font-size:13.5px;
+               font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  .fld input:focus { outline:none; border-color:var(--accent); }
+  .fld em { font-size:11.5px; color:var(--faint); font-style:normal; line-height:1.6; }
+  .fld code { background:var(--chip); padding:1px 5px; border-radius:4px; }
+  .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:4px; }
+  .btns button { padding:10px 20px; border-radius:9px; font-size:13.5px; font-family:inherit;
+                 font-weight:600; cursor:pointer; }
+  .primary { border:1px solid var(--accent); background:var(--accent); color:#fff; }
+  .primary:hover { filter:brightness(1.07); }
+  .ghost { border:1px solid var(--line); background:var(--surface); color:var(--muted); }
+  .ghost:hover { color:var(--accent); border-color:var(--accent); }
+  .utbl { width:100%; border-collapse:collapse; font-size:13px; }
+  .utbl th, .utbl td { text-align:right; padding:7px 10px; border-bottom:1px solid var(--line); }
+  .utbl th:first-child, .utbl td:first-child { text-align:left; }
+  .utbl th { font-size:11.5px; color:var(--faint); font-weight:600; }
+  .utbl td.bad { color:#c0392b; }
+  .ulog { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:5px; }
+  .ulog li { display:flex; gap:11px; align-items:baseline; font-size:12.5px; padding:7px 11px;
+             border:1px solid var(--line); border-radius:8px; }
+  .ulog li.bad { border-color:rgba(200,60,50,.35); }
+  .u-at { color:var(--faint); flex:none; }
+  .u-model { color:var(--text); font-family:ui-monospace,Menlo,monospace; flex:none;
+             max-width:220px; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .u-res { color:var(--muted); min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .ulog li.bad .u-res { color:#c0392b; }
+</style>
+<script>
+  // 点厂商预设：自动填 Base URL，并把该厂商的常用模型塞进候选列表
+  var list = document.getElementById("model-list");
+  document.querySelectorAll(".preset").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      document.getElementById("f-base").value = btn.getAttribute("data-base") || "";
+      var models = (btn.getAttribute("data-models") || "").split(",").filter(Boolean);
+      var first = models.shift();
+      if (first && !document.getElementById("f-model").value) {
+        document.getElementById("f-model").value = first;
+      }
+      list.innerHTML = models.map(function (m) {
+        return '<option value="' + m.replace(/"/g, "") + '"></option>';
+      }).join("");
+    });
+  });
+</script>
+{% endblock %}

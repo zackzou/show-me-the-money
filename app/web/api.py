@@ -16,7 +16,7 @@ from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleDetailOut, ArticleOut, HealthOut, ReportDetail, ReportOut
 from app.utils.text import BRIEF_DIGEST_CHARS as _BRIEF_DIGEST_CHARS
-from app.utils.text import brief_digest, now_local
+from app.utils.text import brief_digest, chinese_ratio, has_long_latin_run, now_local
 
 api_router = APIRouter(prefix="/api")
 
@@ -76,25 +76,59 @@ def _topics_json(raw: str | None) -> list[str]:
     return [str(x) for x in parsed if isinstance(x, str)] if isinstance(parsed, list) else []
 
 
-def _digest_with_fallback(article: Article) -> str:
-    """早报汇总：AI 现写的推送语优先，又通顺又不断句。
+def _is_chinese_usable(text: str | None) -> bool:
+    """能不能当中文早报正文用：有汉字、且没有一长串没翻的英文。"""
+    clean = (text or "").strip()
+    if not clean:
+        return False
+    return chinese_ratio(clean) >= 0.4 and not has_long_latin_run(clean)
 
-    还没轮到写的（老数据）回退旧的截断拼凑：中文导读优先，太短就补推荐理由。
+
+def _digest_with_fallback(article: Article) -> str:
+    """早报片段：一段**完整的中文**话。
+
+    早报是要推到手机上的，所以这里有两条硬要求：
+
+    1. **必须完整**。``brief_digest`` 早先在一整句放不下预算时会硬截断加省略号，
+       产出过「…Only $30 more than the wireless charging ver…」这种东西 ——
+       半句话推给读者，页面看着却像正常的。
+    2. **必须是中文**。英文信源在中文版还没写出来时，``digest`` 里躺的是英文；
+       直接拿来用就会出现「伦理声明白。Only $30 more than the wireless…」
+       这种半中半英的句子。所以英文原文一律不作为早报文案，
+       最多只拿标题兜底，并且明说译文还没准备好。
+
+    取值顺序：AI 写的推送语 → 中文导读 → 中文推荐理由 → 中文标题。
     """
     stored = (getattr(article, "brief_zh", None) or "").strip()
-    if stored:
+    if _is_chinese_usable(stored):
         return stored
-    brief = brief_digest(article.digest_zh or article.digest or "")
-    if len(brief) >= _BRIEF_MIN_CHARS or not brief:
-        return brief
-    extra = brief_digest(article.reason or article.summary or "", limit=_BRIEF_DIGEST_CHARS - len(brief))
-    # 收尾的标点先剥掉再拼，否则会出现「记录。。Apple」这种双句号
-    extra = extra.rstrip("。！？.!? ，,;；")
-    if not extra or extra in brief:
-        return brief
-    # brief 结尾没有句号时才补一个；已经有就别补，否则会拼出「结尾。。推荐」
-    joiner = "" if brief[-1] in "。！？.!?" else "。"
-    return f"{brief}{joiner}{extra}"[:_BRIEF_DIGEST_CHARS]
+
+    # 只从「确实是中文」的字段里挑，英文原文不参与
+    for candidate in (article.digest_zh, article.digest, article.reason, article.summary):
+        if not _is_chinese_usable(candidate):
+            continue
+        brief = brief_digest(candidate)
+        if len(brief) >= _BRIEF_MIN_CHARS:
+            return brief
+        extra = brief_digest(
+            article.reason if candidate is not article.reason else article.summary or "",
+            limit=_BRIEF_DIGEST_CHARS,
+        )
+        if _is_chinese_usable(extra) and extra not in brief:
+            extra = extra.rstrip("。！？.!? ，,;；")
+            if extra:
+                joiner = "" if brief[-1] in "。！？.!?" else "。"
+                merged = f"{brief}{joiner}{extra}"
+                if len(merged) <= _BRIEF_DIGEST_CHARS + 20:
+                    return merged
+        if brief:
+            return brief
+
+    # 兜底：中文标题（英文源的 title_zh 由补译轮填）。宁可短，也不推英文。
+    title = (article.title_zh or article.title or "").strip()
+    if chinese_ratio(title) >= 0.4:
+        return brief_digest(title)
+    return f"（{title}）中文译文还在整理中。" if title else ""
 
 
 @api_router.get("/reports", response_model=list[ReportOut])

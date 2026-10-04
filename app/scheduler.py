@@ -35,12 +35,28 @@ log = get_logger(__name__)
 _scheduler: BackgroundScheduler | None = None
 
 
+def _usage_sink(settings: Settings):
+    """把每次 LLM 调用记到设置页的用量里。
+
+    延迟导入 app.web.settings —— 那是 web 层，反向依赖会让 import 环。
+    """
+    from app.web.settings import record_llm_call
+
+    def sink(**kwargs) -> None:
+        record_llm_call(settings, **kwargs)
+
+    return sink
+
+
 def _llm_client(settings: Settings) -> LLMClient:
     """按当前配置建一个 LLM 客户端。
 
     统一在这里建，是为了让 ``extra_headers`` 这类网关参数只写一处 ——
     调度里一共有三个地方要发 LLM 请求，漏掉任何一个，那一路就会静默地
     用不到网关要求的请求头。
+
+    ``settings`` 是**当前运行中的那一份**，不是启动时的快照：设置页改完配置
+    会就地改写它，所以这里每次都现读，用户改完不用重启就能生效。
     """
     return LLMClient(
         settings.llm.api_base,
@@ -51,6 +67,7 @@ def _llm_client(settings: Settings) -> LLMClient:
         temperature=settings.llm.temperature,
         extra_headers=settings.llm.extra_headers,
         fallback_models=settings.llm.fallback_models,
+        usage_sink=_usage_sink(settings),
     )
 
 

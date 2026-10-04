@@ -30,6 +30,7 @@ from app.utils.logger import get_logger, setup_logging
 from app.web.api import api_router
 from app.web.routes import page_router
 from app.web.rss import rss_router
+from app.web.settings import apply_stored, load_stored, settings_router
 from app.web.sources import sources_router
 
 log = get_logger(__name__)
@@ -87,10 +88,13 @@ def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> F
 
     app = FastAPI(title="Show Me the Money", version=__version__, lifespan=lifespan)
     app.state.settings = resolved
+    # 页面保存过的模型配置优先于环境变量（启动时就套上，别等用户点保存）
+    apply_stored(app.state, load_stored(resolved))
     app.include_router(page_router)
     app.include_router(api_router)
     app.include_router(rss_router)
     app.include_router(sources_router)
+    app.include_router(settings_router)
     return app
 
 

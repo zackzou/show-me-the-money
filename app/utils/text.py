@@ -189,15 +189,26 @@ def is_chinese_text(text: str | None) -> bool:
 # 早报片段的汇总上限：微信早报一行约 22 个汉字，3~5 行就在这个量级
 BRIEF_DIGEST_CHARS = 108
 _BRIEF_SENTENCE_END = "。！？.!?"
+# 次级断点：整句放不下时，至少断在子句边界，不要把半句话甩给读者
+_BRIEF_CLAUSE_END = "，、；：,;:"
+# 一整句最长允许多少倍预算：超过说明这不是「一句话」，得再切
+_BRIEF_HARD_MAX = BRIEF_DIGEST_CHARS * 2
 
 
 def brief_digest(text: str | None, *, limit: int = BRIEF_DIGEST_CHARS) -> str:
-    """把一段导读压成三到五行的一句话，用于早报 / 推送。
+    """把一段导读压成**一句完整的话**，用于早报 / 推送。
 
-    早报读者是在手机上扫读，塞一整段进去没人看。按句号切，切到接近上限就收住，
-    避免最后半句被硬切断。
+    早报读者是在手机上扫读，塞一整段进去没人看。但**必须是一句完整的话**：
 
-    放在服务端而不是浏览器：按句切依赖正则里的 lookbehind，旧 Safari 不支持。
+    实测踩过的坑 —— 早先的写法在一整句放不下 ``limit`` 时会退回「硬截断 + 省略号」，
+    产出过这种东西：「…伦理声明白。Only $30 more than the wireless charging ver…」。
+    推送到手机上就是半句话，读者根本不知道这条在讲什么，而页面看起来却是正常的。
+
+    所以这里的规则是：**宁可超预算，也要完整**。
+    1. 按句号切，累计到接近上限就收；
+    2. 一整句都放不下 → 就返回那一整句（超一点没关系，不能是半句）；
+    3. 单句离谱地长 → 退到子句边界断，并在末尾补句号；
+    4. 任何情况下都不以省略号结尾。
     """
     clean = " ".join((text or "").split())
     if not clean:
@@ -214,7 +225,45 @@ def brief_digest(text: str | None, *, limit: int = BRIEF_DIGEST_CHARS) -> str:
         used += len(piece)
         if used >= limit - 20:
             break
-    brief = "".join(out).strip() or clean
-    if len(brief) > limit:
-        brief = brief[: limit - 1].rstrip("，、,。！？.!? ") + "…"
+    if out:
+        brief = "".join(out).strip()
+    else:
+        # 没有一句能塞进预算：取第一句，完整优先于简短
+        first = re.split(f"(?<=[{re.escape(_BRIEF_SENTENCE_END)}])", clean)[0].strip()
+        brief = first or clean
+    if len(brief) > _BRIEF_HARD_MAX:
+        cut = max(brief.rfind(ch, 0, limit) for ch in _BRIEF_CLAUSE_END) + 1
+        brief = (brief[:cut] if cut > 20 else brief[:limit]).rstrip("，、；：,;: ")
+    brief = brief.strip()
+    if brief and brief[-1] not in _BRIEF_SENTENCE_END:
+        brief += "。"
     return brief
+
+
+def chinese_ratio(text: str | None) -> float:
+    """汉字占「汉字+拉丁字母」的比例。用来判断一段文字是不是中文。"""
+    sample = (text or "")[:400]
+    han = sum(1 for ch in sample if "一" <= ch <= "鿿")
+    latin = sum(1 for ch in sample if ch.isascii() and ch.isalpha())
+    total = han + latin
+    return han / total if total else 0.0
+
+
+def has_long_latin_run(text: str | None, *, min_chars: int = 10) -> bool:
+    """有没有**一整句**没翻的英文。
+
+    早先试过用正则数连续英文字母（「(?:[A-Za-z][A-Za-z'-]*[ ,]){11,}[A-Za-z]」），
+    结果漏得很难看：「Only $30 more than the wireless charging version」里有个
+    ``$30`` 就把整段打断了，认不出来 —— 而这恰恰是最该被拦下的那种。
+
+    改成按**句**判断：把文本按句末标点切开，逐句看汉字占比。
+    专有名词不会误伤（「AirPods 5 较其无线充版仅贵 30 美元」汉字占多数），
+    没翻的整句一定会露出来。
+    """
+    for sentence in re.split(r"(?<=[。！？!?])|\n", text or ""):
+        piece = sentence.strip()
+        if len(piece) < min_chars:
+            continue
+        if chinese_ratio(piece) < 0.3:
+            return True
+    return False

@@ -30,6 +30,7 @@ from app.fetcher.content import is_real_body
 from app.models import Article
 from app.utils.logger import get_logger
 from app.utils.text import (
+    has_long_latin_run,
     is_chinese_text,
     looks_english,
     now_local,
@@ -216,6 +217,14 @@ def generate_brief_zh(
     # 推送语是中文手机推送：没有汉字等于没写（短英文会绕过 looks_english 的
     # 40 字母门槛，写进库就再也不会重试了）
     if not result or not is_chinese_text(result):
+        return None
+    # 必须是完整的一句话：以句末标点收尾。
+    # 实测踩过：模型偶尔只回半句就停了，直接入库就推成了
+    # 「…Only $30 more than the wireless charging ver…」这种半句话。
+    if result[-1] not in "。！？.!?":
+        return None
+    # 也不能夹一大段没翻的英文（读者在手机上看到会以为坏掉了）
+    if has_long_latin_run(result):
         return None
     return truncate(result, 200) or None
 

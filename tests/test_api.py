@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import quote
 
 from sqlalchemy import select
@@ -777,9 +778,13 @@ def test_brief_digest_keeps_three_to_five_lines():
     # 按句收住，所以末句是完整的；不会切在半句上
     assert brief.endswith("。")
     assert brief.count("第一句话在这里说清楚了。") < 10
-    # 一个标点都没有、且超过上限时，才用省略号硬收
-    assert brief_digest("超长" * 60).endswith("…")
-    assert len(brief_digest("超长" * 60)) == 108
+    # 回归：一个标点都没有的长文本，早先是「硬截断 + 省略号」，
+    # 推送到手机上就是半句话（「…Only $30 more than the wireless charging ver…」）。
+    # 现在必须断在子句边界并补句号，绝不以省略号收尾。
+    no_punct = brief_digest("超长" * 60)
+    assert not no_punct.endswith("…")
+    assert no_punct.endswith("。")
+    assert len(no_punct) <= 108 * 2
 
     short = "只有一句话的摘要。"
     assert brief_digest(short) == short
@@ -1600,3 +1605,227 @@ def test_source_name_kept_on_articles_after_delete(client, seeded_db):
         ).scalar_one()
         assert row.source is not None
         assert row.source.name == "测试源"
+
+
+# ── 早报片段：必须是一句完整的中文 ────────────────────────────────────────
+
+def test_brief_never_ends_mid_sentence():
+    """回归：早报片段不能以省略号/半句话收尾。
+
+    用户实机看到的是「…伦理声明白。Only $30 more than the wireless charging ver…」——
+    硬截断加省略号推到了手机上。宁可超预算也要完整。
+    """
+    from app.utils.text import brief_digest
+
+    raw = (
+        "AirPods 5（AirPods 5）较其无线充版仅贵30美元。功能多。《边缘》（The Verge）链购抽佣。"
+        "Only $30 more than the wireless charging version of the AirPods 5, but with many more features. "
+        "If you buy something from a link, The Verge may earn a commission."
+    )
+    out = brief_digest(raw)
+    assert not out.endswith("…")
+    assert out.endswith(("。", "！", "？", ".", "!"))
+    # 断句后仍是完整句子：不能把句子从中间切开
+    assert not out.endswith("ver")
+
+
+def test_brief_rejects_english_as_chinese_newsletter():
+    """英文原文不能直接当早报文案用（会半中半英）。"""
+    from app.web.api import _digest_with_fallback
+
+    class FakeArticle:
+        title = "The AirPods Pro 3 are a fantastic deal at $179"
+        title_zh = ""
+        brief_zh = ""
+        digest = (
+            "Only $30 more than the wireless charging version of the AirPods 5, "
+            "but with many more features. If you buy something from a link, "
+            "The Verge may earn a commission."
+        )
+        digest_zh = ""
+        reason = "AirPods 5 较其无线充版仅贵 30 美元。功能更多。"
+        summary = ""
+
+    out = _digest_with_fallback(FakeArticle())
+    assert out, "应该给出可读的中文文案，而不是空"
+    assert "Only $30 more" not in out, "不能把没翻的英文塞进早报"
+    assert ".." not in out
+    assert "。。" not in out
+
+
+def test_brief_falls_back_to_chinese_title():
+    """连导读都没有时，用中文标题兜底，并明说译文还没整理好。"""
+    from app.web.api import _digest_with_fallback
+
+    class FakeArticle:
+        title = "The AirPods Pro 3 are a fantastic deal at $179"
+        title_zh = ""
+        brief_zh = ""
+        digest = ""
+        digest_zh = ""
+        reason = ""
+        summary = ""
+
+    out = _digest_with_fallback(FakeArticle())
+    assert "整理中" in out
+
+    class Zh(FakeArticle):
+        title_zh = "AirPods Pro 3 只卖 179 美元"
+
+    assert "AirPods Pro 3" in _digest_with_fallback(Zh())
+
+
+def test_has_long_latin_run_catches_untranslated_sentence():
+    """按句判断才能抓住中间夹了 $30 的整句英文（正则数连续字母会漏）。"""
+    from app.utils.text import has_long_latin_run
+
+    assert has_long_latin_run("伦理声明白。Only $30 more than the wireless charging version of the AirPods 5.")
+    # 专有名词不该误伤
+    assert not has_long_latin_run("AirPods 5 较其无线充版仅贵 30 美元。Terafab 是新工厂。")
+
+
+# ── 模型设置页 ──────────────────────────────────────────────────────────
+
+def test_settings_page_shows_current_config(client, settings: Settings):
+    """默认显示当前正在用的配置，而不是空的表单。"""
+    page = client.get("/settings")
+    assert page.status_code == 200
+    assert "模型设置" in page.text
+    assert settings.llm.model in page.text
+    assert settings.llm.api_base in page.text
+    # 明文 key 绝不能出现在页面上
+    assert settings.llm.api_key not in page.text
+    assert 'href="/settings"' in page.text
+
+
+def test_settings_presets_cover_major_providers(client):
+    """厂商预设要覆盖市面上主流的 OpenAI 兼容服务。"""
+    page = client.get("/settings")
+    for name in ("OpenAI", "DeepSeek", "Qwen", "GLM", "Gemini", "Ollama"):
+        assert name in page.text
+    assert "https://api.openai.com/v1" in page.text
+    assert "https://api.deepseek.com/v1" in page.text
+
+
+def test_settings_saves_and_applies_without_restart(client, settings: Settings, monkeypatch):
+    """保存后就地生效：不用重启，下一个任务就用新模型。"""
+    import app.web.settings as mod
+
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 12})
+    page = client.post(
+        "/settings",
+        data={"api_base": "https://api.deepseek.com/v1", "api_key": "sk-new",
+              "model": "deepseek-chat", "fallback_models": "glm-4-flash"},
+        follow_redirects=False,
+    )
+    assert page.status_code == 200
+    assert "已保存并生效" in page.text
+    # 运行中的 settings 被就地改写
+    assert settings.llm.model == "deepseek-chat"
+    assert settings.llm.api_base == "https://api.deepseek.com/v1"
+    assert settings.llm.api_key == "sk-new"
+    assert settings.llm.fallback_models == ["glm-4-flash"]
+    # 落盘了，下次启动能读回来
+    stored = mod.load_stored(settings)
+    assert stored["model"] == "deepseek-chat"
+    assert stored["api_key"] == "sk-new"
+
+
+def test_settings_keeps_existing_key_when_left_blank(client, settings: Settings, monkeypatch):
+    """key 留空 = 不改动它（页面上只显示掩码，用户不该被迫重贴）。"""
+    import app.web.settings as mod
+
+    original = settings.llm.api_key
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 1})
+    client.post("/settings", data={"api_base": "https://x/v1", "model": "m", "api_key": ""},
+                follow_redirects=False)
+    assert settings.llm.api_key == original
+
+
+def test_settings_rejects_bad_config_without_saving(client, settings: Settings, monkeypatch):
+    """测试不通过就不保存 —— 否则任务会整片降级成英文而没人发现。"""
+    import app.web.settings as mod
+
+    monkeypatch.setattr(
+        mod, "_probe", lambda s, base, key, model: {"ok": False, "error": "401 unauthorized", "ms": 30}
+    )
+    page = client.post(
+        "/settings",
+        data={"api_base": "https://api.openai.com/v1", "api_key": "sk-bad", "model": "gpt-4o"},
+        follow_redirects=False,
+    )
+    assert page.status_code == 400
+    assert "401 unauthorized" in page.text
+    assert mod.load_stored(settings).get("api_key") != "sk-bad"
+    assert settings.llm.model != "gpt-4o"
+
+
+def test_settings_rejects_missing_fields(client):
+    page = client.post("/settings", data={"api_base": "", "model": ""}, follow_redirects=False)
+    assert page.status_code == 400
+    assert "请填写" in page.text
+
+
+def test_settings_test_endpoint_does_not_save(client, settings: Settings, monkeypatch):
+    """"仅测试连接"不该写入配置。"""
+    import app.web.settings as mod
+
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 5})
+    page = client.post("/settings/test", data={"api_base": "https://y/v1", "model": "mm"},
+                       follow_redirects=False)
+    assert page.status_code == 200
+    assert "连接正常" in page.text
+    assert mod.load_stored(settings).get("model") != "mm"
+
+
+def test_settings_usage_log_is_recorded(client, settings: Settings, monkeypatch, tmp_path):
+    """测试请求会写一条用量记录，设置页能看到。"""
+    import app.web.settings as mod
+
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 7})
+    settings.storage.db_path = str(Path(tmp_path) / "usage" / "smtm.db")
+    mod.record_usage(settings, {"kind": "probe", "model": "m", "ok": True, "ms": 7, "total_tokens": 42})
+    page = client.get("/settings")
+    assert "用量记录" in page.text
+    assert "累计" in page.text
+
+
+def test_settings_stored_config_applies_on_startup(settings: Settings):
+    """启动时要套用页面保存过的配置（apply_stored）。"""
+    import app.web.settings as mod
+
+    class State:
+        pass
+
+    state = State()
+    state.settings = settings
+    changed = mod.apply_stored(state, {"model": "swapped-model", "api_base": "https://z/v1"})
+    assert changed
+    assert settings.llm.model == "swapped-model"
+    assert settings.llm.api_base == "https://z/v1"
+    # 空值不覆盖已有配置
+    mod.apply_stored(state, {"model": ""})
+    assert settings.llm.model == "swapped-model"
+    # 没给任何东西时不算改动
+    assert mod.apply_stored(state, {}) is False
+def test_settings_key_file_is_owner_only(tmp_path, settings: Settings):
+    """key 落盘必须是 0600。手工构造 Settings 太脆，直接改 db_path 让它写到 tmp。"""
+    import app.web.settings as mod
+
+    settings.storage.db_path = str(tmp_path / "data" / "smtm.db")
+    mod.save_stored(settings, {"api_key": "sk-secret", "model": "m"})
+    path = mod._settings_path(settings)
+    assert path.exists()
+    assert path.stat().st_mode & 0o777 == 0o600, "key 文件不该是全局可读"
+    assert mod.load_stored(settings)["api_key"] == "sk-secret"
+
+
+def test_settings_file_ignored_by_git():
+    """data/ 已被 .gitignore 忽略，key 不会误入版本库。"""
+    import subprocess
+
+    root = Path(__file__).resolve().parent.parent
+    out = subprocess.run(
+        ["git", "check-ignore", "-q", "data/llm_settings.json"], cwd=str(root)
+    )
+    assert out.returncode == 0, "data/llm_settings.json 必须被 .gitignore 忽略"

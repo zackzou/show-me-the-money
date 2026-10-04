@@ -178,12 +178,16 @@ class LLMClient:
         extra_headers: dict[str, str] | None = None,
         client: httpx.Client | None = None,
         fallback_models: list[str] | None = None,
+        usage_sink: Any | None = None,
     ) -> None:
         self.base = base.rstrip("/")
         self.key = key
         self.model = model
         # 主模型 429/503/401 时按顺序试备选，总尝试次数不变（不额外多花调用）
         self.models = [model] + [m for m in (fallback_models or []) if m and m != model]
+        # 用量回调（可选）。设置页要显示真实消耗，就挂在这里而不是在每个
+        # 业务调用点各写一遍 —— 漏一处就是用量对不上。
+        self.usage_sink = usage_sink
         self.timeout = timeout
         self.retries = retries
         self.temperature = temperature
@@ -227,8 +231,11 @@ class LLMClient:
             if model != self.model and attempt > 0:
                 log.info("主模型 %s 不可用，试 %s（第 %d 次）", self.model, model, attempt + 1)
             try:
-                return self._chat_once(prompt, model)
+                reply = self._chat_once(prompt, model)
+                self._record(prompt, model, ok=True, reply=reply)
+                return reply
             except LLMFormatError as exc:
+                self._record(prompt, model, ok=False, error=str(exc))
                 # 单模型时格式错误重试没有意义（同一个错）；有备选才换模型试，
                 # 不同网关路径的格式可能不一样
                 if len(self.models) == 1:
@@ -239,10 +246,28 @@ class LLMClient:
                     time.sleep(min(2.0**attempt, 4.0))
             except (httpx.HTTPError, ValueError, LLMError) as exc:
                 last_error = exc
+                self._record(prompt, model, ok=False, error=str(exc))
                 log.warning("LLM 调用失败（%s，第 %d 次）：%s", model, attempt + 1, exc)
                 if attempt < attempts - 1:
                     time.sleep(min(2.0**attempt, 4.0))
         raise LLMError(f"调用大模型失败：{last_error}")
+
+    def _record(self, prompt: str, model: str, *, ok: bool,
+                reply: str = "", error: str = "") -> None:
+        """把这次调用报给用量回调。回调自己出错绝不能影响主流程。"""
+        if self.usage_sink is None:
+            return
+        try:
+            self.usage_sink(
+                model=model,
+                ok=ok,
+                ms=0,
+                prompt_chars=len(prompt),
+                reply_chars=len(reply),
+                error=error,
+            )
+        except Exception as exc:  # 兜底：记账失败不能拖垮抓取
+            log.debug("用量记录失败：%r", exc)
 
     def _chat_once(self, prompt: str, model: str) -> str:
         """用指定模型发一次请求。"""
