@@ -59,8 +59,18 @@ class Article(Base):
     digest_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 中文版正文：英文原文整篇译过来，中文模式下不至于整页英文
     content_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # AI 章节结构（JSON 数组 [{"h": 小标题或"", "t": 段落}]）：NYT 总编视角的
+    # 智能分段，直排原文段落太碎时才用；没有就不分，模板回退普通段落。
+    body_sections: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 中文版章节结构：与原文逐节对照，段落一一对应
+    body_sections_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 配图地址（JSON 数组），来自 RSS 正文；页内直接展示，不再跳原站看图
     image_urls: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 远端图 → 本地 /img/ 的映射（JSON 对象）：原站防盗链经常裂图，
+    # 下载到本地再展示。缺了就回退原地址，不影响老数据。
+    media_map: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # 早报一句话：推送到手机端读的一段 fluent 汇总（AI 写，非截断拼凑）
+    brief_zh: Mapped[str | None] = mapped_column(Text, nullable=True)
     # 正文内联配图（JSON 数组 [{"i": 接在第几段之后, "url": 地址}]）：
     # 按原站的做法插在段落之间，而不是另开一个配图区块
     body_images: Mapped[str | None] = mapped_column(Text, nullable=True)

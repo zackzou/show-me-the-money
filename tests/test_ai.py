@@ -103,6 +103,7 @@ def test_process_article_relevant(seeded_db, settings: Settings):
         [
             "yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由",
             "模型\nOpenAI, 大模型", "English Title\nEnglish digest here", "标签一,标签二",
+            "这是推送语",
         ]
     )
 
@@ -170,6 +171,7 @@ def test_process_pending_counts(seeded_db, settings: Settings):
     answers = iter(
         [
             "yes 88", "摘要", "速览1", "理由1", "模型\nOpenAI", "EN Title 1\nEN digest 1", "A,B",
+            "推送语1",
             "no 5",
             "yes 72", "摘要2", "速览2", "理由2", "产品\nAI Agent", "EN Title 2\nEN digest 2", "C",
         ]
@@ -541,7 +543,7 @@ def test_parse_relevance(answer, relevant, score):
 
 def test_relevance_without_score_still_processes(seeded_db, settings: Settings):
     """模型只给 yes 没给分数时，文章照样要正常进流程（评分是可选的）。"""
-    answers = iter(["yes", "摘要", "速览", "理由", "行业\n云计算", "EN title\nEN digest", "标签"])
+    answers = iter(["yes", "摘要", "速览", "理由", "行业\n云计算", "EN title\nEN digest", "标签", "推送语"])
     import httpx
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -618,6 +620,7 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
         "苹果收紧隐私设置",
         "谷歌将结束对 Flash 与 Pro 模型的免费访问",
         "标签",
+        "谷歌收紧模型免费访问，转向商业化变现。",
     ])
     calls = {"n": 0}
 
@@ -637,11 +640,12 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
             assert process_article(session, article, client, settings) == "processed"
             assert article.title_en == article.title, "纯英文标题直接复用原文，不翻"
             assert article.digest_en == en_summary, "纯英文导语直接复用摘要原文"
-            # relevance/summary/digest/reason/classify + 中文标题 + 中文导读 + tags
-            assert calls["n"] == 8
+            # relevance/summary/digest/reason/classify + 中文标题 + 中文导读 + tags + 推送语
+            assert calls["n"] == 9
             assert article.title_zh == "苹果收紧隐私设置"
             # 中文模式下导读读的是中文版，不是那段英文
             assert article.digest_zh == "谷歌将结束对 Flash 与 Pro 模型的免费访问"
+            assert article.brief_zh == "谷歌收紧模型免费访问，转向商业化变现。"
     finally:
         client.close()
 
@@ -1203,3 +1207,134 @@ def test_translate_chunk_gate_fits_chinese_density(seeded_db, settings: Settings
         assert translate_to_chinese(client2, settings.prompts, body) is None
     finally:
         client2.close()
+
+
+def test_generate_brief_zh_writes_fluent_sentence(settings: Settings):
+    """早报推送语：AI 现写一段通顺的话，不是截断拼凑。"""
+    import httpx
+
+    from app.ai.processor import generate_brief_zh
+
+    brief_text = "马斯克确认与台积电洽谈代工合作，目标1TW算力，约为全球总量一半。"
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": brief_text}}]}),
+        retries=0,
+    )
+    try:
+        out = generate_brief_zh(client, settings.prompts, "标题", "马斯克确认与台积电洽谈代工合作。")
+        assert out
+        assert "马斯克" in out
+        # 空导读不浪费调用
+        assert generate_brief_zh(client, settings.prompts, "标题", "") is None
+        # 拿回英文等于没写
+        en_client = _client(
+            lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "Elon confirms talks"}}]}),
+            retries=0,
+        )
+        try:
+            assert generate_brief_zh(en_client, settings.prompts, "标题", "英文导读内容足够长才判断") is None
+        finally:
+            en_client.close()
+    finally:
+        client.close()
+
+
+def test_backfill_briefs_skips_without_chinese_digest(seeded_db, settings: Settings):
+    """补推送语只找有中文导读的：没导读的不占名额。"""
+    import httpx
+
+    from app.ai.processor import backfill_briefs
+
+    with session_scope() as session:
+        good = make_article(
+            session,
+            title="有导读",
+            link="https://example.com/brief1",
+            status="processed",
+            relevance=1,
+            digest_zh="马斯克确认与台积电洽谈代工合作，目标1TW算力。",
+        )
+        nodigest = make_article(
+            session,
+            title="没导读",
+            link="https://example.com/brief2",
+            status="processed",
+            relevance=1,
+        )
+        nodigest.digest_zh = None
+        # 中文源：导读在 digest 里，digest_zh 只是空串"已处理"标记
+        cnsrc = make_article(
+            session,
+            title="中文源文章标题",
+            link="https://example.com/brief3",
+            status="processed",
+            relevance=1,
+            digest="国内大模型发布新版本，推理成本下降一半，开发者可以直接调用。",
+        )
+        cnsrc.digest_zh = ""
+        good_id, no_id, cn_id = good.id, nodigest.id, cnsrc.id
+        session.commit()
+
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "马斯克确认洽谈，目标1TW算力。"}}]}),
+        retries=0,
+    )
+    try:
+        with session_scope() as session:
+            stats = backfill_briefs(session, client, settings, limit=10)
+            assert stats == {"candidates": 2, "filled": 2}
+            assert session.get(Article, good_id).brief_zh
+            assert session.get(Article, no_id).brief_zh is None
+            assert session.get(Article, cn_id).brief_zh
+    finally:
+        client.close()
+
+
+def test_parse_sections_reads_headings(settings: Settings):
+    from app.ai.processor import parse_sections
+
+    raw = "## 背景\n\n第一段。\n\n第二段。\n\n## 进展\n\n第三段。"
+    sections = parse_sections(raw)
+    assert sections == [
+        {"h": "背景", "t": "第一段。\n\n第二段。"},
+        {"h": "进展", "t": "第三段。"},
+    ]
+    # 单节无标题等于没分
+    assert parse_sections("第一段。\n\n第二段。") is None
+    assert parse_sections("") is None
+
+
+def test_structure_sections_skips_short_body(settings: Settings):
+    import httpx
+
+    from app.ai.processor import structure_sections
+
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        return httpx.Response(200, json={"choices": [{"message": {"content": "## 标题\n\n正文"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        assert structure_sections(client, settings.prompts, "标题", "第一段。\n\n第二段。") is None
+        assert calls["n"] == 0  # 3 段以内不值得分，不浪费调用
+    finally:
+        client.close()
+
+
+def test_structure_sections_drops_rewritten_body(settings: Settings):
+    """模型改写/省略正文时整份丢掉，宁可直排也不能排丢内容。"""
+    import httpx
+
+    from app.ai.processor import structure_sections
+
+    body = "\n\n".join(f"这是原文第 {i} 段，有足够多的字不会被过滤掉。" for i in range(6))
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "## 缩写\n\n一句话。"}}]}),
+        retries=0,
+    )
+    try:
+        assert structure_sections(client, settings.prompts, "标题", body) is None
+    finally:
+        client.close()

@@ -29,12 +29,20 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.fetcher.media_store import (
+    download_image,
+    measure,
+    parse_image_size,
+    read_media_map,
+    save_image,
+)
 from app.models import Article
 from app.utils.logger import get_logger
 
@@ -94,9 +102,6 @@ _EXT_RE = re.compile(r"\.(?:jpe?g|png|webp|avif|gif)(?:$|[?#])", re.I)
 
 # 同一信源里同一张图出现这么多次，就当它是站点通用图
 SITE_DEFAULT_THRESHOLD = 3
-
-# __、__ 图片里尺寸字段所在的最大偏移（解析失败就当量不出来）
-_SOI_SCAN_LIMIT = PROBE_BYTES
 
 
 def _attr(tag: str, name: str) -> str:
@@ -170,81 +175,6 @@ def looks_like_site_default(url: str, same_source: dict[str, int], *, threshold:
 
 
 # ── 像素尺寸探测：只读文件头，不下载整张图 ─────────────────────────────────
-
-
-def _jpeg_size(head: bytes) -> tuple[int, int] | None:
-    """从 JPEG 的 SOFn 标记里读宽高。"""
-    pos = 2
-    end = min(len(head), _SOI_SCAN_LIMIT)
-    while pos + 9 < end:
-        if head[pos] != 0xFF:
-            pos += 1
-            continue
-        marker = head[pos + 1]
-        # 填充字节与无独立负载的标记
-        if marker in (0xFF, 0x01) or 0xD0 <= marker <= 0xD9:
-            pos += 2
-            continue
-        if pos + 4 > len(head):
-            return None
-        length = int.from_bytes(head[pos + 2 : pos + 4], "big")
-        if marker in (0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF):
-            if pos + 9 <= len(head):
-                height = int.from_bytes(head[pos + 5 : pos + 7], "big")
-                width = int.from_bytes(head[pos + 7 : pos + 9], "big")
-                if width and height:
-                    return width, height
-            return None
-        if length < 2:
-            return None
-        pos += 2 + length
-    return None
-
-
-def _png_size(head: bytes) -> tuple[int, int] | None:
-    if len(head) < 24 or head[12:16] != b"IHDR":
-        return None
-    width = int.from_bytes(head[16:20], "big")
-    height = int.from_bytes(head[20:24], "big")
-    return (width, height) if width and height else None
-
-
-def _gif_size(head: bytes) -> tuple[int, int] | None:
-    if len(head) < 10 or head[:3] != b"GIF":
-        return None
-    return int.from_bytes(head[6:8], "little"), int.from_bytes(head[8:10], "little")
-
-
-def _webp_size(head: bytes) -> tuple[int, int] | None:
-    if len(head) < 30 or head[:4] != b"RIFF" or head[8:12] != b"WEBP":
-        return None
-    chunk = head[12:16]
-    if chunk == b"VP8X":
-        width = int.from_bytes(head[24:27], "little") + 1
-        height = int.from_bytes(head[27:30], "little") + 1
-        return width, height
-    if chunk == b"VP8 ":
-        # lossy：帧头里带 0x9d012a 标记，其后 2 字节是宽高（各 14 位）
-        if head[23:26] != b"\x9d\x01\x2a":
-            return None
-        width = int.from_bytes(head[26:28], "little") & 0x3FFF
-        height = int.from_bytes(head[28:30], "little") & 0x3FFF
-        return (width, height) if width and height else None
-    if chunk == b"VP8L":
-        if head[20] != 0x2F:
-            return None
-        bits = int.from_bytes(head[21:25], "little")
-        return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
-    return None
-
-
-def parse_image_size(head: bytes) -> tuple[int, int] | None:
-    """从图片文件头解析 (宽, 高)。认不出来就返回 ``None``（不猜）。"""
-    for parser in (_png_size, _gif_size, _jpeg_size, _webp_size):
-        size = parser(head)
-        if size:
-            return size
-    return None
 
 
 def probe_image_size(
@@ -361,8 +291,13 @@ def backfill_images(
     limit: int = 20,
     timeout: float = PROBE_TIMEOUT,
     only_today: bool = True,
+    media_dir: Path | None = None,
 ) -> dict[str, Any]:
-    """给「相关但没有配图」的文章补配图，返回统计。"""
+    """给「相关但没有配图」的文章补配图，返回统计。
+
+    有 media_dir 时顺手把挑中的首图下载到本地（防盗链），映射记进
+    ``media_map``；展示层优先读本地，文件丢了就回退原地址。
+    """
     statement = (
         select(Article)
         .where(
@@ -393,7 +328,7 @@ def backfill_images(
         headers={"User-Agent": DEFAULT_UA},
         limits=httpx.Limits(max_connections=6),
     ) as client:
-        for article in rows:
+        for index, article in enumerate(rows):
             if article.image_urls is not None:
                 continue  # 上一轮已经补上了
             try:
@@ -410,13 +345,105 @@ def backfill_images(
                 article.image_urls = json.dumps([image], ensure_ascii=False)
                 same_source[image] = same_source.get(image, 0) + 1
                 stats["filled"] += 1
+                if media_dir is not None:
+                    _localize_cover(article, image, referer=article.link or "",
+                                    media_dir=media_dir, client=client)
             else:
                 # 用空数组标记「查过了没有」，避免每轮都重查同一篇
                 article.image_urls = "[]"
                 stats["not_found"] += 1
+            if index % 10 == 9:
+                # 下载慢，一轮几十张图要跑好几分钟：中途提交，别把写锁占到最后，
+                # 否则网页请求与其它任务全程 "database is locked"
+                session.commit()
     session.flush()
     if stats["filled"]:
         log.info("补齐配图 %d 篇（候选 %d 篇、无图 %d 篇）", stats["filled"], stats["candidates"], stats["not_found"])
+    return stats
+
+
+def _localize_cover(
+    article: Article,
+    url: str,
+    *,
+    referer: str = "",
+    media_dir: Path | None = None,
+    client: httpx.Client | None = None,
+) -> None:
+    """把首图下载到本地，映射记进 ``media_map``。失败就留空，展示回退原地址。"""
+    if media_dir is None:
+        return
+    mapping = read_media_map(article.media_map)
+    if url in mapping:
+        return
+    try:
+        data = download_image(url, referer=referer, client=client)
+    except Exception as exc:
+        log.debug("封面下载失败：%s（%r）", url[:80], exc)
+        return
+    if not data:
+        return
+    size = measure(data)
+    if size and (size[0] < MIN_WIDTH_PX or size[1] < MIN_HEIGHT_PX):
+        return
+    try:
+        name = save_image(data, url, media_dir)
+    except OSError as exc:
+        log.debug("封面落盘失败：%s（%r）", url[:80], exc)
+        return
+    if name:
+        mapping[url] = f"/img/{name}"
+        article.media_map = json.dumps(mapping, ensure_ascii=False)
+
+
+def localize_missing_covers(
+    session: Session,
+    *,
+    limit: int = 50,
+    timeout: float = PROBE_TIMEOUT,
+    media_dir: Path | None = None,
+) -> dict[str, int]:
+    """给「有首图地址、但还没本地文件」的老数据补下载。"""
+    if media_dir is None:
+        return {"candidates": 0, "localized": 0}
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(
+                Article.image_urls.isnot(None),
+                Article.image_urls != "[]",
+                Article.link.notlike("http://localhost%"),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit * 3)
+        ).scalars()
+    )
+    stats = {"candidates": 0, "localized": 0}
+    with httpx.Client(
+        timeout=timeout,
+        follow_redirects=True,
+        headers={"User-Agent": DEFAULT_UA},
+        limits=httpx.Limits(max_connections=6),
+    ) as client:
+        for index, article in enumerate(rows):
+            try:
+                urls = json.loads(article.image_urls or "[]")
+            except (TypeError, ValueError):
+                continue
+            first = next((u for u in urls if isinstance(u, str) and u.startswith("http")), None)
+            if not first or first in read_media_map(article.media_map):
+                continue
+            stats["candidates"] += 1
+            if stats["localized"] >= limit:
+                continue
+            before = article.media_map
+            _localize_cover(article, first, referer=article.link or "",
+                            media_dir=media_dir, client=client)
+            if article.media_map != before:
+                stats["localized"] += 1
+            if index % 10 == 9:
+                session.commit()
+    session.flush()
     return stats
 
 

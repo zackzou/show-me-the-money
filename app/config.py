@@ -85,6 +85,8 @@ class PromptsConfig(BaseModel):
     translate_title_zh_prompt: str = ""
     translate_digest_zh_prompt: str = ""
     same_story_prompt: str = ""
+    brief_prompt: str = ""
+    structure_prompt: str = ""
     fallback_summary_chars: int = 200
     fallback_digest_chars: int = 180
     fallback_reason_chars: int = 80

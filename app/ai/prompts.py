@@ -107,3 +107,23 @@ def render_same_story_prompt(prompts: PromptsConfig, title_a: str, title_b: str,
         prompts.same_story_prompt,
         {"title_a": title_a, "title_b": title_b, "shared_words": shared or "（无）"},
     )
+
+
+def render_brief_prompt(prompts: PromptsConfig, title: str, digest: str) -> str:
+    """早报推送语。模板为空（老配置）时返回空串，调用方回退截断拼凑。"""
+    if not prompts.brief_prompt.strip():
+        return ""
+    return _fill(
+        prompts.brief_prompt,
+        {"title": title, "digest": digest or "（无导读）"},
+    )
+
+
+def render_structure_prompt(prompts: PromptsConfig, title: str, text: str) -> str:
+    """正文章节结构。模板为空（老配置）时返回空串，调用方走原文直排。"""
+    if not prompts.structure_prompt.strip():
+        return ""
+    return _fill(
+        prompts.structure_prompt,
+        {"title": title, "text": truncate(text, MAX_ARTICLE_CHARS * 2)},
+    )

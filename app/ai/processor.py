@@ -12,10 +12,12 @@ from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
 from app.ai.prompts import (
+    render_brief_prompt,
     render_classify_prompt,
     render_digest_prompt,
     render_reason_prompt,
     render_relevance_prompt,
+    render_structure_prompt,
     render_summary_prompt,
     render_tag_prompt,
     render_translate_content_prompt,
@@ -187,6 +189,90 @@ def translate_digest_to_chinese(client: LLMClient, prompts: PromptsConfig, diges
     return None if not result or looks_english(result) else result
 
 
+def generate_brief_zh(
+    client: LLMClient, prompts: PromptsConfig, title: str, digest: str
+) -> str | None:
+    """写早报推送语：一段通顺的话，不是截断拼凑。
+
+    输入用中文标题 + 中文导读（英文信源调这个函数时先保证两者已是中文，
+    调用方负责传对）。失败返回 ``None``，展示层回退旧的截断逻辑。
+    """
+    text = (digest or "").strip()
+    if not text:
+        return None
+    raw = _optional_llm(client, render_brief_prompt(prompts, title or "", text), "").strip()
+    if not raw:
+        return None
+    result = strip_markdown(" ".join(line.strip() for line in raw.splitlines() if line.strip()))
+    # 推送语是中文手机推送：没有汉字等于没写（短英文会绕过 looks_english 的
+    # 40 字母门槛，写进库就再也不会重试了）
+    if not result or not is_chinese_text(result):
+        return None
+    return truncate(result, 200) or None
+
+
+# 章节最多分这么多节：再多就不是「排版」，而是把文章切碎了
+MAX_SECTIONS = 6
+# 结构化后的文字量不能比原文少太多，否则模型一定是改写/省略了，直接丢掉
+_STRUCTURE_MIN_RATIO = 0.8
+
+
+def parse_sections(raw: str) -> list[dict[str, str]] | None:
+    """解析章节排版结果：``## 小标题`` 开头新节，其余是该节段落。
+
+    段数太少（单节无标题）、节数超限、文字量对不上的一律返回 ``None``，
+    调用方回退原文直排 —— 排版是锦上添花，不能把正文排丢了。
+    """
+    lines = [line.strip() for line in (raw or "").splitlines()]
+    headings: list[str] = []
+    buckets: list[list[str]] = []
+    for line in lines:
+        if not line:
+            continue
+        if line.startswith("##"):
+            heading = line.lstrip("#").strip().strip("：:* ").strip()[:30]
+            headings.append(heading)
+            buckets.append([])
+            continue
+        clean = strip_markdown(line)
+        if not clean:
+            continue
+        if not buckets:
+            headings.append("")
+            buckets.append([])
+        buckets[-1].append(clean)
+    # 去掉空节
+    pairs = [(h, p) for h, p in zip(headings, buckets, strict=True) if p]
+    if not pairs or len(pairs) > MAX_SECTIONS + 2:
+        return None
+    if len(pairs) == 1 and not pairs[0][0]:
+        return None  # 等于没分，不占存储
+    return [{"h": h, "t": "\n\n".join(p)} for h, p in pairs]
+
+
+def structure_sections(
+    client: LLMClient, prompts: PromptsConfig, title: str, body: str
+) -> list[dict[str, str]] | None:
+    """NYT 责任编辑视角：只分段加小标题，不改写。
+
+    太短（3 段以内）不值得分；结构化丢字超两成直接丢掉。失败返回 ``None``。
+    """
+    paras = split_paragraphs(body)
+    if len(paras) <= 3:
+        return None
+    raw = _optional_llm(client, render_structure_prompt(prompts, title, body), "")
+    if not raw.strip():
+        return None
+    sections = parse_sections(raw)
+    if not sections:
+        return None
+    kept = sum(len(s["t"]) for s in sections)
+    total = sum(len(p) for p in paras)
+    if total <= 0 or kept < total * _STRUCTURE_MIN_RATIO:
+        return None
+    return sections[:MAX_SECTIONS]
+
+
 def translate_to_chinese(
     client: LLMClient,
     prompts: PromptsConfig,
@@ -345,13 +431,49 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
                 # 本来就是中文，标成已处理，补译那一轮就不会再来扫它
                 article.digest_zh = article.digest_zh or ""
             # 英文原文正文整篇译成中文，中文模式下才读得到中文
+            body_text = article.content_full or article.content or ""
+            sections = structure_sections(client, settings.prompts, article.title or "", body_text)
+            if sections is not None:
+                article.body_sections = json.dumps(sections, ensure_ascii=False)
             if settings.i18n.translate_content:
-                article.content_zh = translate_to_chinese(
-                    client, settings.prompts, article.content_full or article.content or ""
-                )
+                if sections is not None and looks_english(body_text):
+                    # 按节翻：节与节之间天然对齐，中英文对照不会错位；
+                    # 某一节失败就整篇回退整翻，不留半中半英
+                    zh_sections: list[dict[str, str]] = []
+                    failed = False
+                    for section in sections:
+                        one = translate_to_chinese(client, settings.prompts, section["t"])
+                        if not one:
+                            failed = True
+                            break
+                        zh_sections.append({"h": section["h"], "t": one})
+                    if not failed:
+                        article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+                        article.content_zh = "\n\n".join(s["t"] for s in zh_sections)
+                    else:
+                        article.content_zh = translate_to_chinese(
+                            client, settings.prompts, body_text
+                        )
+                elif sections is not None:
+                    # 中文原文：章节直接复用，不花翻译调用
+                    article.body_sections_zh = article.body_sections
+                    article.content_zh = ""
+                else:
+                    article.content_zh = translate_to_chinese(
+                        client, settings.prompts, body_text
+                    )
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
+        # 早报推送语：用中文标题 + 中文导读现写一段，手机上直接读。
+        # 失败就留空，展示层回退旧的截断拼凑 —— 推送语是锦上添花，
+        # 不能因为它让整篇处理多一次失败点（_optional_llm 本来就吞异常）。
+        article.brief_zh = generate_brief_zh(
+            client,
+            settings.prompts,
+            article.title_zh or article.title or "",
+            strip_markdown(article.digest_zh or article.digest or ""),
+        )
         article.status = STATUS_PROCESSED
         article.degraded_reason = None
         return STATUS_PROCESSED
@@ -526,6 +648,96 @@ def backfill_translations(
             stats["contents"],
             stats["candidates"],
         )
+    return stats
+
+
+def backfill_sections(
+    session: Session,
+    client: LLMClient,
+    settings: Settings,
+    *,
+    limit: int = 5,
+) -> dict[str, Any]:
+    """给存量中文正文补章节结构（只排版不翻译，每篇 1 次调用）。
+
+    英文原文的章节在新入库时顺手建，这里只处理「已有中文正文、还没章节」
+    的老数据。失败留空，下轮还会再来。
+    """
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(
+                Article.body_sections_zh.is_(None),
+                Article.content_zh.isnot(None),
+                Article.content_zh != "",
+                Article.relevance == 1,
+                Article.link.notlike("http://localhost%"),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit * 3)
+        ).scalars()
+    )
+    stats = {"candidates": 0, "filled": 0}
+    for article in rows:
+        if stats["filled"] >= limit:
+            break
+        stats["candidates"] += 1
+        sections = structure_sections(
+            client, settings.prompts, article.title_zh or article.title or "",
+            article.content_zh or "",
+        )
+        if sections:
+            article.body_sections_zh = json.dumps(sections, ensure_ascii=False)
+            stats["filled"] += 1
+    session.flush()
+    if stats["filled"]:
+        log.info("补正文章节结构 %d 篇", stats["filled"])
+    return stats
+
+
+def backfill_briefs(
+    session: Session,
+    client: LLMClient,
+    settings: Settings,
+    *,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    """给「有中文导读、但还没早报推送语」的文章补一段 fluent 的推送语。
+
+    推送语是展示用的锦上添花：失败就留空，展示层回退截断拼凑，
+    所以这里不记 attempts、不重试 —— 下轮还会再来。
+    """
+    batch = limit if limit is not None else settings.i18n.backfill_batch_size
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(
+                Article.brief_zh.is_(None),
+                Article.relevance == 1,
+                Article.link.notlike("http://localhost%"),
+            )
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(batch * 3)
+        ).scalars()
+    )
+    stats = {"candidates": 0, "filled": 0}
+    for article in rows:
+        if stats["filled"] >= batch:
+            break
+        # 中文源的导读在 digest 里（digest_zh 是空串"已处理"标记），英文源的在 digest_zh
+        digest = strip_markdown(article.digest_zh or article.digest or "")
+        if not digest.strip() or not is_chinese_text(digest):
+            continue
+        stats["candidates"] += 1
+        brief = generate_brief_zh(
+            client, settings.prompts, article.title_zh or article.title or "", digest
+        )
+        if brief:
+            article.brief_zh = brief
+            stats["filled"] += 1
+    session.flush()
+    if stats["filled"]:
+        log.info("补早报推送语 %d 条", stats["filled"])
     return stats
 
 

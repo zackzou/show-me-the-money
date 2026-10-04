@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -20,6 +20,7 @@ from app.ai.cluster import duplicates_of, primary_of
 from app.config import Settings
 from app.db import get_session
 from app.fetcher.content import is_real_body
+from app.fetcher.media_store import is_safe_image_name, media_dir_for, read_media_map
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import is_chinese_text, now_local, split_tags, strip_markdown, truncate
@@ -42,15 +43,45 @@ PAGE_SIZE = 40
 WEEKDAYS = "一二三四五六日"
 
 
-def _images(raw: str | None) -> list[str]:
-    """image_urls 存的是 JSON 数组；老数据/坏数据一律当没有图。"""
+@page_router.get("/img/{name}")
+def local_image(name: str, request: Request):
+    """本地图片：原文图下载落盘后走这里，不再看原站脸色。
+
+    文件名只认 sha1+扩展名（目录穿越直接 404）；文件丢了也 404，
+    调用方 `<img>` 有原地址回退……注意模板里拿到的已经是解析后的地址，
+    只有 media_map 指过来的才会请求到这里。
+    """
+    if not is_safe_image_name(name):
+        return HTMLResponse("not found", status_code=404)
+    settings = _settings(request)
+    media_dir = media_dir_for(settings.db_file) if settings else None
+    path = (media_dir / name) if media_dir else None
+    if path is None or not path.is_file():
+        return HTMLResponse("not found", status_code=404)
+    return FileResponse(
+        path,
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
+def _images(raw: str | None, media_map: str | None = None) -> list[str]:
+    """image_urls 存的是 JSON 数组；老数据/坏数据一律当没有图。
+
+    有本地映射就走 `/img/`（原站防盗链经常裂图），文件丢了自动回退原地址。
+    """
     if not raw:
         return []
     try:
         parsed = json.loads(raw)
     except (TypeError, ValueError):
         return []
-    return [str(item) for item in parsed if isinstance(item, str) and item.startswith(("http://", "https://"))]
+    mapping = read_media_map(media_map)
+    out = []
+    for item in parsed:
+        if not isinstance(item, str) or not item.startswith(("http://", "https://")):
+            continue
+        out.append(mapping.get(item, item))
+    return out
 
 
 def _topics_of(article: Article) -> list[str]:
@@ -65,7 +96,11 @@ def _topics_of(article: Article) -> list[str]:
 
 
 def _body_image_anchors(raw: str | None) -> list[tuple[int, str]]:
-    """读 body_images：返回 ``[(接在第几段之后, 地址), ...]``。坏数据一律当没有。"""
+    """读 body_images：返回 ``[(接在第几段之后, 展示地址), ...]``。
+
+    新格式锚点带 ``local``（本地 /img/ 路径），优先用它；老格式只有 url，
+    照样能读（还没轮到下载的那批）。坏数据一律当没有。
+    """
     if not raw:
         return []
     try:
@@ -78,7 +113,8 @@ def _body_image_anchors(raw: str | None) -> list[tuple[int, str]]:
             continue
         index, url = item.get("i"), item.get("url")
         if isinstance(index, int) and isinstance(url, str) and url.startswith(("http://", "https://")):
-            out.append((index, url))
+            local = item.get("local")
+            out.append((index, local if isinstance(local, str) and local.startswith("/img/") else url))
     return out
 
 
@@ -92,6 +128,26 @@ def _image_slots(anchors: list[tuple[int, str]], block_count: int) -> list[list[
     for index, url in anchors:
         if 0 <= index <= block_count:
             slots[index].append(url)
+    return slots
+
+
+def _image_slots_for_blocks(
+    anchors: list[tuple[int, str]], marked: list[dict[str, Any]]
+) -> list[list[str]]:
+    """按 blocks（含小标题行）摊配图：锚点记的是纯段落序号，小标题行不占号。
+
+    以前直接按 blocks 下标摊，AI 章节每节一个小标题，图会系统性后移；
+    这里把段号先映射到它所在的 block 位置再摊。模板用法不变。
+    """
+    slots: list[list[str]] = [[] for _ in range(len(marked) + 1)]
+    plain_at = [bi for bi, block in enumerate(marked) if not block.get("heading")]
+    for para_index, url in anchors:
+        if para_index < 0 or para_index > len(plain_at):
+            continue
+        if para_index == 0:
+            slots[0].append(url)
+        else:
+            slots[plain_at[para_index - 1] + 1].append(url)
     return slots
 
 
@@ -111,6 +167,24 @@ def _shift_image_slots(slots: list[list[str]], source_blocks: int, target_blocks
     return _image_slots(shifted, target_blocks)
 
 
+def _shift_anchors(
+    anchors: list[tuple[int, str]], source_paras: int, target_paras: int
+) -> list[tuple[int, str]]:
+    """把锚点（纯段落序号）按比例挪到译文对应的段落上。
+
+    与 ``_shift_image_slots`` 同一规则，只是作用在摊开之前 ——
+    小标题行不占段号，摊开后的下标已经是 block 位置，不能再按比例缩放。
+    """
+    if source_paras <= 0 or target_paras <= 0:
+        return []
+    if source_paras == target_paras:
+        return list(anchors)
+    return [
+        (min(target_paras, round(index / source_paras * target_paras)), url)
+        for index, url in anchors
+    ]
+
+
 # 像小标题的段落：短、不以句末标点结尾、不是纯数字
 _HEADING_MAX_CHARS = 30
 _HEADING_MIN_CHARS = 2
@@ -122,6 +196,39 @@ def _body_blocks(raw: str | None) -> list[str]:
     if not raw:
         return []
     return [part.strip() for part in raw.split("\n\n") if part.strip()]
+
+
+def _section_blocks(raw: str | None, *, prefix: str) -> list[dict[str, Any]] | None:
+    """读 AI 章节结构：返回显式 ``[{i, id, text, heading}]``，没有返回 ``None``。
+
+    有章节时小标题是 AI 定好的，不再走启发式猜（短句、无标点那种猜法
+    会把「马斯克的Terafab」这种短段也标成标题）。返回 ``None`` 时调用方
+    回退 mark_headings。
+    """
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(parsed, list):
+        return None
+    marked: list[dict[str, Any]] = []
+    index = 0
+    for section in parsed:
+        if not isinstance(section, dict):
+            continue
+        heading = str(section.get("h") or "").strip()
+        if heading:
+            marked.append({"i": index, "id": f"{prefix}-{index}", "text": heading, "heading": True})
+            index += 1
+        for para in str(section.get("t") or "").split("\n\n"):
+            text = para.strip()
+            if not text:
+                continue
+            marked.append({"i": index, "id": f"{prefix}-{index}", "text": text, "heading": False})
+            index += 1
+    return marked or None
 
 
 def mark_headings(blocks: list[str], *, prefix: str = "sec") -> list[dict[str, Any]]:
@@ -235,7 +342,7 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "category": article.category or "",
         "topics": _topics_of(article),
         "tags": split_tags(article.tags),
-        "images": _images(article.image_urls),
+        "images": _images(article.image_urls, article.media_map),
         # 「降级」按读者看到的样子判定：有英文原文、却还没中文版。
         # 不按 status 判 —— 重排队期间 status 是 pending，读者看到的还是英文，
         # 这时候把提示收掉等于假装没问题。
@@ -493,20 +600,30 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
         return next((c for c in candidates if c and is_real_body(c)), "") or ""
 
     original = _body(article.content_full, article.content)
-    marked = mark_headings(_body_blocks(original), prefix="sec-en")
+    # AI 章节优先：有就是编辑排好的小标题，没有就回退启发式猜
+    marked = _section_blocks(article.body_sections, prefix="sec-en") or mark_headings(
+        _body_blocks(original), prefix="sec-en"
+    )
     item["body_blocks"] = marked
     item["content_preview"] = truncate(original, 400)
     # 正文内联配图：按原站的做法插在段落之间，位置随抓取时一起存下来
     anchors = _body_image_anchors(article.body_images)
-    item["shots"] = _image_slots(anchors, len(marked))
+    item["shots"] = _image_slots_for_blocks(anchors, marked)
     item["has_body_images"] = bool(anchors)
     # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文
     translated = article.content_zh or ""
     item["has_translation"] = bool(translated.strip())
-    marked_zh = mark_headings(_body_blocks(translated), prefix="sec-zh") if item["has_translation"] else []
+    marked_zh = (
+        (_section_blocks(article.body_sections_zh, prefix="sec-zh")
+         or mark_headings(_body_blocks(translated), prefix="sec-zh"))
+        if item["has_translation"]
+        else []
+    )
     item["body_blocks_zh"] = marked_zh
     item["content_preview_zh"] = truncate(translated, 400) if item["has_translation"] else ""
-    item["shots_zh"] = _shift_image_slots(item["shots"], len(marked), len(marked_zh))
+    plain_en = sum(1 for b in marked if not b.get("heading"))
+    plain_zh = sum(1 for b in marked_zh if not b.get("heading"))
+    item["shots_zh"] = _image_slots_for_blocks(_shift_anchors(anchors, plain_en, plain_zh), marked_zh)
     # 本文目录指向**读者当前看到的那一版**：有译文就指译文的小标题。
     # 译文的段落数可能与原文不同（翻译失败的那几段会被丢掉），
     # 拿原文的下标去点译文的标题会跳错位置甚至跳到不存在的锚点。

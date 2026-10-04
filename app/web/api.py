@@ -77,7 +77,13 @@ def _topics_json(raw: str | None) -> list[str]:
 
 
 def _digest_with_fallback(article: Article) -> str:
-    """早报汇总：中文导读优先，太短就补推荐理由，再不够才退回摘要。"""
+    """早报汇总：AI 现写的推送语优先，又通顺又不断句。
+
+    还没轮到写的（老数据）回退旧的截断拼凑：中文导读优先，太短就补推荐理由。
+    """
+    stored = (getattr(article, "brief_zh", None) or "").strip()
+    if stored:
+        return stored
     brief = brief_digest(article.digest_zh or article.digest or "")
     if len(brief) >= _BRIEF_MIN_CHARS or not brief:
         return brief

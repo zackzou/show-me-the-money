@@ -1199,3 +1199,91 @@ def test_story_toc_points_at_the_displayed_version(client, settings: Settings, s
     anchors = set(re.findall(r'href="#([^"]+)"', text))
     assert anchors, "有译文时也该生成本文目录"
     assert all(a.startswith("sec-zh-") for a in anchors), f"目录应指向译文锚点，实际是 {anchors}"
+
+
+def test_section_blocks_prefer_ai_headings():
+    """有 AI 章节时小标题用编辑定的，不走启发式猜。"""
+    import json
+
+    from app.web.routes import _section_blocks
+
+    raw = json.dumps(
+        [{"h": "背景", "t": "第一段。\n\n第二段。"}, {"h": "", "t": "第三段。"}],
+        ensure_ascii=False,
+    )
+    blocks = _section_blocks(raw, prefix="sec-zh")
+    assert blocks == [
+        {"i": 0, "id": "sec-zh-0", "text": "背景", "heading": True},
+        {"i": 1, "id": "sec-zh-1", "text": "第一段。", "heading": False},
+        {"i": 2, "id": "sec-zh-2", "text": "第二段。", "heading": False},
+        {"i": 3, "id": "sec-zh-3", "text": "第三段。", "heading": False},
+    ]
+    assert _section_blocks(None, prefix="sec-zh") is None
+    assert _section_blocks("坏数据", prefix="sec-zh") is None
+
+
+def test_image_slots_skip_heading_rows():
+    """锚点是纯段落序号：小标题行不占号，图不能后移。"""
+    from app.web.routes import _image_slots_for_blocks
+
+    marked = [
+        {"i": 0, "id": "s-0", "text": "背景", "heading": True},
+        {"i": 1, "id": "s-1", "text": "第一段。", "heading": False},
+        {"i": 2, "id": "s-2", "text": "第二段。", "heading": False},
+    ]
+    slots = _image_slots_for_blocks([(0, "http://x/head.png"), (2, "http://x/mid.png")], marked)
+    assert slots[0] == ["http://x/head.png"]
+    # 第 2 段之后 → 落在第二个纯段落所在的 block 之后
+    assert slots[3] == ["http://x/mid.png"]
+    # 无标题时与老行为一致
+    plain = [dict(b, heading=False) for b in marked]
+    assert _image_slots_for_blocks([(2, "http://x/mid.png")], plain)[2] == ["http://x/mid.png"]
+
+
+def test_shift_anchors_scales_paragraph_index():
+    from app.web.routes import _shift_anchors
+
+    assert _shift_anchors([(2, "u")], 4, 4) == [(2, "u")]
+    assert _shift_anchors([(4, "u")], 4, 2) == [(2, "u")]
+    assert _shift_anchors([(1, "u")], 0, 3) == []
+
+
+def test_story_page_renders_ai_sections(client, settings: Settings, seeded_db):
+    """有 AI 章节时详情页按节渲染小标题（h3），而不是启发式猜。"""
+    import json
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="章节测试",
+            link="https://example.com/story-sections",
+            summary="一句摘要",
+            digest="导读内容足够长，可以通过正文判定门槛的文本。",
+            content_full=(
+                "第一段正文内容，这里补足到足够长度以通过正文字数门槛的判定。\n\n"
+                "第二段正文内容，同样补足长度，确保整段都会被渲染出来。\n\n"
+                "第三段正文内容，继续补足长度，让章节结构有意义。"
+            ),
+            content_zh=(
+                "第一段译文内容，这里补足到足够长度以通过正文字数门槛的判定。\n\n"
+                "第二段译文内容，同样补足长度，确保整段都会被渲染出来。\n\n"
+                "第三段译文内容，继续补足长度，让章节结构有意义。"
+            ),
+        )
+        article.body_sections_zh = json.dumps(
+            [
+                {"h": "背景", "t": "第一段译文内容，这里补足到足够长度以通过正文字数门槛的判定。"},
+                {
+                    "h": "",
+                    "t": "第二段译文内容，同样补足长度，确保整段都会被渲染出来。\n\n"
+                    "第三段译文内容，继续补足长度，让章节结构有意义。",
+                },
+            ],
+            ensure_ascii=False,
+        )
+        article_id = article.id
+
+    page = client.get(f"/story/{article_id}")
+    assert page.status_code == 200
+    assert ">背景</h3>" in page.text  # AI 定好的小标题渲染成 h3
+    assert "本文目录" in page.text or "toc" in page.text.lower() or "sec-zh-0" in page.text

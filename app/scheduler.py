@@ -12,11 +12,18 @@ from sqlalchemy import delete, func, select
 
 from app.ai.client import LLMClient
 from app.ai.cluster import merge_duplicates
-from app.ai.processor import backfill_translations, process_pending, retry_degraded
+from app.ai.processor import (
+    backfill_briefs,
+    backfill_sections,
+    backfill_translations,
+    process_pending,
+    retry_degraded,
+)
 from app.config import Settings
 from app.db import session_scope
 from app.fetcher.content import backfill_body_images, backfill_content, strip_shared_openings
-from app.fetcher.images import backfill_images
+from app.fetcher.images import backfill_images, localize_missing_covers
+from app.fetcher.media_store import media_dir_for
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport
 from app.report.generator import STATUS_REPORTABLE, day_window, generate_daily_report
@@ -99,6 +106,28 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
                 translator.close()
     except Exception as exc:
         log.warning("补译中文正文失败：%s", exc)
+    # 早报推送语：有中文导读的顺手写一段，手机端直接读（不依赖正文翻译开关）
+    try:
+        if settings.i18n.enabled:
+            translator = _llm_client(settings)
+            try:
+                with session_scope() as session:
+                    log.info("补早报推送语：%s", backfill_briefs(session, translator, settings))
+            finally:
+                translator.close()
+    except Exception as exc:
+        log.warning("补早报推送语失败：%s", exc)
+    # 正文章节结构：存量中文正文排一遍版，每轮 5 篇（每篇 1 次调用）
+    try:
+        if settings.i18n.enabled:
+            translator = _llm_client(settings)
+            try:
+                with session_scope() as session:
+                    log.info("补正文章节结构：%s", backfill_sections(session, translator, settings))
+            finally:
+                translator.close()
+    except Exception as exc:
+        log.warning("补正文章节结构失败：%s", exc)
     try:
         run_today_report_job(settings)
     except Exception as exc:  # 日报失败不该把处理统计一起丢掉
@@ -116,19 +145,31 @@ def run_content_job(settings: Settings) -> dict[str, Any]:
             limit=settings.content.batch_size,
             timeout=settings.content.timeout_seconds,
             min_chars=settings.content.min_chars,
+            media_dir=media_dir_for(settings.db_file),
         )
 
 
 def run_media_job(settings: Settings) -> dict[str, Any]:
-    """给「相关但没图」的文章补首图（RSS 没带图时抓 og:image）。"""
+    """给「相关但没图」的文章补首图（RSS 没带图时抓 og:image）。
+
+    挑中的图同步下载到本地：原站防盗链经常裂图，页内展示走自家 /img/。
+    正文里的小图（徽章/头像）按真实尺寸丢掉，不再当配图输出。
+    """
     if not settings.media.enabled:
         return {"candidates": 0, "filled": 0, "not_found": 0, "failed": 0}
+    media_dir = media_dir_for(settings.db_file)
     with session_scope() as session:
         stats = backfill_images(
             session,
             limit=settings.media.batch_size,
             timeout=settings.media.timeout_seconds,
+            media_dir=media_dir,
         )
+        # 老数据的首图也补一份本地（只下还没下过的）
+        with session_scope() as session:
+            stats["localized_covers"] = localize_missing_covers(
+                session, limit=settings.media.batch_size, media_dir=media_dir
+            )["localized"]
         # 站点通栏广告（InfoQ 每篇都顶着同一段大会宣传）不算正文，删掉
         with session_scope() as session:
             strip_shared_openings(session)
@@ -137,6 +178,7 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
             session,
             limit=settings.media.batch_size,
             timeout=settings.media.timeout_seconds,
+            media_dir=media_dir,
         )
     return {"cover": stats, "inline": inline}
 

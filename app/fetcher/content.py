@@ -15,6 +15,7 @@ from __future__ import annotations
 import html as html_lib
 import json
 import re
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -22,6 +23,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.fetcher.images import looks_like_junk_image, src_of
+from app.fetcher.media_store import localize_anchors
 from app.models import Article
 from app.utils.logger import get_logger
 from app.utils.text import strip_html
@@ -364,12 +366,31 @@ def looks_like_chinese(text: str) -> bool:
     return bool(_CJK_RE.search(text or ""))
 
 
+def _store_body_anchors(
+    article: Article,
+    anchors: list[dict[str, Any]],
+    *,
+    referer: str = "",
+    media_dir: Path | None = None,
+    client: httpx.Client | None = None,
+) -> bool:
+    """存内联配图锚点。有 media_dir 就逐张下载本地化（下不到/太小的丢掉）。
+
+    返回有没有图（调用方据此统计）。空数组表示「查过了没有」，别每轮重查。
+    """
+    if media_dir is not None and anchors:
+        anchors = localize_anchors(anchors, referer=referer, media_dir=media_dir, client=client)
+    article.body_images = json.dumps(anchors, ensure_ascii=False) if anchors else "[]"
+    return bool(anchors)
+
+
 def backfill_content(
     session: Session,
     *,
     limit: int = 20,
     timeout: float = 12.0,
     min_chars: int = 200,
+    media_dir: Path | None = None,
 ) -> dict[str, Any]:
     """给「判为相关但还没正文」的文章抓全文，返回统计。
 
@@ -406,14 +427,17 @@ def backfill_content(
             if text:
                 article.content_full = text
                 # 正文里的配图连同段落位置一起存，详情页照位置插回正文
-                article.body_images = json.dumps(images, ensure_ascii=False) if images else "[]"
-                stats["filled"] += 1
-                if images:
+                if _store_body_anchors(
+                    article, images, referer=article.link or "",
+                    media_dir=media_dir, client=client,
+                ):
                     stats["with_images"] += 1
+                stats["filled"] += 1
             else:
                 # 标记成空串：查过了确实没有，不要每轮重查
                 article.content_full = ""
                 stats["short"] += 1
+            session.commit()
     session.flush()
     if stats["filled"]:
         log.info(
@@ -546,13 +570,17 @@ def backfill_body_images(
     limit: int = 20,
     timeout: float = 12.0,
     min_chars: int = 200,
+    media_dir: Path | None = None,
 ) -> dict[str, Any]:
     """给「已经有正文、但还没有内联配图位置」的文章补一次位置。
 
     正文里插图是后来才有的，老数据全都没有 ``body_images``。重新抓一遍文章页
     就能把位置算出来 —— 正文本身已经在库里，不用重写，也不用重新入库。
+
+    旧格式锚点（只有 url、没下载过）也在这里顺手本地化：防盗链裂图、
+    GitHub 徽章这类小图都在这一轮被换成/丢掉。
     """
-    rows = list(
+    fresh = list(
         session.execute(
             select(Article)
             .where(
@@ -566,7 +594,26 @@ def backfill_body_images(
             .limit(limit)
         ).scalars()
     )
-    stats = {"candidates": len(rows), "filled": 0, "empty": 0, "failed": 0}
+    legacy = (
+        list(
+            session.execute(
+                select(Article)
+                .where(
+                    Article.body_images.isnot(None),
+                    Article.body_images != "[]",
+                    Article.body_images.notlike('%"local"%'),
+                    Article.relevance == 1,
+                    Article.link.notlike("http://localhost%"),
+                )
+                .order_by(Article.published_at.desc(), Article.id.desc())
+                .limit(limit)
+            ).scalars()
+        )
+        if media_dir is not None
+        else []
+    )
+    rows = fresh + [a for a in legacy if a not in fresh]
+    stats = {"candidates": len(rows), "filled": 0, "empty": 0, "failed": 0, "localized": 0}
     if not rows:
         return stats
 
@@ -576,18 +623,42 @@ def backfill_body_images(
         headers={"User-Agent": DEFAULT_UA},
         limits=httpx.Limits(max_connections=6),
     ) as client:
-        for article in rows:
-            try:
-                _, images = fetch_article_document(
-                    article.link, timeout=timeout, min_chars=min_chars, client=client
-                )
-            except Exception as exc:  # 兜底：补图失败绝不能影响主流程
-                stats["failed"] += 1
-                log.debug("补正文配图失败：%s（%r）", article.link[:80], exc)
-                continue
-            # 空数组表示「查过了，正文里确实没有图」，别每轮都重查
-            article.body_images = json.dumps(images, ensure_ascii=False) if images else "[]"
-            stats["filled" if images else "empty"] += 1
+        for index, article in enumerate(rows):
+            if article.body_images is None:
+                try:
+                    _, images = fetch_article_document(
+                        article.link, timeout=timeout, min_chars=min_chars, client=client
+                    )
+                except Exception as exc:  # 兜底：补图失败绝不能影响主流程
+                    stats["failed"] += 1
+                    log.debug("补正文配图失败：%s（%r）", article.link[:80], exc)
+                    continue
+                # 空数组表示「查过了，正文里确实没有图」，别每轮都重查
+                if _store_body_anchors(
+                    article, images, referer=article.link or "",
+                    media_dir=media_dir, client=client,
+                ):
+                    stats["filled"] += 1
+                else:
+                    stats["empty"] += 1
+            else:
+                # 旧格式：只本地化，不重抓（位置已经是对的）
+                try:
+                    old = json.loads(article.body_images or "[]")
+                except (TypeError, ValueError):
+                    old = []
+                if _store_body_anchors(
+                    article, old if isinstance(old, list) else [],
+                    referer=article.link or "", media_dir=media_dir, client=client,
+                ):
+                    stats["localized"] += 1
+                else:
+                    # 全是小图/下不到：标空，别每轮都来
+                    article.body_images = "[]"
+                    stats["empty"] += 1
+            if index % 5 == 4:
+                # 单张下载慢：中途提交，别把写锁占到最后
+                session.commit()
     session.flush()
     if stats["filled"]:
         log.info(
