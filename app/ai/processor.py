@@ -133,15 +133,24 @@ def parse_translate(raw: str) -> tuple[str | None, str | None]:
     return title_en, digest_en
 
 
-# 正文翻译按段翻：一次翻太多容易被截断，也浪费 token
-TRANSLATE_CHUNK_PARAGRAPHS = 4
+# 正文重写按「字符预算」切块，不按固定段数。
+#
+# 早先固定 4 段一译，是为**逐句直译**设计的：段落一一对应，短块不容易被截断。
+# 改成「用中文重写成文章」之后这个前提反了 ——
+#   · 重写要重新组织段落，4 段看不到上下文，只能各译各的，仍然是译文味；
+#   · 调用次数还是长文的最大成本（一篇 28 段 = 7 次调用）。
+# 改成 ~2600 字符一块：既给模型足够上下文重组行文，又把调用数降到 1~3 次。
+TRANSLATE_CHUNK_CHARS = 2600
+# 单块至少要有这么多字符才单独成块（否则碎片会被并到上一块）
+TRANSLATE_CHUNK_MIN_CHARS = 400
 # 参与翻译的正文长度上限（与抓取时的上限对齐）
 MAX_CONTENT_CHARS = 40_000
-# 译文明显比原文短，就认为这一段没翻成功。
-# 英译中的正常密度只有 0.3~0.45（英文 1000 字符约 180 词，译成中文约 300 字）：
-# 门槛 0.4 会把完整译文也误杀 —— 实测 hy4 的整句译文只有 0.35~0.38。
-# 电报体压缩一般在 0.26 以下，0.3 能把两者分开。
-_TRANSLATE_MIN_RATIO = 0.3
+# 重写后的中文长度下限（占原文的比例）。
+# 提示词要求压到原文的 40%~70%，所以 0.25 是「明显没写完」的兜底线；
+# 完整重写实测落在 0.35~0.6。压缩成摘要的（0.1 上下）会被这条拦掉。
+_TRANSLATE_MIN_RATIO = 0.25
+# 中文重写的合理上限：超过原文长度说明模型在扩写/复述，不是编译
+_TRANSLATE_MAX_RATIO = 1.3
 
 
 def split_paragraphs(text: str) -> list[str]:
@@ -273,6 +282,30 @@ def structure_sections(
     return sections[:MAX_SECTIONS]
 
 
+def chunk_for_rewrite(paragraphs: list[str], *, budget: int = TRANSLATE_CHUNK_CHARS) -> list[str]:
+    """把段落按字符预算分块，尽量在段落边界断开。
+
+    不足 ``TRANSLATE_CHUNK_MIN_CHARS`` 的尾块并到上一块：单独发一个 50 字符的块
+    既浪费一次调用，模型也没有上下文可用。
+    """
+    chunks: list[str] = []
+    current: list[str] = []
+    size = 0
+    for para in paragraphs:
+        current.append(para)
+        size += len(para) + 2
+        if size >= budget:
+            chunks.append("\n\n".join(current))
+            current, size = [], 0
+    if current:
+        tail = "\n\n".join(current)
+        if chunks and size < TRANSLATE_CHUNK_MIN_CHARS:
+            chunks[-1] = chunks[-1] + "\n\n" + tail
+        else:
+            chunks.append(tail)
+    return chunks
+
+
 def translate_to_chinese(
     client: LLMClient,
     prompts: PromptsConfig,
@@ -293,14 +326,16 @@ def translate_to_chinese(
     paragraphs = split_paragraphs(text)[: max(1, limit // 200)]
     if not paragraphs:
         return None
+    chunks = chunk_for_rewrite(paragraphs)
     out: list[str] = []
     failed = 0
-    for start in range(0, len(paragraphs), TRANSLATE_CHUNK_PARAGRAPHS):
-        chunk = "\n\n".join(paragraphs[start : start + TRANSLATE_CHUNK_PARAGRAPHS])
+    for chunk in chunks:
         translated = _optional_llm(
             client, render_translate_content_prompt(prompts, chunk), ""
         ).strip()
-        if not translated or len(translated) < len(chunk) * _TRANSLATE_MIN_RATIO:
+        ratio = len(translated) / len(chunk) if chunk else 0.0
+        # 太短=没写完，太长=在扩写复述；两种都不该写进库
+        if not translated or ratio < _TRANSLATE_MIN_RATIO or ratio > _TRANSLATE_MAX_RATIO:
             failed += 1
             continue
         out.append(translated)
@@ -308,7 +343,7 @@ def translate_to_chinese(
         return None
     result = "\n\n".join(out)
     if failed:
-        log.info("正文翻译有 %d/%d 段未成功，保留已译部分", failed, len(paragraphs))
+        log.info("正文重写有 %d/%d 块未成功，保留已写部分", failed, len(chunks))
     return result
 
 

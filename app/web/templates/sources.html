@@ -1,0 +1,147 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">SOURCES</div>
+  <h1>信源管理</h1>
+  <p class="meta">
+    后台每 2 小时抓一次启用中的信源。加新网站把它的 RSS 地址填进来就行 ——
+    保存前会真的试抓一次，抓不通不会保存，省得它每轮白失败。
+  </p>
+</div>
+
+{% if notice.text %}
+  <p class="notice {{ notice.kind }}">{{ notice.text }}</p>
+{% endif %}
+
+<section class="sec">
+  <div class="sec-t">添加信源</div>
+  <form class="addform" method="post" action="/sources">
+    <div class="frow">
+      <input type="url" name="url" id="src-url" required placeholder="RSS 地址，例如 https://news.ycombinator.com/rss"
+             autocomplete="off" spellcheck="false">
+      <button type="submit" class="btn-add">试抓并添加</button>
+    </div>
+    <div class="frow">
+      <input type="text" name="name" id="src-name" placeholder="显示名（可留空，自动取域名）"
+             autocomplete="off" maxlength="200">
+      <label class="langsel">
+        语言
+        <select name="lang">
+          <option value="en" selected>英文（自动译成中文）</option>
+          <option value="zh">中文（直接用原文）</option>
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" name="enabled" value="1" checked> 立即启用</label>
+    </div>
+    <p class="ftip">只支持公开的 RSS / Atom 订阅源。私有 feed（需要登录或付费墙）取不到内容。</p>
+  </form>
+</section>
+
+<section class="sec">
+  <div class="sec-t">当前信源（{{ sources|length }}）</div>
+  <ul class="srclist">
+    {% for s in sources %}
+      <li class="srcrow {{ 'off' if not s.enabled }}">
+        <div class="src-main">
+          <div class="src-name">
+            {{ s.name }}
+            {% if not s.enabled %}<span class="tag-off">已停用</span>{% endif %}
+            {% if s.lang == 'en' %}<span class="tag-lang">EN</span>{% endif %}
+          </div>
+          <a class="src-url" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.url }}</a>
+          <div class="src-meta">
+            已产出 {{ s.total }} 篇
+            {%- if s.latest %} · 最近 {{ s.latest }}{% endif %}
+            {%- if s.created %} · 添加于 {{ s.created }}{% endif %}
+          </div>
+        </div>
+        <div class="src-act">
+          <form method="post" action="/sources/{{ s.id }}/rename" class="inline">
+            <input type="text" name="name" value="{{ s.name }}" maxlength="200" aria-label="改名">
+            <button type="submit" class="mini">改名</button>
+          </form>
+          <form method="post" action="/sources/{{ s.id }}/probe" class="inline">
+            <button type="submit" class="mini">试抓</button>
+          </form>
+          <form method="post" action="/sources/{{ s.id }}/toggle" class="inline">
+            <button type="submit" class="mini">{{ '启用' if not s.enabled else '停用' }}</button>
+          </form>
+          <form method="post" action="/sources/{{ s.id }}/delete" class="inline"
+                data-confirm="删除「{{ s.name }}」？{{ '已入库的 %d 篇文章会保留。' % s.total if s.total else '该源还没有文章。' }}">
+            <button type="submit" class="mini danger">删除</button>
+          </form>
+        </div>
+      </li>
+    {% else %}
+      <li class="empty">还没有信源。先在上面加一个 RSS 地址。</li>
+    {% endfor %}
+  </ul>
+  <p class="ftip">
+    停用 = 后台不再抓新的；删除 = 从此不再出现，已经入库的文章和译文仍然可以正常阅读。
+  </p>
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .notice { margin:18px 0 4px; padding:12px 15px; border-radius:9px; font-size:13.5px; line-height:1.7;
+            border:1px solid var(--line); }
+  .notice.ok { border-color:rgba(31,138,90,.45); background:rgba(31,138,90,.07); color:var(--text); }
+  .notice.error { border-color:rgba(200,60,50,.45); background:rgba(200,60,50,.07); }
+  .notice.warn { border-color:rgba(190,140,20,.45); background:rgba(190,140,20,.08); }
+  .addform { display:flex; flex-direction:column; gap:11px; }
+  .frow { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+  .frow input[type=url] { flex:1 1 340px; min-width:0; }
+  .frow input[type=text] { flex:1 1 240px; min-width:0; }
+  .addform input { padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+                   background:var(--surface); color:var(--text); font-size:13.5px; font-family:inherit; }
+  .addform input:focus { outline:none; border-color:var(--accent); }
+  .btn-add { padding:9px 18px; border:1px solid var(--accent); border-radius:8px; background:var(--accent);
+             color:#fff; font-size:13.5px; font-weight:600; cursor:pointer; flex:none; }
+  .btn-add:hover { filter:brightness(1.07); }
+  .langsel { font-size:12.5px; color:var(--muted); display:flex; align-items:center; gap:6px; flex:none; }
+  .langsel select { padding:8px 9px; border:1px solid var(--line); border-radius:8px;
+                    background:var(--surface); color:var(--text); font-size:13px; font-family:inherit; }
+  .chk { font-size:12.5px; color:var(--muted); display:flex; align-items:center; gap:6px; flex:none; }
+  .ftip { margin:10px 0 0; font-size:12.5px; color:var(--faint); line-height:1.75; }
+  .srclist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:9px; }
+  .srcrow { display:flex; gap:16px; justify-content:space-between; align-items:flex-start;
+            padding:13px 15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  .srcrow.off { opacity:.6; }
+  .src-main { min-width:0; flex:1; }
+  .src-name { font-size:14px; font-weight:600; color:var(--text); display:flex; align-items:center;
+              gap:7px; flex-wrap:wrap; }
+  .tag-off { font-size:11px; font-weight:500; color:var(--faint); background:var(--chip);
+             border-radius:5px; padding:2px 7px; }
+  .tag-lang { font-size:11px; font-weight:600; color:var(--accent); background:var(--accent-soft);
+              border-radius:5px; padding:2px 7px; }
+  .src-url { display:block; font-size:12px; color:var(--muted); word-break:break-all; margin-top:4px; }
+  .src-url:hover { color:var(--accent); }
+  .src-meta { font-size:11.5px; color:var(--faint); margin-top:5px; }
+  .src-act { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; flex:none; max-width:46%; }
+  .src-act .inline { display:flex; }
+  .src-act input[type=text] { width:118px; padding:6px 9px; border:1px solid var(--line); border-radius:7px;
+                               background:var(--surface); color:var(--text); font-size:12.5px; font-family:inherit; }
+  .mini { padding:6px 11px; border:1px solid var(--line); border-radius:7px; background:var(--chip);
+          color:var(--muted); font-size:12.5px; font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .mini.danger:hover { color:#c0392b; border-color:#c0392b; }
+  .empty { padding:26px; text-align:center; color:var(--faint); font-size:13.5px;
+           border:1px dashed var(--line); border-radius:10px; }
+  @media (max-width:760px) {
+    .srcrow { flex-direction:column; gap:11px; }
+    .src-act { max-width:100%; justify-content:flex-start; }
+    .src-act input[type=text] { width:100%; min-width:0; }
+  }
+</style>
+<script>
+  // 删除是不可逆的（源没了，虽然文章保留），确认一下再提交
+  document.querySelectorAll("form[data-confirm]").forEach(function (f) {
+    f.addEventListener("submit", function (e) {
+      if (!window.confirm(f.getAttribute("data-confirm"))) e.preventDefault();
+    });
+  });
+</script>
+{% endblock %}

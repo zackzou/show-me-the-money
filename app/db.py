@@ -60,6 +60,8 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.brief_zh": "TEXT",
     "articles.body_sections": "TEXT",
     "articles.body_sections_zh": "TEXT",
+    # 信源软删除（保留行以免抹掉历史文章的来源归属）
+    "sources.deleted": "INTEGER NOT NULL DEFAULT 0",
 }
 
 

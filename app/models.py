@@ -23,6 +23,11 @@ class Source(Base):
     type: Mapped[str] = mapped_column(String(20), nullable=False, default="rss")
     lang: Mapped[str] = mapped_column(String(10), nullable=False, default="en")
     enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # 用户在管理页「删除」一个源时置 1，**不真的删行**。
+    # 真删会让 SQLAlchemy 把 articles.source_id 置成 NULL（关系默认行为），
+    # 已经抓到的那些文章的「来源」就全变成了「未知来源」—— 用户的历史信息
+    # 被悄悄抹掉了。软删除保留归属，列表与抓取都不再包含它。
+    deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
 
     articles: Mapped[list[Article]] = relationship(back_populates="source")

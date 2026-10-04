@@ -30,7 +30,14 @@ def _store_images(urls: list[str]) -> str | None:
 
 
 def _enabled_sources(session: Session) -> list[Source]:
-    return list(session.execute(select(Source).where(Source.enabled == 1).order_by(Source.id)).scalars())
+    """启用中的源。``deleted=1`` 的源不参与抓取（软删除，见 models.Source）。"""
+    return list(
+        session.execute(
+            select(Source)
+            .where(Source.enabled == 1, Source.deleted == 0)
+            .order_by(Source.id)
+        ).scalars()
+    )
 
 
 def _admit(

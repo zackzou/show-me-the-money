@@ -651,10 +651,10 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
 
 
 def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settings):
-    """长正文按段分组翻译，顺序要保持；某组失败只丢那一组。"""
+    """长正文按字符预算分块重写，顺序要保持；某块失败只丢那一块。"""
     body = "\n\n".join(
         f"Paragraph {i} of the English article body, long enough to pass the length gate."
-        for i in range(1, 12)
+        for i in range(1, 121)
     )
     seen: list[str] = []
 
@@ -662,24 +662,58 @@ def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settin
         payload = json.loads(request.content)
         text = payload["messages"][0]["content"]
         seen.append(text)
-        return httpx.Response(200, json={"choices": [{"message": {"content": "这段是译文。" * 40}}]})
+        # 每块按原长度的一半重写，落在 0.25~1.3 的合格区间里
+        return httpx.Response(200, json={"choices": [{"message": {"content": "这段是译文。" * 200}}]})
 
     client = _client(handler, retries=0)
     try:
         out = translate_to_chinese(client, settings.prompts, body)
         assert out, "英文正文应该翻得出中文"
-        assert len(seen) >= 2, "11 段不该一次就翻完"
-        assert "Paragraph 1" in seen[0]
-        assert "Paragraph 11" in seen[-1]
-        assert out.count("这段是译文") == len(seen) * 40
-        # 译文明显比原文短（模型只回了一截）要判为失败，不写进库
+        assert len(seen) >= 2, "长文不该一次就翻完"
+        assert "Paragraph 1 " in seen[0]
+        assert "Paragraph 120 " in seen[-1]
+        assert out.count("这段是译文") == len(seen) * 200
+        # 重写得太短（模型只回了一截 / 压成摘要）要判为失败，不写进库
         short = _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "太短"}}]}), retries=0)
         try:
             assert translate_to_chinese(short, settings.prompts, body) is None
         finally:
             short.close()
+        # 重写得太长（在扩写复述而不是编译）同样不该收
+        long_client = _client(
+            lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "很长" * 4000}}]}), retries=0
+        )
+        try:
+            assert translate_to_chinese(long_client, settings.prompts, body) is None
+        finally:
+            long_client.close()
     finally:
         client.close()
+
+
+def test_chunk_for_rewrite_respects_char_budget():
+    """回归：分块从「固定 4 段」改成「字符预算」。
+
+    固定 4 段对重写有两个坏处：模型看不到足够上下文重组行文（还是译文味），
+    且长文调用次数翻好几倍。改成约 2600 字符一块。
+    """
+    from app.ai.processor import TRANSLATE_CHUNK_CHARS, chunk_for_rewrite
+
+    paras = [f"第{i}段。" + "内容" * 200 for i in range(40)]  # 每段约 400 字
+    chunks = chunk_for_rewrite(paras)
+    assert len(chunks) >= 2, "4000+ 字的长文应该切成多块"
+    for chunk in chunks:
+        # 允许最后一块偏小（尾块合并规则），但不能超过预算的 1.5 倍
+        assert len(chunk) < TRANSLATE_CHUNK_CHARS * 1.5
+    # 顺序与内容不能丢
+    joined = "\n\n".join(chunks)
+    for i in (0, 20, 39):
+        assert f"第{i}段。" in joined
+    # 短尾块并到上一块，不单独成块
+    tail = ["主体段落。" + "内容" * 300, "很短。"]
+    merged = chunk_for_rewrite(tail)
+    assert len(merged) == 1
+    assert "很短。" in merged[0]
 
 
 def test_translate_to_chinese_skips_chinese_body(seeded_db, settings: Settings):
@@ -975,9 +1009,9 @@ def test_backfill_translations_fills_titles_and_digests_before_bodies(seeded_db,
     def handler(request: httpx.Request) -> httpx.Response:
         prompt = request.content.decode("utf-8", "ignore")
         prompts.append(prompt)
-        if "把下面这段英文资讯导读翻译成中文" in prompt:
+        if "英文资讯导读改写成中文导语" in prompt:
             out = "西雅图山岳救援队开始穿着外骨骼装备进入荒野徒步。"
-        elif "科技资讯正文翻译成中文" in prompt:
+        elif "请**用中文重新写成一篇中国读者能顺畅读完的文章**" in prompt:
             out = "这是中文译文的第" + str(len(prompts)) + "段，译完之后的长度足够通过那道长度校验门槛。" * 4
         else:
             out = "外骨骼时代开启"
@@ -1003,8 +1037,9 @@ def test_backfill_translations_fills_titles_and_digests_before_bodies(seeded_db,
         client.close()
 
     # 标题与导读都在正文译文之前完成
-    first_body_call = next(i for i, p in enumerate(prompts) if "科技资讯正文翻译成中文" in p)
-    assert all("科技资讯正文翻译成中文" not in p for p in prompts[:first_body_call])
+    marker = "用中文重新写成一篇中国读者能顺畅读完的文章"
+    first_body_call = next(i for i, p in enumerate(prompts) if marker in p)
+    assert all(marker not in p for p in prompts[:first_body_call])
     assert any("英文资讯导读" in p for p in prompts[:first_body_call])
     with session_scope() as session:
         stored = session.get(Article, article_id)

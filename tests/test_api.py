@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from urllib.parse import quote
 
+from sqlalchemy import select
+
 from app.config import Settings
 from app.db import session_scope
 from app.report.generator import generate_daily_report
@@ -1287,3 +1289,314 @@ def test_story_page_renders_ai_sections(client, settings: Settings, seeded_db):
     assert page.status_code == 200
     assert ">背景</h3>" in page.text  # AI 定好的小标题渲染成 h3
     assert "本文目录" in page.text or "toc" in page.text.lower() or "sec-zh-0" in page.text
+
+
+# ── 信源管理页 ────────────────────────────────────────────────────────────
+
+def test_sources_page_lists_seeded_sources(client, seeded_db):
+    page = client.get("/sources")
+    assert page.status_code == 200
+    assert "信源管理" in page.text
+    # conftest 的 seeded_db 建了一个源
+    assert "测试源" in page.text
+    # 导航里有入口
+    assert 'href="/sources"' in page.text
+
+
+def test_sources_create_probes_before_saving(client, monkeypatch, seeded_db):
+    """保存前必须真的试抓一次：抓不通的地址不能进库。"""
+    import app.web.sources as sources_mod
+
+    calls = {"n": 0}
+
+    def fake_fetch(url, **kwargs):
+        calls["n"] += 1
+        assert url == "https://news.example.com/rss"
+        return [{"title": "示例条目", "link": "https://news.example.com/1"}]
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", fake_fetch)
+    page = client.post(
+        "/sources",
+        data={"url": "https://news.example.com/rss", "name": "示例站", "lang": "en", "enabled": "1"},
+        follow_redirects=False,
+    )
+    assert page.status_code == 200
+    assert calls["n"] == 1
+    assert "已添加 示例站" in page.text
+
+    with session_scope() as session:
+        from app.models import Source
+
+        added = session.execute(select(Source).where(Source.url == "https://news.example.com/rss")).scalar_one()
+        assert added.name == "示例站"
+        assert added.enabled == 1
+
+
+def test_sources_create_rejects_unreachable_url(client, monkeypatch, seeded_db):
+    """抓不通就不保存：留着只会让调度器每 2 小时失败一次。"""
+    import app.web.sources as sources_mod
+
+    def boom(url, **kwargs):
+        raise RuntimeError("Connection refused")
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", boom)
+    page = client.post(
+        "/sources",
+        data={"url": "https://dead.example.com/rss", "name": "死源"},
+        follow_redirects=False,
+    )
+    assert page.status_code == 400
+    assert "没能从这个地址取到内容" in page.text
+    assert "Connection refused" in page.text
+
+    with session_scope() as session:
+        from app.models import Source
+
+        assert session.execute(
+            select(Source).where(Source.url == "https://dead.example.com/rss")
+        ).scalar_one_or_none() is None
+
+
+def test_sources_create_rejects_empty_feed(client, monkeypatch, seeded_db):
+    """能连上但解析不出条目也要拒：这多半不是 RSS。"""
+    import app.web.sources as sources_mod
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", lambda url, **kwargs: [])
+    page = client.post(
+        "/sources", data={"url": "https://empty.example.com/feed", "name": "空源"}, follow_redirects=False
+    )
+    assert page.status_code == 400
+    assert "没解析出任何条目" in page.text
+
+
+def test_sources_create_rejects_bad_scheme(client, seeded_db):
+    """只接受 http/https：file:// 与 javascript: 都没有意义。"""
+    page = client.post("/sources", data={"url": "file:///etc/passwd"}, follow_redirects=False)
+    assert page.status_code == 400
+    assert "http:// 或 https://" in page.text
+
+
+def test_sources_create_duplicate_url_is_rejected(client, monkeypatch, seeded_db):
+    import app.web.sources as sources_mod
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", lambda url, **kwargs: [{"title": "x"}])
+    # 用 seeded_db 里那个源的地址（同一个 url 只允许有一条）
+    with session_scope() as session:
+        from app.models import Source
+
+        existing_url = session.execute(select(Source.url)).scalar_one()
+    page = client.post("/sources", data={"url": existing_url}, follow_redirects=False)
+    assert page.status_code == 400
+    assert "已经在源列表里" in page.text
+
+
+def test_sources_create_defaults_name_from_host(client, monkeypatch, seeded_db):
+    """显示名留空就从地址取主机名，别逼用户填两遍。"""
+    import app.web.sources as sources_mod
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", lambda url, **kwargs: [{"title": "x"}])
+    client.post(
+        "/sources", data={"url": "https://www.qbitai.com/feed"}, follow_redirects=False
+    )
+    with session_scope() as session:
+        from app.models import Source
+
+        added = session.execute(
+            select(Source).where(Source.url == "https://www.qbitai.com/feed")
+        ).scalar_one()
+        assert added.name == "www.qbitai.com"
+
+
+def test_sources_toggle_and_rename(client, seeded_db):
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+
+    page = client.post(f"/sources/{source_id}/toggle", follow_redirects=False)
+    assert page.status_code == 200
+    with session_scope() as session:
+        from app.models import Source
+
+        assert session.get(Source, source_id).enabled == 0
+
+    page = client.post(f"/sources/{source_id}/rename", data={"name": "改过的名字"}, follow_redirects=False)
+    assert page.status_code == 200
+    with session_scope() as session:
+        from app.models import Source
+
+        assert session.get(Source, source_id).name == "改过的名字"
+
+    # 改名不接受空名
+    page = client.post(f"/sources/{source_id}/rename", data={"name": "  "}, follow_redirects=False)
+    assert page.status_code == 400
+
+
+def test_sources_delete_keeps_articles(client, seeded_db):
+    """删源不删文章：译文已经生成，历史链接不该因此失效。"""
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+        make_article(session, title="源被删也要能读", link="https://example.com/keep-after-delete",
+                     source_id=source_id)
+
+    page = client.post(f"/sources/{source_id}/delete", follow_redirects=False)
+    assert page.status_code == 200
+    assert "保留" in page.text
+
+    with session_scope() as session:
+        from app.models import Article, Source
+
+        row = session.get(Source, source_id)
+        # 软删除：行还在（deleted=1），文章与来源名都留着
+        assert row is not None
+        assert row.deleted == 1
+        assert row.enabled == 0
+        assert session.execute(
+            select(Article).where(Article.link == "https://example.com/keep-after-delete")
+        ).scalar_one() is not None
+
+
+def test_deleted_source_disappears_from_list_and_fetch(client, seeded_db):
+    """删掉的源不再出现在管理页，也不再被抓取。"""
+    from app.fetcher.pipeline import _enabled_sources
+
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+        before = session.execute(select(Source)).scalars().all()
+        assert any(s.id == source_id for s in before)
+        fetchable = [s.id for s in _enabled_sources(session)]
+
+    client.post(f"/sources/{source_id}/delete", follow_redirects=False)
+
+    page = client.get("/sources")
+    assert "测试源" not in page.text
+    with session_scope() as session:
+        after = [s.id for s in _enabled_sources(session)]
+    assert source_id in fetchable
+    assert source_id not in after
+
+
+def test_deleted_source_can_be_restored(client, seeded_db):
+    """删错了能找回来。"""
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+    client.post(f"/sources/{source_id}/delete", follow_redirects=False)
+    page = client.post(f"/sources/{source_id}/restore", follow_redirects=False)
+    assert page.status_code == 200
+    assert "已恢复" in page.text
+    with session_scope() as session:
+        from app.models import Source
+
+        row = session.get(Source, source_id)
+        assert row.deleted == 0
+        assert row.enabled == 1
+
+
+def test_deleted_source_is_not_reactivated_by_seed(settings, seeded_db):
+    """seed_sources 不会把用户删掉的源加回来（它按 url 增量，已有即跳过）。"""
+    from app.db import seed_sources
+
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+
+    client = __import__("fastapi.testclient", fromlist=["TestClient"]).TestClient(
+        __import__("app.main", fromlist=["create_app"]).create_app(settings, bootstrap=False)
+    )
+    client.post(f"/sources/{source_id}/delete", follow_redirects=False)
+
+    added = seed_sources(settings.sources)
+    with session_scope() as session:
+        from app.models import Source
+
+        rows = session.execute(select(Source).where(Source.deleted == 1)).scalars().all()
+    assert len(rows) == 1, "删掉的源不该被 seed 又加回来一条新的"
+    assert added >= 0
+
+
+def test_sources_404_for_missing(client):
+    assert client.post("/sources/999999/toggle", follow_redirects=False).status_code == 404
+    assert client.post("/sources/999999/delete", follow_redirects=False).status_code == 404
+
+
+def test_sources_probe_reports_status(client, monkeypatch, seeded_db):
+    import app.web.sources as sources_mod
+
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", lambda url, **kwargs: [{"title": "抓到一条"}])
+    page = client.post(f"/sources/{source_id}/probe", follow_redirects=False)
+    assert "正常，读到 1 条" in page.text
+
+    def boom(url, **kwargs):
+        raise RuntimeError("timeout")
+
+    monkeypatch.setattr(sources_mod, "fetch_feed", boom)
+    page = client.post(f"/sources/{source_id}/probe", follow_redirects=False)
+    assert "timeout" in page.text
+
+
+def test_sources_page_shows_output_counts(client, seeded_db):
+    """管理页要显示这个源已经产出了多少篇，避免误删有用的源。"""
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+        make_article(session, title="源的第一篇", link="https://example.com/c1", source_id=source_id)
+    page = client.get("/sources")
+    assert "已产出 1 篇" in page.text
+
+
+def test_deleting_source_keeps_article_readable(client, seeded_db):
+    """回归：删源之后，那 27 篇文章必须还能打开。
+
+    实测踩到：直接 ``session.delete(source)`` 时 SQLAlchemy 把
+    ``articles.source_id`` 置成了 NULL（没有 cascade，但关系默认会把
+    外键清空），于是文章虽然还在，详情页的「来源」全变成了「未知来源」——
+    等于把用户的历史信息抹了。改成先摘关联、再删源。
+    """
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+        make_article(session, title="删源后仍可读", link="https://example.com/keep1", source_id=source_id)
+
+    assert client.post(f"/sources/{source_id}/delete", follow_redirects=False).status_code == 200
+
+    with session_scope() as session:
+        from app.models import Article
+
+        row = session.execute(
+            select(Article).where(Article.link == "https://example.com/keep1")
+        ).scalar_one()
+        # source_id 保留：SQLAlchemy 会把它清成 NULL，那就丢了归属信息
+        assert row.source_id == source_id
+
+
+def test_source_name_kept_on_articles_after_delete(client, seeded_db):
+    """文章详情页仍能显示来源名（拼 article.source 的关系不能变成 None）。"""
+    with session_scope() as session:
+        from app.models import Source
+
+        source_id = session.execute(select(Source.id)).scalar_one()
+        make_article(session, title="来源名要留住", link="https://example.com/keep2", source_id=source_id)
+
+    client.post(f"/sources/{source_id}/delete", follow_redirects=False)
+    with session_scope() as session:
+        from app.models import Article, Source
+
+        row = session.execute(
+            select(Article).where(Article.link == "https://example.com/keep2")
+        ).scalar_one()
+        assert row.source is not None
+        assert row.source.name == "测试源"
