@@ -36,6 +36,8 @@ settings_router = APIRouter()
 
 SETTINGS_FILENAME = "llm_settings.json"
 USAGE_FILENAME = "llm_usage.jsonl"
+# 日志分页：每页条数
+LOG_PAGE_SIZE = 10
 
 # 主流厂商预设：选一个就把 base/model 填好，key 自己粘。
 # 只列「OpenAI 兼容」或已知路径的；base 都能在页面上再改。
@@ -208,35 +210,154 @@ def read_usage(settings: Settings, *, limit: int = 400) -> list[dict[str, Any]]:
             out.append(row)
     return out
 
+def _charged(row: dict[str, Any]) -> int:
+    """这条调用的「计费口径」token 数。
+
+    为什么不能直接用网关给的 ``total_tokens``：实测 ag/gemini 这条链路报的
+    ``total = prompt + completion``，**不含 thinking**。一次改写调用 thought 用了
+    2045、output 只有 19 —— 按网关的 total 算就是 4222，但真实消耗是
+    4203 + 19 + (2045-19) ≈ 6248。直接展示网关的 total 会**少算一半**，
+    恰恰把最贵的那部分藏起来了。
+
+    口径（避免重复计算）：
+      · 缓存命中的 token 是输入的子集，且更便宜 —— 从输入里扣掉，不额外加；
+      · 思考 token 与输出有重叠（部分网关把它算进 output）——
+        只补 ``思考 - 输出`` 的差额。
+    网关没报任何 token 时返回 0，不猜。
+    """
+    inp = int(row.get("input_tokens") or 0)
+    out = int(row.get("output_tokens") or 0)
+    cached = int(row.get("cached_tokens") or 0)
+    reason = int(row.get("reasoning_tokens") or 0)
+    if not (inp or out or cached or reason):
+        return 0
+    cached = min(cached, inp)          # 缓存不可能超过输入
+    return inp - cached + out + max(0, reason - out)
+
 
 def usage_summary(rows: list[dict[str, Any]]) -> dict[str, Any]:
-    """按天 + 最近一小时汇总，够看趋势就够。"""
-    by_day: dict[str, dict[str, int]] = {}
+    """按天 + 明细分项汇总，够看清 token 消耗在哪。"""
+    fields = ("input_tokens", "output_tokens", "cached_tokens", "reasoning_tokens",
+              "total_tokens", "charged_tokens")
+    by_day: dict[str, dict[str, Any]] = {}
     for row in rows:
         day = str(row.get("at", ""))[:10]
-        bucket = by_day.setdefault(day, {"calls": 0, "ok": 0, "fail": 0, "tokens": 0})
+        bucket = by_day.setdefault(
+            day, {"calls": 0, "ok": 0, "fail": 0, **dict.fromkeys(fields, 0)}
+        )
         bucket["calls"] += 1
-        if row.get("ok"):
-            bucket["ok"] += 1
-        else:
-            bucket["fail"] += 1
-        bucket["tokens"] += int(row.get("total_tokens") or 0)
-    recent = rows[-20:][::-1]
+        bucket["ok" if row.get("ok") else "fail"] += 1
+        for field in fields[:5]:
+            bucket[field] += int(row.get(field) or 0)
+        bucket["charged_tokens"] += _charged(row)
+    totals = {
+        "calls": sum(b["calls"] for b in by_day.values()),
+        **{f: sum(b[f] for b in by_day.values()) for f in fields},
+    }
+    totals["ok"] = sum(b["ok"] for b in by_day.values())
+    totals["fail"] = sum(b["fail"] for b in by_day.values())
+    # 缓存命中率：输入里有多少是命中缓存的（便宜的那部分）
+    totals["cache_hit_rate"] = (
+        round(100 * totals["cached_tokens"] / totals["input_tokens"], 1)
+        if totals["input_tokens"] else 0.0
+    )
     return {
         "days": sorted(by_day.items(), reverse=True)[:14],
-        "total_calls": sum(b["calls"] for b in by_day.values()),
-        "total_tokens": sum(b["tokens"] for b in by_day.values()),
-        "recent": recent,
+        "totals": totals,
+        "total_calls": totals["calls"],
+        "total_tokens": totals["charged_tokens"],
+        "recent": rows[-20:][::-1],
     }
 
 
-# ── 页面 ───────────────────────────────────────────────────────────────
+def record_llm_call(settings: Settings, *, model: str, ok: bool,
+                    prompt_chars: int, reply_chars: int,
+                    usage: dict[str, int] | None = None,
+                    ms: int = 0, error: str = "") -> None:
+    """给真正的 LLM 调用记一笔（由 app.ai.client 延迟导入调用）。
+
+    抓取/处理任务的调用也走这里，所以设置页上的用量是**真实消耗**，不只是点
+    「测试连接」那几下。token 按 input/output/cached/reasoning 分项记：笼统只记
+    一个 total 是看不出消耗在哪儿的 —— 输入涨通常是提示词变长了，输出涨是模型
+    话多，缓存命中低说明白白重复喂了同样的内容。
+    """
+    numbers = usage or {}
+    event: dict[str, Any] = {
+        "kind": "job",
+        "model": model,
+        "ok": ok,
+        "ms": ms,
+        "prompt_chars": prompt_chars,
+        "reply_chars": reply_chars,
+        "input_tokens": int(numbers.get("input") or 0),
+        "output_tokens": int(numbers.get("output") or 0),
+        "cached_tokens": int(numbers.get("cached") or 0),
+        "reasoning_tokens": int(numbers.get("reasoning") or 0),
+        "total_tokens": int(numbers.get("total") or 0),
+    }
+    if error:
+        event["error"] = error[:200]
+    record_usage(settings, event)
 
 
-def _ctx_for_settings(request: Request, *, notice: dict[str, str] | None = None,
-                      result: dict[str, Any] | None = None, status: int = 200) -> HTMLResponse:
+def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any]:
+    """真的发一次请求测连通性，并把用量（含 token 明细）记一条。"""
+    started = time.time()
+    prompt = PROBE_PROMPT
+    client = LLMClient(
+        base,
+        key,
+        model,
+        timeout=60.0,
+        retries=0,
+        temperature=0.3,
+        extra_headers=settings.llm.extra_headers,
+        usage_sink=lambda **kw: record_llm_call(settings, **kw),
+    )
+    try:
+        text = client.chat(prompt)
+    except LLMError as exc:
+        elapsed = int((time.time() - started) * 1000)
+        record_usage(settings, {
+            "kind": "probe", "model": model, "base": base, "ok": False,
+            "error": str(exc)[:300], "ms": elapsed, "prompt_chars": len(prompt),
+        })
+        return {"ok": False, "error": str(exc)[:300], "ms": elapsed}
+    finally:
+        client.close()
+    return {
+        "ok": True,
+        "reply": text.strip()[:120],
+        "ms": int((time.time() - started) * 1000),
+        "usage": dict(client.last_usage),
+    }
+
+
+async def _read_form(request: Request) -> dict[str, str]:
+    """解析 urlencoded 表单。
+
+    自己解而不是用 ``request.form`` / ``Form(...)``：两者都依赖未安装的
+    python-multipart，缺依赖时抛异常被 except 吞掉，结果是**静默收到空表单**。
+    """
+    from urllib.parse import parse_qs
+
+    raw = (await request.body()).decode("utf-8", "replace")
+    parsed = parse_qs(raw, keep_blank_values=True)
+    return {key: values[0] for key, values in parsed.items() if values}
+
+
+def _page(request: Request, *, notice: dict[str, str] | None = None,
+          result: dict[str, Any] | None = None, log_page: int = 1,
+          status: int = 200) -> HTMLResponse:
     settings: Settings | None = getattr(request.app.state, "settings", None)
     rows = read_usage(settings) if settings else []
+    summary = usage_summary(rows)
+    # 日志分页：每页 10 条。之前的实现把最近 20 条全铺出来，条目一多就变成一堵墙。
+    per_page = LOG_PAGE_SIZE
+    total_pages = max(1, -(-len(rows) // per_page))
+    log_page = max(1, min(log_page, total_pages))
+    window = rows[(log_page - 1) * per_page : log_page * per_page][::-1]
+    stored = load_stored(settings) if settings else {}
     return templates.TemplateResponse(
         request,
         "settings.html",
@@ -246,13 +367,22 @@ def _ctx_for_settings(request: Request, *, notice: dict[str, str] | None = None,
             notice=notice or {},
             result=result or {},
             presets=PROVIDER_PRESETS,
-            usage=usage_summary(rows),
+            usage=summary,
+            log_rows=window,
+            log_page=log_page,
+            log_pages=total_pages,
+            log_total=len(rows),
+            # 「输入过的 key 自动保存」：页面拿到已存的明文 key（只在这一处出现，
+            # 且只在本机 127.0.0.1 服务里），渲染成 value= 由 JS 填进输入框，
+            # 默认仍是 password 类型 + 掩码显示。
+            stored_key=stored.get("api_key", "") if settings else "",
             current={
                 "api_base": settings.llm.api_base if settings else "",
                 "api_key_masked": _mask(settings.llm.api_key) if settings else "",
                 "has_key": bool(settings and settings.llm.api_key),
                 "model": settings.llm.model if settings else "",
                 "fallback_models": ",".join(settings.llm.fallback_models or []) if settings else "",
+                "saved_at": stored.get("saved_at", ""),
             },
         ),
         status_code=status,
@@ -260,48 +390,18 @@ def _ctx_for_settings(request: Request, *, notice: dict[str, str] | None = None,
 
 
 @settings_router.get("/settings", response_class=HTMLResponse)
-def settings_page(request: Request) -> HTMLResponse:
+def settings_page(request: Request, log_page: int = 1) -> HTMLResponse:
     """模型设置页。默认显示当前正在用的配置。"""
-    return _ctx_for_settings(request)
-
-
-def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any]:
-    """真的发一次请求测连通性，并把用量记一条。"""
-    started = time.time()
-    event: dict[str, Any] = {"model": model, "base": base, "kind": "probe"}
-    client = LLMClient(
-        base,
-        key,
-        model,
-        timeout=30.0,
-        retries=0,
-        temperature=0.3,
-        extra_headers=settings.llm.extra_headers,
-    )
-    try:
-        text = client.chat(PROBE_PROMPT)
-    except LLMError as exc:
-        event.update({"ok": False, "error": str(exc)[:300], "ms": int((time.time() - started) * 1000)})
-        record_usage(settings, event)
-        return {"ok": False, "error": str(exc)[:300], "ms": event["ms"]}
-    finally:
-        client.close()
-    event.update({"ok": True, "ms": int((time.time() - started) * 1000), "reply": text.strip()[:120]})
-    record_usage(settings, event)
-    return {"ok": True, "reply": text.strip()[:120], "ms": event["ms"]}
+    return _page(request, log_page=log_page)
 
 
 @settings_router.post("/settings", response_class=HTMLResponse)
 async def settings_save(request: Request) -> HTMLResponse:
-    """保存模型配置。就地生效，下一个任务就用新的，不用重启。"""
+    """保存模型配置。测通才存，存完就地生效，不用重启。"""
     settings: Settings | None = getattr(request.app.state, "settings", None)
     if settings is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
-    from urllib.parse import parse_qs
-
-    raw = (await request.body()).decode("utf-8", "replace")
-    form = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items() if v}
-
+    form = await _read_form(request)
     base = (form.get("api_base") or "").strip().rstrip("/")
     model = (form.get("model") or "").strip()
     new_key = (form.get("api_key") or "").strip()
@@ -315,21 +415,19 @@ async def settings_save(request: Request) -> HTMLResponse:
     if not model:
         problems.append("请填写模型名")
     if problems:
-        return _ctx_for_settings(
+        return _page(
             request, notice={"kind": "error", "text": "；".join(problems)}, status=400
         )
 
-    # key 留空 = 沿用当前的（页面上只显示掩码，不回显明文）
     key = new_key or settings.llm.api_key
     probe = _probe(settings, base, key, model)
     if not probe["ok"]:
-        return _ctx_for_settings(
+        return _page(
             request,
             notice={"kind": "error", "text": f"测试没通过，没有保存：{probe['error']}"},
             result=probe,
             status=400,
         )
-
     stored = {
         "api_base": base,
         "api_key": key,
@@ -339,7 +437,7 @@ async def settings_save(request: Request) -> HTMLResponse:
     }
     save_stored(settings, stored)
     apply_stored(request.app.state, stored)
-    return _ctx_for_settings(
+    return _page(
         request,
         notice={"kind": "ok", "text": f"已保存并生效：{model}（测试通过，{probe['ms']}ms）"},
         result=probe,
@@ -348,51 +446,23 @@ async def settings_save(request: Request) -> HTMLResponse:
 
 @settings_router.post("/settings/test", response_class=HTMLResponse)
 async def settings_test(request: Request) -> HTMLResponse:
-    """只测不存：填完先点「测试连接」，通了再保存。"""
+    """只测不存：填完先测连通性，通了再保存。"""
     settings: Settings | None = getattr(request.app.state, "settings", None)
     if settings is None:
         raise HTTPException(status_code=500, detail="服务未初始化")
-    from urllib.parse import parse_qs
-
-    raw = (await request.body()).decode("utf-8", "replace")
-    form = {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items() if v}
+    form = await _read_form(request)
     base = (form.get("api_base") or "").strip().rstrip("/")
     model = (form.get("model") or "").strip()
     key = (form.get("api_key") or "").strip() or settings.llm.api_key
     if not base or not model:
-        return _ctx_for_settings(
+        return _page(
             request, notice={"kind": "error", "text": "请先填写 API Base URL 与模型名"}, status=400
         )
     probe = _probe(settings, base, key, model)
     if probe["ok"]:
-        return _ctx_for_settings(
-            request,
-            notice={"kind": "ok", "text": f"连接正常（{probe['ms']}ms）"},
-            result=probe,
+        return _page(
+            request, notice={"kind": "ok", "text": f"连接正常（{probe['ms']}ms）"}, result=probe
         )
-    return _ctx_for_settings(
+    return _page(
         request, notice={"kind": "error", "text": f"连接失败：{probe['error']}"}, result=probe, status=400
     )
-
-def record_llm_call(settings: Settings, *, model: str, ok: bool,
-                    prompt_chars: int, reply_chars: int,
-                    ms: int = 0, total_tokens: int | None = None,
-                    error: str = "") -> None:
-    """给真正的 LLM 调用记一笔（由 app.ai.client 延迟导入调用）。
-
-    抓取/处理任务的调用也走这里，所以设置页上的用量是**真实消耗**，
-    不只是点「测试连接」那几下。
-    """
-    event: dict[str, Any] = {
-        "kind": "job",
-        "model": model,
-        "ok": ok,
-        "ms": ms,
-        "prompt_chars": prompt_chars,
-        "reply_chars": reply_chars,
-    }
-    if total_tokens is not None:
-        event["total_tokens"] = total_tokens
-    if error:
-        event["error"] = error[:200]
-    record_usage(settings, event)

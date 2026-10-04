@@ -18,13 +18,17 @@
   <style>
     :root {
       --bg:#f6f7f9; --surface:#ffffff; --line:#e5e7eb; --line-soft:#f0f1f3;
-      --text:#111827; --muted:#6b7280; --faint:#9ca3af;
+      /* --faint 是「辅助信息」色（时间、来源域名、字段说明）。原来用 #9ca3af，
+         在 #f6f7f9 上对比度只有 2.4:1，远低于小字号可读的 4.5:1 —— 看着「淡雅」，
+         实际是看不清。压到 #6f7783（4.2:1）以上，层级靠字号/字重拉开而不是靠
+         把字调淡到读不出来。 */
+      --text:#111827; --muted:#55606e; --faint:#69727f;
       --accent:#2563eb; --accent-soft:#eff6ff; --chip:#f3f4f6; --chip-text:#4b5563;
       --shadow:0 1px 2px rgba(16,24,40,.04), 0 1px 3px rgba(16,24,40,.06);
     }
     .dark {
       --bg:#0b0d10; --surface:#14171c; --line:#242a33; --line-soft:#1c2027;
-      --text:#e8eaed; --muted:#9aa3af; --faint:#6b7280;
+      --text:#e8eaed; --muted:#9aa3af; --faint:#7d8794;
       --accent:#60a5fa; --accent-soft:#16233a; --chip:#1e232b; --chip-text:#c3c9d1;
       --shadow:none;
     }
@@ -44,16 +48,27 @@
     .wrap.wide { max-width:1400px; }
     .hd { position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent);
           backdrop-filter:saturate(1.6) blur(10px); border-bottom:1px solid var(--line); }
-    .hd-in { display:flex; align-items:center; gap:20px; height:56px; }
-    .brand { font-weight:700; font-size:16px; letter-spacing:-.2px; white-space:nowrap; flex:none; }
+    /* 头部是四段：品牌 / 导航 / 搜索 / 工具。
+       原来的写法 `.nav{flex:none}` + `.sp{flex:1 1 auto}` 里，搜索框是固定
+       width:250px 的子元素，而父级被挤窄后子元素**溢出**，于是搜索框压在
+       导航上（实测把「RSS」压成「RS」）。现在搜索框改成可伸缩 + min-width:0，
+       窄了就自己变窄，永远不会溢出到导航上。 */
+    .hd-in { display:flex; align-items:center; gap:clamp(14px,1.8vw,24px); height:58px; }
+    .brand { font-weight:700; font-size:16px; letter-spacing:-.2px; white-space:nowrap; flex:0 0 auto; }
     .brand em { font-style:normal; color:var(--accent); }
-    .nav { display:flex; gap:18px; font-size:13.5px; color:var(--muted); flex:none; white-space:nowrap; }
+    .nav { display:flex; gap:clamp(12px,1.4vw,20px); font-size:13.5px; color:var(--muted);
+           flex:0 1 auto; min-width:0; white-space:nowrap; }
+    .nav a { flex:0 0 auto; }
     .nav a:hover { color:var(--text); }
     .nav .on { color:var(--text); font-weight:600; }
-    .sp { margin-left:auto; display:flex; align-items:center; gap:8px; min-width:0; flex:1 1 auto; justify-content:flex-end; }
-    .ico { width:32px; height:32px; display:grid; place-items:center; border:1px solid var(--line);
-           border-radius:8px; background:var(--surface); color:var(--muted); cursor:pointer; font-size:14px; }
-    .ico:hover { color:var(--text); }
+    .sp { margin-left:auto; display:flex; align-items:center; gap:10px;
+          flex:1 1 260px; min-width:0; max-width:400px; justify-content:flex-end; }
+    .tools { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
+    .ico { width:32px; height:32px; flex:0 0 auto; display:grid; place-items:center;
+           border:1px solid var(--line); border-radius:9px; background:var(--surface);
+           color:var(--muted); cursor:pointer; font-size:14px;
+           transition:color .15s, border-color .15s; }
+    .ico:hover { color:var(--accent); border-color:var(--accent); }
     .topics { display:flex; flex-wrap:wrap; align-items:center; gap:8px; padding:16px 0 4px; font-size:12.5px; color:var(--faint); }
     .chip { background:var(--chip); color:var(--chip-text); border-radius:999px; padding:4px 11px; font-size:12.5px; }
     .lead { padding:14px 0 4px; }
@@ -215,11 +230,29 @@
     .dg-tip { margin:12px 2px 0; font-size:11.5px; line-height:1.6; color:var(--faint); text-align:center; }
 
     /* 窄屏收缩顺序：搜索框 → RSS → 导航 */
-    @media (max-width:1080px) { .hd-in { gap:14px; } .nav { gap:13px; } }
-    @media (max-width:960px) { .nav a[href="/rss"] { display:none; } }
-    @media (max-width:820px) { .brand { font-size:0; }
-      .brand em { font-size:16px; } .search { min-width:120px; } }
-    @media (max-width:680px) { .nav { display:none; } .hd-in { gap:10px; } }
+    /* 按重要性递减地隐藏，而不是等放不下了一刀切：RSS 最先让位，然后是
+       收藏/信源，最后才整条导航。 */
+    @media (max-width:1180px) { .nav a[href="/rss"] { display:none; } }
+    @media (max-width:1040px) { .nav a[href="/saved"] { display:none; } }
+    @media (max-width:920px)  { .nav a[href="/sources"] { display:none; } }
+    @media (max-width:840px)  { .nav a[href="/archive"] { display:none; } }
+    @media (max-width:820px)  { .brand { font-size:0; } .brand em { font-size:16px; } }
+    @media (max-width:760px)  { .sp { max-width:none; flex-basis:170px; } }
+    /* 窄屏：导航整条让位，但搜索必须留着（手机上的主要入口）。
+       语言切换先收进「⋯」那种次要操作 —— 它有 3 个按钮，实测把搜索框挤到 65px，
+       等于没法用。留一个单字按钮即可切换。 */
+    @media (max-width:680px) {
+      .nav { display:none; }
+      .hd-in { gap:10px; }
+      .sp { flex:1 1 auto; }
+      .lang button { padding:5px 8px; font-size:12.5px; }
+      .lang button[data-lang="both"] { display:none; }
+    }
+    @media (max-width:460px) {
+      .wrap { padding:0 14px; }
+      .lang button { padding:5px 6px; font-size:12px; }
+      .ico { width:30px; height:30px; border-radius:8px; }
+    }
 
     .pager { display:flex; justify-content:center; align-items:center; gap:8px; padding:20px 0 10px; font-size:13px; }
     .pager a, .pager span { border:1px solid var(--line); background:var(--surface); border-radius:8px;
@@ -229,7 +262,8 @@
     .ft { border-top:1px solid var(--line); color:var(--faint); font-size:12px; padding:22px 0 34px; }
 
     /* ── 搜索框 ────────────────────────────────────────────── */
-    .search { display:flex; align-items:center; gap:7px; width:250px; padding:6px 10px;
+    .search { display:flex; align-items:center; gap:7px; flex:1 1 auto; min-width:0;
+              max-width:340px; padding:7px 11px;
               background:var(--surface); border:1px solid var(--line); border-radius:999px; }
     .search:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
     .s-ico { color:var(--faint); font-size:14px; }
@@ -240,7 +274,6 @@
              border-radius:4px; padding:0 4px; font-family:ui-monospace,monospace; }
     .s-clear { color:var(--faint); font-size:16px; line-height:1; padding:0 2px; }
     .s-clear:hover { color:var(--text); }
-    @media (max-width:760px) { .search { width:150px; } }
 
     /* ── 中英双语 ──────────────────────────────────────────── */
     .zh, .en { display:block; }
@@ -365,7 +398,24 @@
     /* 正文字号与行距对齐参考站 aihot.news 的 .prose（18px / 1.8 / 段距 1.2em），
        中文正文再补一点点字距，不然整段看着比原站松 */
     .prose p { margin:0 0 1.2em; font-size:18px; line-height:1.8; letter-spacing:.012em; color:var(--text); }
-    .prose h3 { margin:1.8em 0 .7em; font-size:1.1em; font-weight:650; line-height:1.4; color:var(--text); }
+    /* 段落小标题：给一条横幅底纹，让读者一眼看出「这里是新的一段」。
+       之前只有一个 <h3> 裸着，长文里段落感很弱。渐变+左侧色条，纯 CSS 无图片。 */
+    .prose h3 { position:relative; margin:2.2em 0 .9em; padding:.62em 1em .62em 1.15em;
+               font-size:1.06em; font-weight:650; line-height:1.45; color:var(--text);
+               border-radius:10px;
+               background:linear-gradient(100deg, var(--accent-soft) 0%,
+                           color-mix(in srgb, var(--accent-soft) 35%, transparent) 62%,
+                           transparent 100%);
+               box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent); }
+    .prose h3::before { content:""; position:absolute; left:0; top:18%; bottom:18%; width:3px;
+                        border-radius:3px; background:var(--accent); opacity:.75; }
+    .prose h3::after { content:""; position:absolute; right:.7em; top:50%; width:16px; height:1px;
+                       background:var(--accent); opacity:.3; transform:translateY(-50%); }
+    /* 目录里的每一条也带同样的标记，读者点之前就知道点下去是什么 */
+    .toc a { position:relative; padding:6px 0 6px 16px; border-radius:6px; }
+    .toc a::before { content:""; position:absolute; left:0; top:50%; transform:translateY(-50%);
+                      width:5px; height:5px; border-radius:50%; background:var(--accent); opacity:.45; }
+    .toc a:hover::before { opacity:1; }
     /* 正文内联配图：原站就是把图夹在段落之间，这里保持同样的节奏。
        宽度按原图、居中排（参考站 .prose img 的 margin-inline:auto）——
        硬拉满整栏的话，一张竖版梗图能占掉三屏 */
@@ -432,8 +482,10 @@
       <button type="button" data-lang="en" title="English only">EN</button>
       <button type="button" data-lang="both" title="中文在上，英文在下">双语</button>
     </div>
-    <button class="ico" id="theme" title="切换深浅色">◐</button>
-    <a class="ico" href="/api/health" title="状态">⋯</a>
+    <div class="tools">
+      <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
+      <a class="ico" href="/api/health" title="状态" aria-label="服务状态">⋯</a>
+    </div>
   </div>
 </header>
 

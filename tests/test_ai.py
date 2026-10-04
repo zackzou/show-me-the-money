@@ -1412,3 +1412,64 @@ def test_chat_format_error_is_not_retried_single_model():
         assert client.models == ["test-model"]
     finally:
         client.close()
+
+
+def test_backfill_translations_also_builds_sections(seeded_db, settings: Settings):
+    """回归：补译出来的正文必须同时建好章节结构。
+
+    早先只有 process_article（新入库）排版，补译这条路不排 —— 结果所有补出来的
+    译文正文里一个标题都没有，段落横幅与本文目录永远不会出现。
+    """
+    import httpx
+
+    body = "\n\n".join(f"This is English body paragraph number {i} here." for i in range(8))
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if "用中文重新写成一篇中国读者能顺畅读完的文章" in prompt:
+            # 长度要落在 0.25~1.3 的合格区间，否则会被长度校验拒掉
+            out = (
+                "## 背景\n\n这是第一段中文内容，长度足够通过长度门槛校验，不会被误判成压缩摘要。\n\n"
+                "这是第二段中文内容，同样足够长，读者能看到完整的信息。\n\n"
+                "## 进展\n\n这是第三段中文内容，交代了后续的进展与关键数字。\n\n"
+                "这是第四段中文内容，收尾说明整体影响与限制条件。"
+            )
+        elif "纽约时报" in prompt and "责任编辑" in prompt:
+            out = (
+                "## 背景\n\n这是第一段中文内容，长度足够通过长度门槛校验，不会被误判。\n\n"
+                "这是第二段中文内容，同样足够长，读者能看到完整的信息。\n\n"
+                "## 进展\n\n这是第三段中文内容，交代了后续的进展与关键数字。\n\n"
+                "这是第四段中文内容，收尾说明整体影响与限制条件。"
+            )
+        elif "英文标题" in prompt:
+            out = "外骨骼时代的黎明"
+        else:
+            out = "外骨骼时代开启"
+        return httpx.Response(200, json={"choices": [{"message": {"content": out}}]})
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="The dawn of the age of the exoskeleton",
+            status="processed",
+            relevance=1,
+            content_full=body,
+            digest="Mountain rescue crews hike with powered exoskeletons in the wild.",
+        )
+        article_id = article.id
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            backfill_translations(session, client, settings, limit=5)
+    finally:
+        client.close()
+
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        assert stored.content_zh, "正文译文应该补上"
+        assert stored.body_sections_zh, "补译时也要建章节结构"
+        import json
+
+        sections = json.loads(stored.body_sections_zh)
+        assert [s["h"] for s in sections] == ["背景", "进展"]

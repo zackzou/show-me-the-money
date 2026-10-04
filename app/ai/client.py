@@ -109,7 +109,7 @@ def _content_from_payload(data: Any, *, strip: bool = True) -> str:
     return ""
 
 
-def parse_sse(body: str) -> str:
+def parse_sse(body: str, *, with_usage: bool = False) -> Any:
     """把 SSE 流里的文本增量拼成完整回复。
 
     兼容两种流：OpenAI Chat 的 ``choices[].delta.content``，以及 Responses API 的
@@ -119,6 +119,7 @@ def parse_sse(body: str) -> str:
     """
     deltas: list[str] = []
     finals: list[str] = []
+    usage = {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
     for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line.startswith("data:"):
@@ -150,17 +151,83 @@ def parse_sse(body: str) -> str:
             continue
         if event == "response.completed":
             response = data.get("response")
-            text = _text_from_response_items(response.get("output") if isinstance(response, dict) else None)
-            if text:
-                finals.append(text)
+            if isinstance(response, dict):
+                text = _text_from_response_items(response.get("output"))
+                if text:
+                    finals.append(text)
+                found = parse_usage(response)
+                if found["total"]:
+                    usage = found
             continue
         if isinstance(event, str) and event.startswith("response."):
             # 其余 Responses 事件（reasoning 摘要增量等）不是回答正文
             continue
+        if isinstance(data.get("usage"), dict):
+            found = parse_usage(data)
+            if found["total"]:
+                usage = found
         text = _content_from_payload(data, strip=False)
         if text:
             deltas.append(text)
-    return ("".join(deltas) if deltas else "\n".join(finals)).strip()
+    result = "".join(deltas) if deltas else "\n".join(finals).strip()
+    return (result, usage) if with_usage else result
+
+
+# ── token 用量：各网关字段名不统一，统一归一 ────────────────────────────────
+# OpenAI 风格叫 prompt_tokens/completion_tokens，Gemini 直连风格叫
+# input_tokens/output_tokens / cached_content_token_count，
+# 还有的把「思考 token」单列。设置页要展示真实消耗，就都得认。
+def _int_of(source: Any, *names: str) -> int:
+    if not isinstance(source, dict):
+        return 0
+    for name in names:
+        value = source.get(name)
+        if isinstance(value, bool):
+            continue
+        if isinstance(value, (int, float)):
+            return max(0, int(value))
+    return 0
+
+
+def parse_usage(data: Any) -> dict[str, int]:
+    """从返回体里归一出 token 用量。认不出的字段给0，不猜。
+
+    认得的键：``input``（喂进去的）、``output``（模型吐出来的）、
+    ``cached``（命中缓存、便宜的那部分）、``reasoning``（思考 token，
+    有些网关把它算在 output 之外）、``total``。
+    """
+    if not isinstance(data, dict):
+        return {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+    usage = data.get("usage")
+    if not isinstance(usage, dict):
+        # 有些网关把 usage 放在 response.completed 事件里
+        nested = data.get("response")
+        usage = nested.get("usage") if isinstance(nested, dict) else None
+    if not isinstance(usage, dict):
+        return {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+    input_tokens = _int_of(
+        usage, "prompt_tokens", "input_tokens", "inputTokens", "promptTokenCount"
+    )
+    output_tokens = _int_of(
+        usage, "completion_tokens", "output_tokens", "outputTokens", "candidatesTokenCount"
+    )
+    cached = _int_of(usage.get("prompt_tokens_details"), "cached_tokens") + _int_of(
+        usage, "cached_tokens", "cached_content_token_count", "cachedContentTokenCount"
+    )
+    reasoning = _int_of(
+        usage.get("completion_tokens_details"), "reasoning_tokens"
+    ) + _int_of(usage, "reasoning_tokens", "thoughtsTokenCount")
+    total = _int_of(usage, "total_tokens", "totalTokenCount", "totalTokenCount")
+    if not total:
+        # 思考 token 有些网关算在 output 之外，不加进去总量就对不上账单
+        total = input_tokens + output_tokens + max(0, reasoning - output_tokens)
+    return {
+        "input": input_tokens,
+        "output": output_tokens,
+        "cached": cached,
+        "reasoning": reasoning,
+        "total": total,
+    }
 
 
 class LLMClient:
@@ -188,6 +255,10 @@ class LLMClient:
         # 用量回调（可选）。设置页要显示真实消耗，就挂在这里而不是在每个
         # 业务调用点各写一遍 —— 漏一处就是用量对不上。
         self.usage_sink = usage_sink
+        # 最近一次调用的 token 用量（由 _extract 填），记到账上时带上
+        self.last_usage: dict[str, int] = {
+            "input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0,
+        }
         self.timeout = timeout
         self.retries = retries
         self.temperature = temperature
@@ -231,8 +302,9 @@ class LLMClient:
             if model != self.model and attempt > 0:
                 log.info("主模型 %s 不可用，试 %s（第 %d 次）", self.model, model, attempt + 1)
             try:
+                self.last_usage = {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
                 reply = self._chat_once(prompt, model)
-                self._record(prompt, model, ok=True, reply=reply)
+                self._record(prompt, model, ok=True, reply=reply, usage=self.last_usage)
                 return reply
             except LLMFormatError as exc:
                 self._record(prompt, model, ok=False, error=str(exc))
@@ -253,7 +325,7 @@ class LLMClient:
         raise LLMError(f"调用大模型失败：{last_error}")
 
     def _record(self, prompt: str, model: str, *, ok: bool,
-                reply: str = "", error: str = "") -> None:
+                reply: str = "", error: str = "", usage: dict[str, int] | None = None) -> None:
         """把这次调用报给用量回调。回调自己出错绝不能影响主流程。"""
         if self.usage_sink is None:
             return
@@ -264,6 +336,7 @@ class LLMClient:
                 ms=0,
                 prompt_chars=len(prompt),
                 reply_chars=len(reply),
+                usage=usage or {},
                 error=error,
             )
         except Exception as exc:  # 兜底：记账失败不能拖垮抓取
@@ -288,8 +361,9 @@ class LLMClient:
         body = response.text
         looks_like_sse = "text/event-stream" in content_type or body.lstrip()[:6] in ("event:", "data: ")
         if looks_like_sse:
-            text = parse_sse(body)
+            text, sse_usage = parse_sse(body, with_usage=True)
             if text:
+                self.last_usage = sse_usage
                 return text
             raise LLMFormatError(f"上游返回了 SSE 但解析不出内容（{self.endpoint}）：{redact(body)}")
         try:
@@ -298,6 +372,7 @@ class LLMClient:
             raise LLMFormatError(
                 f"上游返回的不是 JSON（content-type={content_type or '未知'}，{self.endpoint}）：{redact(body)}"
             ) from exc
+        self.last_usage = parse_usage(data)
         text = _content_from_payload(data)
         if not text:
             raise LLMFormatError(f"上游返回体里没有模型回复内容：{redact(body)}")

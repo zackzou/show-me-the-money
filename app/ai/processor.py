@@ -683,6 +683,17 @@ def backfill_translations(
         if translated:
             article.content_zh = translated
             stats["contents"] += 1
+            # 顺手把章节结构也建起来。
+            # 早先只在 process_article（新入库）里排版，补译这条路不排 ——
+            # 于是所有「补出来的译文」正文里一个标题都没有，读者看到的是一整片
+            # 没有层次的段落，段落横幅/本文目录也就永远不会出现。
+            if not article.body_sections_zh:
+                sections = structure_sections(
+                    client, settings.prompts, article.title_zh or article.title or "", translated
+                )
+                if sections:
+                    article.body_sections_zh = json.dumps(sections, ensure_ascii=False)
+                    stats["sections"] = stats.get("sections", 0) + 1
     session.flush()
     if any(stats[key] for key in ("titles", "digests", "contents")):
         log.info(

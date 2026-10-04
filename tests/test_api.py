@@ -1693,8 +1693,11 @@ def test_settings_page_shows_current_config(client, settings: Settings):
     assert "模型设置" in page.text
     assert settings.llm.model in page.text
     assert settings.llm.api_base in page.text
-    # 明文 key 绝不能出现在页面上
-    assert settings.llm.api_key not in page.text
+    # 默认以掩码显示：明文 key 在 value 里，但输入框是 password + 有眼睛按钮
+    assert 'type="password" name="api_key"' in page.text
+    assert 'id="k-eye"' in page.text
+    assert 'id="k-copy"' in page.text
+    assert settings.llm.api_key in page.text  # 供眼睛切换看明文
     assert 'href="/settings"' in page.text
 
 
@@ -1786,8 +1789,10 @@ def test_settings_usage_log_is_recorded(client, settings: Settings, monkeypatch,
     settings.storage.db_path = str(Path(tmp_path) / "usage" / "smtm.db")
     mod.record_usage(settings, {"kind": "probe", "model": "m", "ok": True, "ms": 7, "total_tokens": 42})
     page = client.get("/settings")
-    assert "用量记录" in page.text
-    assert "累计" in page.text
+    assert "Token 用量" in page.text
+    assert "调用日志" in page.text
+    assert "输入" in page.text
+    assert "输出" in page.text
 
 
 def test_settings_stored_config_applies_on_startup(settings: Settings):
@@ -1829,3 +1834,41 @@ def test_settings_file_ignored_by_git():
         ["git", "check-ignore", "-q", "data/llm_settings.json"], cwd=str(root)
     )
     assert out.returncode == 0, "data/llm_settings.json 必须被 .gitignore 忽略"
+
+
+def test_charged_tokens_dont_undercount_reasoning():
+    """回归：思考 token 必须计入消耗。
+
+    实测 ag/gemini 这条链路 `total = prompt + completion`，**不含 thinking**：
+    一次改写 thought 用了 2045、output 只有 19，直接展示网关的 total 会少算一半，
+    恰恰把最贵的那部分藏起来了。缓存命中则是输入的子集，要扣掉而不是叠加。
+    """
+    from app.web.settings import _charged
+
+    gemini = {"input_tokens": 4203, "output_tokens": 19, "cached_tokens": 0, "reasoning_tokens": 2045}
+    # 4203 + 19 + (2045-19) = 6248
+    assert _charged(gemini) == 6248
+
+    # 缓存命中从输入里扣；思考不超过输出时不重复计
+    openai = {"input_tokens": 1000, "output_tokens": 500, "cached_tokens": 400, "reasoning_tokens": 200}
+    assert _charged(openai) == 1000 - 400 + 500 + 0
+
+    # 缓存不可能超过输入：999 被夹到 10 → 10-10+1 = 1（不能变成负数）
+    assert _charged({"input_tokens": 10, "output_tokens": 1, "cached_tokens": 999}) == 1
+    # 网关没报任何 token 时不猜
+    assert _charged({}) == 0
+
+
+def test_usage_summary_exposes_charged_and_cache_rate():
+    from app.web.settings import usage_summary
+
+    rows = [
+        {"at": "2026-10-05 10:00:00", "ok": True, "input_tokens": 1000,
+         "output_tokens": 100, "cached_tokens": 250, "reasoning_tokens": 400},
+        {"at": "2026-10-05 11:00:00", "ok": False, "error": "429"},
+    ]
+    total = usage_summary(rows)["totals"]
+    assert total["charged_tokens"] == 1000 - 250 + 100 + 300
+    assert total["calls"] == 2
+    assert total["fail"] == 1
+    assert total["cache_hit_rate"] == 25.0
