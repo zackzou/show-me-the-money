@@ -15,6 +15,19 @@
 <script>
   // 收藏列表在浏览器本地，页面渲染时按 id 拉接口
   var ids = window.smtmSaved ? window.smtmSaved() : [];
+  function esc(text) {
+    return String(text == null ? "" : text)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+  // 与 _articles.html 的 bi() 宏同一套规则：中文优先，缺哪边用另一边顶上，
+  // 两版相同只出一个 span（否则切到英文模式时 .zh 被藏掉会变成空白）。
+  function bilingual(zh, en) {
+    zh = (zh || "").trim();
+    en = (en || "").trim();
+    if (!zh && !en) return "";
+    if (zh === en) return '<span class="same">' + esc(zh) + "</span>";
+    return '<span class="zh">' + esc(zh || en) + '</span><span class="en">' + esc(en || zh) + "</span>";
+  }
   // 收藏里可能有几天前的文章，而 /api/articles 默认只返回今天，
   // 所以逐个按 id 取详情，别用列表接口凑。
   Promise.all(
@@ -35,10 +48,11 @@
       var html = '<div class="list">';
       picked.forEach(function (a) {
         var t = (a.published_at || "").slice(5, 16).replace("T", " ");
-        html += '<article class="item"><div class="i-head"><span>' + t + "</span>"
+        html += '<article class="item"><div class="i-head"><span>' + esc(t) + "</span>"
           + '<button class="bm on" data-save="' + a.id + '">★</button></div>'
-          + '<a href="/story/' + a.id + '"><div class="t">' + a.title + "</div></a>"
-          + '<p class="d">' + (a.digest || a.summary || "") + "</p></article>";
+          + '<a href="/story/' + a.id + '"><div class="t">'
+          + bilingual(a.title_zh || a.title, a.title_en) + "</div></a>"
+          + '<p class="d">' + bilingual(a.digest_zh || a.digest || a.summary, a.digest_en) + "</p></article>";
       });
       root.innerHTML = html + "</div>";
       // 注意：不要再绑 onclick。base.html 已经用事件委托统一处理 [data-save]，

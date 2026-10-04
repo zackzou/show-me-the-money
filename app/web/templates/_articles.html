@@ -1,10 +1,16 @@
-{# 中英双语：默认只显示中文，切到「双语」时英文显示在中文下方 #}
+{# 中英双语：默认只显示中文，切到「双语」时英文显示在中文下方。
+
+   两个 span 必须**同时**存在：只输出一个 .zh 的话，切到英文模式时
+   `html[data-lang="en"] .zh { display:none }` 会把它藏掉，而没有任何东西顶上 ——
+   标题和导读直接变成空白。中文缺失时英文顶上，英文缺失时中文顶上。 #}
 {% macro bi(zh, en) %}
-  {%- if en and en|trim != zh|trim -%}
-    <span class="zh">{{ zh }}</span>
-    <span class="en">{{ en }}</span>
+  {%- set zh = (zh or '')|trim -%}
+  {%- set en = (en or '')|trim -%}
+  {%- if zh == en -%}
+    <span class="same">{{ zh }}</span>
   {%- else -%}
-    <span class="zh">{{ zh }}</span>
+    <span class="zh">{{ zh or en }}</span>
+    <span class="en">{{ en or zh }}</span>
   {%- endif -%}
 {% endmacro %}
 
@@ -36,6 +42,10 @@
         {% endif %}
         {% if item.reason %}
           <p class="why"><b>推荐理由</b>：{{ item.reason }}</p>
+        {% endif %}
+        {% if item.degraded %}
+          <p class="why pending"><b>中文版还在生成</b>：这条暂时显示的是英文原文
+            （已重试 {{ item.attempts }} 次，程序会在上游恢复后自动补齐译文）</p>
         {% endif %}
         <div class="i-foot">
           {% if item.time_full %}<span>{{ item.time_full }}</span><span>·</span>{% endif %}

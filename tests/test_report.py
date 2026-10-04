@@ -51,7 +51,8 @@ def test_generate_daily_report_filters_and_renders(seeded_db, settings: Settings
         _seed(session, title="相关的第二条", link="https://example.com/2", summary="摘要二", tags="开源")
         _seed(session, title="不相关的", link="https://example.com/3", relevance=0)
         _seed(session, title="昨天的", link="https://example.com/4", published_at=now_local() - timedelta(days=1))
-        _seed(session, title="还没处理的", link="https://example.com/5", status="pending")
+        # 还没判过相关的（relevance 为空）不进日报；判过相关、正等重试的要进
+        _seed(session, title="还没判过相关的", link="https://example.com/5", status="pending", relevance=None)
 
     with session_scope() as session:
         result = generate_daily_report(_today(), session=session, settings=settings)
@@ -147,7 +148,7 @@ def test_report_includes_degraded_articles(seeded_db, settings: Settings):
     """LLM 不可用时的降级文章也必须进日报，否则「不影响日报产出」是空话。"""
     with session_scope() as session:
         _seed(session, title="降级文章", link="https://example.com/26", summary="正文开头前 200 字", status="failed")
-        _seed(session, title="未处理文章", link="https://example.com/27", status="pending")
+        _seed(session, title="未判相关的文章", link="https://example.com/27", status="pending", relevance=None)
 
     with session_scope() as session:
         result = generate_daily_report(_today(), session=session, settings=settings)
@@ -155,7 +156,7 @@ def test_report_includes_degraded_articles(seeded_db, settings: Settings):
     assert result["article_count"] == 1
     assert result["degraded_count"] == 1
     assert "降级文章" in result["content_md"]
-    assert "未处理文章" not in result["content_md"]
+    assert "未判相关的文章" not in result["content_md"]
     assert "降级：LLM 不可用" in result["content_md"]
     assert "降级：LLM 不可用" in result["content_html"]
 
@@ -266,12 +267,12 @@ def test_report_job_warns_on_unprocessed_articles(seeded_db, settings: Settings,
 
     with session_scope() as session:
         _seed(session, title="昨天没处理完的", link="https://example.com/w1",
-              published_at=_at(days=1), status="pending")
+              published_at=_at(days=1), status="pending", relevance=None)
 
     with caplog.at_level(logging.WARNING):
         result = run_report_job(settings)
 
-    assert result["article_count"] == 0  # pending 不进日报
+    assert result["article_count"] == 0  # 还没判过相关的（relevance 为空）不进日报
     assert any("batch_size" in record.message for record in caplog.records)
 
 

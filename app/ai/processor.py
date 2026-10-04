@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import json
 import re
+from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
@@ -26,7 +27,15 @@ from app.config import PromptsConfig, Settings
 from app.fetcher.content import is_real_body
 from app.models import Article
 from app.utils.logger import get_logger
-from app.utils.text import is_chinese_text, looks_english, split_tags, strip_html, strip_markdown, truncate
+from app.utils.text import (
+    is_chinese_text,
+    looks_english,
+    now_local,
+    split_tags,
+    strip_html,
+    strip_markdown,
+    truncate,
+)
 
 _TAG_SPLIT_RE = re.compile(r"[,，、;；]")
 
@@ -126,8 +135,11 @@ def parse_translate(raw: str) -> tuple[str | None, str | None]:
 TRANSLATE_CHUNK_PARAGRAPHS = 4
 # 参与翻译的正文长度上限（与抓取时的上限对齐）
 MAX_CONTENT_CHARS = 40_000
-# 译文明显比原文短一半以上，就认为这一段没翻成功
-_TRANSLATE_MIN_RATIO = 0.4
+# 译文明显比原文短，就认为这一段没翻成功。
+# 英译中的正常密度只有 0.3~0.45（英文 1000 字符约 180 词，译成中文约 300 字）：
+# 门槛 0.4 会把完整译文也误杀 —— 实测 hy4 的整句译文只有 0.35~0.38。
+# 电报体压缩一般在 0.26 以下，0.3 能把两者分开。
+_TRANSLATE_MIN_RATIO = 0.3
 
 
 def split_paragraphs(text: str) -> list[str]:
@@ -226,7 +238,13 @@ def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
 
 
 def process_article(session: Session, article: Article, client: LLMClient, settings: Settings) -> str:
-    """处理单篇文章，返回最终 status（processed / failed）。"""
+    """处理单篇文章，返回最终 status（processed / failed）。
+
+    每次调用都记一次尝试：上游 LLM 限流会在第一个调用就抛异常，整篇降级成英文，
+    必须留下「试过几次、什么时候试的」才能在配额恢复后回来重试（见 ``retry_degraded``）。
+    """
+    article.process_attempts = (article.process_attempts or 0) + 1
+    article.process_last_at = now_local()
     topic = settings.research_topic
     # 优先用抓回来的正文做判断，摘要质量直接决定筛选与写作的质量
     body = strip_html(article.content_full) or strip_html(article.content)
@@ -244,6 +262,14 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
             article.category = None
             article.topics = None
             article.tags = None
+            # 不相关的也要存中文标题：详情页直接链接照样可访问，
+            # 中文模式顶着英文标题看着像没处理完。标题 1 次调用，
+            # 正文/导读不翻（不进日报，省成本），缺译文页面会如实说明。
+            if settings.i18n.enabled:
+                article.title_zh = translate_title_to_chinese(
+                    client, settings.prompts, article.title or ""
+                )
+                article.digest_zh = ""
             article.status = STATUS_PROCESSED
             return STATUS_PROCESSED
 
@@ -327,8 +353,10 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
         article.status = STATUS_PROCESSED
+        article.degraded_reason = None
         return STATUS_PROCESSED
     except LLMError as exc:
+        article.degraded_reason = f"LLM 不可用：{exc}"[:300]
         article.summary = _fallback_summary(article, settings.prompts.fallback_summary_chars)
         if article.digest is None:
             article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
@@ -386,7 +414,11 @@ def process_pending(
         else:
             stats["processed"] += 1
         if index % checkpoint == 0:
-            session.flush()
+            # 必须 commit 而不是 flush：flush 只是把 SQL 发出去，**写事务还开着**。
+            # 下一篇又要等一次慢速 LLM 调用（几十秒），整个这段时间 SQLite 的写锁
+            # 一直被占着，抓取任务与网页请求全部 "database is locked"。
+            # 每篇的状态互相独立，中途提交不会产生半截数据。
+            session.commit()
     session.flush()
     return stats
 
@@ -429,7 +461,12 @@ def backfill_translations(
                 | Article.title_zh.is_(None)
                 | (Article.content_zh.is_(None) & wants_content),
                 Article.content_full.isnot(None),
-                Article.relevance == 1,
+                # 不相关的也要存中文标题（详情页直接链接可访问），
+                # 但只补标题：导读本来就没有、正文不进日报，省调用。
+                or_(
+                    Article.relevance == 1,
+                    and_(Article.relevance == 0, Article.title_zh.is_(None)),
+                ),
                 Article.link.notlike("http://localhost%"),
             )
             .order_by(Article.i18n_attempts.asc(), Article.published_at.desc(), Article.id.desc())
@@ -453,8 +490,17 @@ def backfill_translations(
             if title_zh:
                 article.title_zh = title_zh
                 stats["titles"] += 1
+        if article.relevance == 0:
+            # 不相关的只存标题：导读本来就没有（标已处理，别下轮再来），
+            # 正文不进日报，不花长文翻译的钱。详情页缺译文会如实说明。
+            article.digest_zh = ""
+            continue
         if not article.digest_zh:
-            if not is_chinese_text(article.digest or ""):
+            if not (article.digest or "").strip():
+                # 压根没有导读：没有东西可翻，标成已处理，别每轮都来占名额。
+                # 否则 digest_zh 永远是 NULL，这篇每轮都被捞回来白跑一趟。
+                article.digest_zh = ""
+            elif not is_chinese_text(article.digest or ""):
                 digest_zh = translate_digest_to_chinese(client, settings.prompts, article.digest or "")
                 if digest_zh:
                     article.digest_zh = digest_zh
@@ -479,5 +525,61 @@ def backfill_translations(
             stats["digests"],
             stats["contents"],
             stats["candidates"],
+        )
+    return stats
+
+
+# 「LLM 不可用 → 整篇降级成英文」的重试策略。
+#
+# 为什么必须重试：一次 429 就会让 process_article 在第一个调用处抛异常，
+# 文章被标成 failed —— 而 process_pending 只捞 pending，于是它再也不会被处理。
+# 标题、导读、正文的中文版一个都不会有，页面上就整篇英文。
+# 翻译是「锦上添花」的设计在这里变成了「永久缺失」：说了要确保译成中文，
+# 实际是发出去就再也不管了。
+#
+# 上限是为了防止真的坏数据被无限重试；退避是为了别每 2 小时就去撞同一堵墙。
+RETRY_MAX_ATTEMPTS = 6
+RETRY_BACKOFF_MINUTES = 30
+
+
+def retry_degraded(
+    session: Session,
+    *,
+    max_attempts: int = RETRY_MAX_ATTEMPTS,
+    backoff_minutes: int = RETRY_BACKOFF_MINUTES,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """把「因 LLM 不可用而降级」的文章放回 pending，等配额恢复后重新完整处理。
+
+    只捞 ``status=failed`` 且尝试次数还没用完的：这些文章的降级原因是我们自己的
+    上游问题，不是内容本身有问题，重新处理一次就能把中文版补齐。
+    """
+    stats = {"candidates": 0, "requeued": 0, "exhausted": 0}
+    deadline = now_local() - timedelta(minutes=backoff_minutes)
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(Article.status == STATUS_FAILED)
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    stats["candidates"] = len(rows)
+    for article in rows:
+        if (article.process_attempts or 0) >= max_attempts:
+            stats["exhausted"] += 1
+            continue
+        # 刚试过就退避：上游限流通常不是一秒就恢复的
+        if article.process_last_at and article.process_last_at > deadline:
+            continue
+        article.status = "pending"
+        stats["requeued"] += 1
+    session.flush()
+    if stats["requeued"]:
+        log.info(
+            "把 %d 篇降级文章放回待处理（候选 %d 篇、已用完重试次数 %d 篇）",
+            stats["requeued"],
+            stats["candidates"],
+            stats["exhausted"],
         )
     return stats

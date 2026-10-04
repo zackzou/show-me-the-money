@@ -298,3 +298,95 @@ def test_strip_shared_openings_leaves_news_alone(seeded_db):
     with session_scope() as session:
         stats = strip_shared_openings(session)
     assert stats["articles"] == 0
+
+
+def test_strip_shared_openings_shifts_body_image_anchors(seeded_db):
+    """回归：删掉通栏开头之后，正文里配图的锚点必须跟着往上挪。
+
+    ``body_images`` 存的是「接在第 n 段之后」，段落下标一旦因为删段而改变，
+    锚点不跟着挪就会整体后移 —— 图会跑到文章末尾，或者因为下标越界被丢掉。
+    抽取阶段对「去重掉段」已经做了同样的补偿，这里是同一条规则漏了一处。
+    """
+    from app.db import session_scope
+    from app.fetcher.content import strip_shared_openings
+    from app.models import Article
+    from tests.conftest import make_article
+
+    def body(index: int) -> str:
+        return (
+            f"{INFOQ_BANNER}\n\n"
+            f"这是第 {index} 篇真正要讲的正文第一段，字符数足够不会被过滤掉。\n\n"
+            f"这是第 {index} 篇的第二段正文，字符数同样足够长。\n\n"
+            f"这是第 {index} 篇的第三段正文，字符数同样足够长。"
+        )
+
+    with session_scope() as session:
+        for index in range(3):
+            make_article(
+                session,
+                title=f"带图实战案例第 {index} 篇",
+                link=f"https://example.com/imgbanner{index}",
+                source_id=1,
+                content_full=body(index),
+                # 通栏 2 段 + 正文 3 段，所以锚点 3 / 4 落在正文第 1、2 段之后
+                body_images=json.dumps(
+                    [
+                        {"i": 3, "url": f"https://example.com/{index}/a.jpg"},
+                        {"i": 4, "url": f"https://example.com/{index}/b.jpg"},
+                    ],
+                    ensure_ascii=False,
+                ),
+            )
+
+    with session_scope() as session:
+        strip_shared_openings(session)
+
+    with session_scope() as session:
+        stored = session.execute(
+            select(Article).where(Article.link == "https://example.com/imgbanner0")
+        ).scalar_one()
+        blocks = [b for b in stored.content_full.split("\n\n") if b.strip()]
+        anchors = json.loads(stored.body_images)
+
+    assert "QCon" not in stored.content_full
+    assert len(blocks) == 3
+    # 删掉 2 段通栏 → 锚点整体上移 2
+    assert [a["i"] for a in anchors] == [1, 2]
+    # 锚点必须落在有效范围内，否则详情页会把这张图整张丢掉
+    assert all(0 <= a["i"] <= len(blocks) for a in anchors)
+
+
+def test_strip_shared_openings_keeps_head_image_at_the_top(seeded_db):
+    """正文第一段之前的头图（锚点 0）删段后仍然在最上面，不该被挪成负数。"""
+    from app.db import session_scope
+    from app.fetcher.content import strip_shared_openings
+    from app.models import Article
+    from tests.conftest import make_article
+
+    with session_scope() as session:
+        for index in range(3):
+            make_article(
+                session,
+                title=f"头图案例第 {index} 篇",
+                link=f"https://example.com/headimg{index}",
+                source_id=1,
+                content_full=(
+                    f"{INFOQ_BANNER}\n\n"
+                    f"这是第 {index} 篇的正文第一段，字符数足够不会被过滤掉。\n\n"
+                    f"这是第 {index} 篇的正文第二段，字符数同样足够长。"
+                ),
+                body_images=json.dumps(
+                    [{"i": 0, "url": f"https://example.com/{index}/head.jpg"}], ensure_ascii=False
+                ),
+            )
+
+    with session_scope() as session:
+        strip_shared_openings(session)
+
+    with session_scope() as session:
+        stored = session.execute(
+            select(Article).where(Article.link == "https://example.com/headimg0")
+        ).scalar_one()
+        anchors = json.loads(stored.body_images)
+
+    assert [a["i"] for a in anchors] == [0]

@@ -23,9 +23,16 @@ from app.utils.text import now_local, split_tags, strip_markdown
 
 log = get_logger(__name__)
 
-# 进日报的状态：processed 是 LLM 处理成功，failed 是 LLM 不可用时的降级摘要。
-# 降级文章同样要出现在日报里，否则「LLM 挂了不影响日报产出」就是空话。
-STATUS_REPORTABLE = ("processed", "failed")
+# 进日报的状态：
+#   processed —— LLM 处理成功
+#   failed    —— LLM 不可用时的降级摘要
+#   pending   —— **已经判过相关、正在重排队等重试**的（上游限流恢复后会重新处理）
+#
+# 前两个的逻辑是「LLM 挂了不影响日报产出」。第三个更关键：降级文章会被放回 pending
+# 去重试（见 retry_degraded），如果 pending 不算可进日报，这些文章会在重试期间
+# 从首页和日报里**整条消失** —— 那比重试本身还糟。是否展示由 ``relevance == 1``
+# 把关：刚抓回来的新文章 relevance 是 NULL，进不来。
+STATUS_REPORTABLE = ("processed", "failed", "pending")
 
 # 覆盖写日报是「先删后插」，与另一个进程撞上时可能拿不到 SQLite 写锁
 REPORT_WRITE_ATTEMPTS = 3

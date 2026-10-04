@@ -20,8 +20,29 @@ from app.report.generator import STATUS_REPORTABLE
 # 搜索框旁边的快捷键提示
 SEARCH_HOTKEY = "/"
 
-SCOPE_META = "标题与摘要"
-SCOPE_FULL = "全文"
+# scope 是 **URL 参数值**（README 里写的就是 scope=meta|full），不是给人看的中文。
+# 早期版本把它写成了中文「标题与摘要」/「全文」，而模板链接里发的是 meta / full，
+# 两边永远对不上 —— 于是「全文」这个 tab 从来搜不到正文，高亮也永远停在「最新」。
+SCOPE_META = "meta"
+SCOPE_FULL = "full"
+
+# 界面上显示的中文名
+SCOPE_LABELS = {SCOPE_META: "标题与摘要", SCOPE_FULL: "全文"}
+# 兼容早期版本传进来的中文值，避免老链接直接掉回默认
+_LEGACY_SCOPES = {"标题与摘要": SCOPE_META, "全文": SCOPE_FULL}
+
+
+def normalize_scope(raw: object) -> str:
+    """把外部传入的 scope 归一成 ``meta`` / ``full``，认不出来就退回 ``meta``。
+
+    这个函数是「把外部输入变回可信值」的那一层，所以它必须是**全函数**：
+    任何输入都要有返回值，不能因为类型不对就抛异常 —— 抛出去就是一个 500，
+    而正确的行为是「认不出来就当默认」。
+    """
+    value = raw.strip() if isinstance(raw, str) else ""
+    if value in SCOPE_LABELS:
+        return value
+    return _LEGACY_SCOPES.get(value, SCOPE_META)
 
 
 def escape_like(term: str) -> str:
@@ -104,12 +125,21 @@ def count_by_category(session: Session, term: str, *, scope: str = SCOPE_META) -
         )
     ).scalars()
     counts: dict[str, int] = {}
+    total = 0
     for category in rows:
+        total += 1
         if category:
             counts[category] = counts.get(category, 0) + 1
+    # ``_all`` 是「全部」tab 上的数字；模板里 tabs() 就是按这个键取的
+    counts["_all"] = total
     return counts
 
 
 def search_metadata() -> dict[str, Any]:
     """给模板用的搜索页元信息。"""
-    return {"scope_meta": SCOPE_META, "scope_full": SCOPE_FULL, "hotkey": SEARCH_HOTKEY}
+    return {
+        "scope_meta": SCOPE_META,
+        "scope_full": SCOPE_FULL,
+        "scope_labels": SCOPE_LABELS,
+        "hotkey": SEARCH_HOTKEY,
+    }

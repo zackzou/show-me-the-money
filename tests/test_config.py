@@ -82,3 +82,31 @@ def test_sources_sync_adds_new_without_touching_existing(seeded_db, settings: Se
         by_url = {row.url: row.enabled for row in session.execute(select(Source)).scalars()}
     assert by_url["https://example.com/new"] == 1
     assert by_url["https://example.com/feed"] == 0  # 仍保持用户关掉的状态
+
+
+# ── LLM_EXTRA_HEADERS ───────────────────────────────────────────────────────
+# 中转网关常靠请求头开关行为：9router 默认会往 system 里注入一段
+# 「回答要尽量简短」的指令，与「完整翻译」直接打架，译文会随机变电报体。
+# 关掉它靠的是 x-9router-token-saver: off 这个头。
+
+
+def test_llm_extra_headers_default_is_empty():
+    assert load_settings(env=VALID, config_dir=CONFIG_DIR).llm.extra_headers == {}
+
+
+def test_llm_extra_headers_parsed_from_env():
+    env = {**VALID, "LLM_EXTRA_HEADERS": '{"x-9router-token-saver": "off"}'}
+    settings = load_settings(env=env, config_dir=CONFIG_DIR)
+    assert settings.llm.extra_headers == {"x-9router-token-saver": "off"}
+
+
+@pytest.mark.parametrize("bad", ['{"a": ', "not json", '["a", "b"]', '"just a string"'])
+def test_llm_extra_headers_rejects_bad_json(bad: str):
+    """写错了要当场报错，而不是静默忽略 —— 静默忽略会让「我明明关掉了」变成假象。"""
+    with pytest.raises(ConfigError):
+        load_settings(env={**VALID, "LLM_EXTRA_HEADERS": bad}, config_dir=CONFIG_DIR)
+
+
+def test_llm_extra_headers_rejects_non_string_values():
+    with pytest.raises(ConfigError):
+        load_settings(env={**VALID, "LLM_EXTRA_HEADERS": '{"a": 1}'}, config_dir=CONFIG_DIR)

@@ -40,7 +40,7 @@
         <dt>本文目录</dt>
         <dd class="toc">
           {% for entry in item.toc %}
-            <a href="#sec-{{ entry.i }}">{{ entry.text }}</a>
+            <a href="#{{ entry.id }}">{{ entry.text }}</a>
           {% endfor %}
         </dd>
       </dl>
@@ -68,7 +68,7 @@
         <figure class="shot"><img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async" data-shot="{{ url }}"></figure>
       {% endfor %}
       {% for block in blocks %}
-        {% if block.heading %}<h3 id="sec-{{ block.i }}">{{ block.text }}</h3>{% else %}<p>{{ block.text }}</p>{% endif %}
+        {% if block.heading %}<h3 id="{{ block.id }}">{{ block.text }}</h3>{% else %}<p>{{ block.text }}</p>{% endif %}
         {% for url in slots[loop.index] %}
           <figure class="shot"><img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async" data-shot="{{ url }}"></figure>
         {% endfor %}
@@ -112,12 +112,13 @@
 
     {# 只有封面图、没有正文配图时才单开一个区块：图不在正文里，硬塞进去反而看不懂配的是哪一段 #}
     {% if item.images and not item.has_body_images %}
+      {% set shown = item.images[:6] %}
       <section class="sec">
         <div class="sec-t plain">文章配图</div>
         <div class="shot-grid">
-          {% for url in item.images[:6] %}
+          {% for url in shown %}
             <img src="{{ url }}" alt="{{ item.title }}" loading="lazy" decoding="async"
-                 data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ item.images|length }}">
+                 data-shot="{{ url }}" data-i="{{ loop.index0 }}" data-n="{{ shown|length }}">
           {% endfor %}
         </div>
       </section>

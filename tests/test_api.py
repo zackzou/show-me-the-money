@@ -494,9 +494,16 @@ def test_story_page_uses_wide_container_and_toc(client, settings: Settings, seed
     text = client.get(f"/story/{article_id}").text
     assert "wrap wide" in text          # 用了宽容器
     assert "本文目录" in text
-    assert 'href="#sec-0"' in text
-    assert 'id="sec-0"' in text
     assert "<h3" in text
+    # 目录锚点必须都能落到页面上真实存在的 id。
+    # 早期版本目录按原文下标生成、正文 id 又和译文撞号（两边都从 0 编号），
+    # 点目录会跳错位置甚至跳到不存在的锚点。这里锁死「锚点集合 ⊆ id 集合」。
+    import re
+
+    anchors = set(re.findall(r'href="#([^"]+)"', text))
+    ids = set(re.findall(r'id="([^"]+)"', text))
+    assert anchors, "详情页应该生成本文目录"
+    assert anchors <= ids, f"目录锚点没有对应元素：{anchors - ids}"
 
 
 def test_story_columns_are_balanced(client, seeded_db):
@@ -533,8 +540,11 @@ def test_story_body_never_renders_empty_paragraphs(client, settings: Settings, s
         assert para.strip(), "出现了空段落"
     assert "这是第一段正文" in prose
     assert "这是第二段正文" in prose
-    # 小标题应该同时出现在目录里
-    assert 'href="#sec-0"' in text
+    # 小标题应该同时出现在目录里，且锚点能落到真实 id 上
+    anchors = set(re.findall(r'href="#([^"]+)"', text))
+    ids = set(re.findall(r'id="([^"]+)"', text))
+    assert anchors, "详情页应该生成本文目录"
+    assert anchors <= ids, f"目录锚点没有对应元素：{anchors - ids}"
 
 
 def test_base_script_tags_are_balanced(client):
@@ -665,8 +675,14 @@ def test_bilingual_macro_skips_identical_english(client, settings: Settings, see
         generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
-    assert text.count('<span class="zh">An English only headline about agents</span>') == 1
+    # 中英完全相同时只出一个 span，双语模式不会看到两遍一样的话
+    assert text.count('<span class="same">An English only headline about agents</span>') == 1
+    assert text.count('<span class="same">An English only digest about agents</span>') == 1
+    # 关键：不能只输出 .zh。html[data-lang="en"] 会把 .zh 藏掉，
+    # 那样切到英文模式标题与导读会直接变成空白 —— 而页面上没有任何东西顶上。
+    assert '<span class="zh">An English only headline about agents</span>' not in text
     assert '<span class="en">An English only headline about agents</span>' not in text
+    assert '<span class="zh">An English only digest about agents</span>' not in text
     assert '<span class="en">An English only digest about agents</span>' not in text
 
 
@@ -1050,3 +1066,136 @@ def test_degraded_card_does_not_repeat_the_digest_as_reason(client, settings: Se
     text = client.get("/").text
     assert text.count(fallback) == 1
     assert "推荐理由" not in text.split(fallback)[1][:200]
+
+
+def test_degraded_card_says_the_chinese_version_is_still_coming(client, settings: Settings, seeded_db):
+    """降级文章要说明中文版还在生成，而不是默默显示英文让人以为不支持中文。"""
+    with session_scope() as session:
+        make_article(
+            session,
+            title="Capcom is preparing for a future where we create games with AI",
+            link="https://example.com/capcom",
+            digest="During a presentation on the future of RE Engine, Capcom laid out its plans.",
+            status="failed",
+            process_attempts=3,
+        )
+
+    text = client.get("/").text
+    assert "中文版还在生成" in text
+    assert "已重试 3 次" in text
+
+
+def test_requeued_article_stays_visible_while_waiting_for_retry(client, settings: Settings, seeded_db):
+    """回归：降级文章被放回 pending 去重试期间，不能从首页整条消失。
+
+    上游限流时它会被 retry_degraded 翻成 pending 等重试；如果 pending 不算
+    可展示，重试期间这条新闻就从首页和日报里不见了 —— 那比重试本身还糟。
+    """
+    with session_scope() as session:
+        make_article(
+            session,
+            title="Capcom is preparing for a future where we create games with AI",
+            link="https://example.com/requeued",
+            digest="During a presentation on the future of RE Engine, Capcom laid out its plans.",
+            status="pending",
+            relevance=1,
+            process_attempts=2,
+        )
+        # 刚抓回来、还没判过相关的：确实不该出现
+        make_article(session, title="刚抓回来的", link="https://example.com/brand-new",
+                     status="pending", relevance=None)
+
+    text = client.get("/").text
+    assert "Capcom is preparing" in text
+    assert "刚抓回来的" not in text
+    # 读者看到的是英文，就要告诉他中文版还在生成
+    assert "中文版还在生成" in text
+
+
+# ── 先过滤后分页 ────────────────────────────────────────────────────────────
+# 回归：早期是「先按数据库分页、再在应用层按分类/标签过滤」。
+# 于是总条数与页数算的是**过滤前**的数量：选了分类之后，翻到第 3 页可能
+# 一条都没有，而页码还显示有 5 页；反过来过滤后不足一页也照样出现分页条。
+
+
+def test_paginate_returns_total_and_pages_of_the_filtered_list():
+    from app.web.routes import paginate
+
+    cards = [{"i": i} for i in range(45)]
+    first, total, pages = paginate(cards, 1, 40)
+    assert (len(first), total, pages) == (40, 45, 2)
+
+    second, total, pages = paginate(cards, 2, 40)
+    assert [c["i"] for c in second] == list(range(40, 45))
+    assert (total, pages) == (45, 2)
+
+
+def test_paginate_clamps_out_of_range_page():
+    from app.web.routes import paginate
+
+    cards = [{"i": i} for i in range(3)]
+    page_cards, total, pages = paginate(cards, 99, 40)
+    assert (len(page_cards), total, pages) == (3, 3, 1)
+
+    page_cards, total, pages = paginate(cards, 0, 40)
+    assert (len(page_cards), total, pages) == (3, 3, 1)
+
+
+def test_paginate_empty_list_is_one_page():
+    from app.web.routes import paginate
+
+    assert paginate([], 1, 40) == ([], 0, 1)
+
+
+def test_home_pager_counts_the_filtered_set(client, seeded_db):
+    """分类过滤后不足一页，就不该出现分页条；越界页码要夹回该分类的第一页。"""
+    with session_scope() as session:
+        for i in range(PAGE_SIZE + 5):
+            make_article(session, title=f"普通文章{i}", link=f"https://example.com/n{i}", category="行业")
+        for i in range(3):
+            make_article(session, title=f"模型文章{i}", link=f"https://example.com/m{i}", category="模型")
+
+    page = client.get("/?cat=模型")
+    assert page.status_code == 200
+    for i in range(3):
+        assert f"模型文章{i}" in page.text
+    # 过滤后只有 3 条 < PAGE_SIZE，所以是 1 页 → 不该渲染分页条
+    assert "下一页" not in page.text, "过滤后不足一页却出现了分页条"
+
+    # 越界页码夹回第 1 页，仍然是这 3 条，不是空白页
+    beyond = client.get("/?cat=模型&page=2")
+    assert beyond.status_code == 200
+    assert "模型文章0" in beyond.text, "越界页码应该夹回最后一页，而不是渲染空白页"
+
+
+def test_mark_headings_ids_are_namespaced():
+    """回归：原文与译文同时在 DOM 里（靠 CSS 按语言隐藏），两边都从 0 编号会撞 id。"""
+    from app.web.routes import mark_headings, table_of_contents
+
+    blocks = ["发生了什么", "正文段落内容，足够长所以不会被当成小标题处理掉。"]
+    en = mark_headings(blocks, prefix="sec-en")
+    zh = mark_headings(blocks, prefix="sec-zh")
+
+    assert [item["id"] for item in en] == ["sec-en-0", "sec-en-1"]
+    assert [item["id"] for item in zh] == ["sec-zh-0", "sec-zh-1"]
+    assert {item["id"] for item in en}.isdisjoint({item["id"] for item in zh})
+    # 目录条目必须带上 id，模板就是拿它拼锚点的
+    assert table_of_contents(zh)[0]["id"] == "sec-zh-0"
+
+
+def test_story_toc_points_at_the_displayed_version(client, settings: Settings, seeded_db):
+    """有译文时目录要指向译文的小标题，不能拿原文的下标去点译文。"""
+    import re
+
+    with session_scope() as session:
+        article = make_article(
+            session, title="目录语言测试", link="https://example.com/toc-zh",
+            content_full="What happened\n\nThis is the first paragraph and it is long enough to not be a heading.",
+            content_zh="发生了什么\n\n这是第一段正文，长度足够所以不会被当成小标题。",
+        )
+        article_id = article.id
+
+    text = client.get(f"/story/{article_id}").text
+    anchors = set(re.findall(r'href="#([^"]+)"', text))
+    assert anchors, "有译文时也该生成本文目录"
+    assert all(a.startswith("sec-zh-") for a in anchors), f"目录应指向译文锚点，实际是 {anchors}"

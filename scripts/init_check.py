@@ -50,7 +50,8 @@ def main() -> int:
             settings.llm.api_key,
             settings.llm.model,
             timeout=settings.llm.timeout_seconds,
-            retries=settings.llm.max_retries,
+            max_retries=settings.llm.max_retries,
+            extra_headers=settings.llm.extra_headers,
         )
         try:
             reply = client.chat("只回复两个字：可用")

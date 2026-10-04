@@ -42,6 +42,20 @@
   // 点日期展开当天标题；同一天只加载一次，标题里的英文也跟着当前语言走
   (function () {
     var cache = {};
+    // 标题来自接口，是纯文本：先转义再拼进 innerHTML，别把内容里的 < > 直接删掉
+    function esc(text) {
+      return String(text == null ? "" : text)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    }
+    // 与 _articles.html 的 bi() 宏保持同一套规则：
+    // 中文缺失时用英文顶上，英文缺失时用中文顶上，两版相同只出一个 span。
+    function bilingual(zh, en) {
+      zh = (zh || "").trim();
+      en = (en || "").trim();
+      if (!zh && !en) return "";
+      if (zh === en) return '<span class="same">' + esc(zh) + "</span>";
+      return '<span class="zh">' + esc(zh || en) + '</span><span class="en">' + esc(en || zh) + "</span>";
+    }
     function renderTitles(row, items) {
       var inner = row.querySelector(".arc-inner");
       if (!items.length) {
@@ -50,14 +64,12 @@
       }
       inner.innerHTML = items.map(function (a) {
         var t = (a.published_at || "").slice(11, 16);
-        var zh = String(a.title || "").replace(/[<>&]/g, "");
-        var en = String(a.title_en || "").replace(/[<>&]/g, "");
-        var title = en
-          ? '<span class="zh">' + zh + '</span><span class="en">' + en + "</span>"
-          : '<span class="zh">' + zh + "</span>";
+        // 中文标题优先：a.title 对英文信源来说是原文
+        var zh = a.title_zh || a.title || "";
+        var en = a.title_en || "";
         return '<a class="arc-item" href="/story/' + a.id + '">'
-          + '<span class="arc-time">' + t + "</span>"
-          + '<span class="arc-tt">' + title + "</span></a>";
+          + '<span class="arc-time">' + esc(t) + "</span>"
+          + '<span class="arc-tt">' + bilingual(zh, en) + "</span></a>";
       }).join("");
     }
     document.querySelectorAll(".arc-head").forEach(function (btn) {

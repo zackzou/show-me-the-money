@@ -248,6 +248,10 @@
     html[data-lang="en"] .zh { display:none; }
     html[data-lang="en"] .en { font-size:1em; color:var(--text); }
     html[data-lang="both"] .en { margin-top:5px; padding-left:9px; border-left:2px solid var(--line); }
+    /* 中英两版内容相同时（英文信源还没译出中文、或本来就是中文）只渲染一个 span。
+       用独立的 .same 而不是 .zh：切到英文模式时 .zh 会被 display:none 藏掉，
+       那样标题与导读会直接变成空白。 */
+    .same { display:block; }
     /* 原文块：不参与语言切换（没有译文时中文模式也要能读到），只做视觉降一级 */
     .prose.orig { color:var(--muted); }
     html[data-lang="en"] .prose.orig { color:var(--text); font-size:1em; }
@@ -260,6 +264,11 @@
         background:var(--chip); color:var(--faint); letter-spacing:0; vertical-align:middle; }
     .sec-t .t-en { background:transparent; border:1px solid var(--line); }
     .sec-t .t-note { background:none; border:0; padding-left:0; color:var(--faint); }
+    /* 正文区块的语言标注要跟着语言切换走：只显示中文时标「中文译文」，
+       只显示英文时标「英文原文」，双语时两个都显示 —— 否则英文模式下
+       正文明明是英文，标签却写着「中文译文」。 */
+    html[data-lang="zh"] .sec-t .t-en { display:none; }
+    html[data-lang="en"] .sec-t .t-zh { display:none; }
     /* 抓不到正文的提示 */
     .note-box { border:1px solid var(--line); border-left:3px solid var(--accent);
                 border-radius:8px; padding:13px 16px; background:var(--surface); }
@@ -313,6 +322,8 @@
     .cat:hover { background:var(--accent-soft); color:var(--accent); }
     .tagx { font-size:11.5px; color:var(--faint); }
     .tagx:hover { color:var(--accent); }
+    .item .why.pending { color:var(--faint); }
+    .item .why.pending b { color:var(--faint); }
     .bm { background:none; border:0; color:var(--faint); cursor:pointer; padding:2px 3px;
           font-size:14px; line-height:1; }
     .bm:hover, .bm.on { color:var(--accent); }
@@ -396,10 +407,12 @@
   <div class="wrap hd-in">
     <a href="/" class="brand">Show Me the <em>Money</em></a>
     <nav class="nav">
-      <a href="/" class="{{ 'on' if title in ('热点资讯', '搜索') else '' }}">热点资讯</a>
-      <a href="/archive" class="{{ 'on' if title == '历史日报' else '' }}">历史日报</a>
-      <a href="/saved" class="{{ 'on' if title == '我的收藏' else '' }}">收藏</a>
-      <a href="/rss">RSS</a>
+      {# 高亮用显式的 nav 标记，不要拿 title 去比 —— 搜索页的 title 是
+         「搜索 "关键词"」，永远匹配不上，于是搜索时导航一个都不亮。 #}
+      <a href="/" class="{{ 'on' if nav == 'home' else '' }}">热点资讯</a>
+      <a href="/archive" class="{{ 'on' if nav == 'archive' else '' }}">历史日报</a>
+      <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
+      <a href="/rss" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
     </nav>
     <form class="sp" action="/search" method="get" role="search">
       <div class="search">

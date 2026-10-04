@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,9 @@ class UserSettings(BaseSettings):
     llm_api_base: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
+    # 网关自定义请求头，JSON 对象字符串，例如
+    # LLM_EXTRA_HEADERS={"x-9router-token-saver":"off"}
+    llm_extra_headers: str = ""
     research_topic: str = ""
     fetch_on_startup: bool = True
     config_dir: str = "config"
@@ -48,6 +52,10 @@ class LLMSettings(BaseModel):
     timeout_seconds: float = 60.0
     max_retries: int = 2
     temperature: float = 0.3
+    # 转发给网关的附加请求头。中转网关常靠请求头开关行为（例如
+    # 9router 的 x-9router-token-saver: off），不显式关掉的话它注入的
+    # 「回答尽量简短」指令会跟「完整翻译」打架，译文随机变成电报体。
+    extra_headers: dict[str, str] = {}
 
 
 class SourceConfig(BaseModel):
@@ -163,6 +171,9 @@ class AISettings(BaseModel):
     batch_size: int = 60
     # 每处理多少篇提交一次，防止长任务中途失败把进度一起回滚。
     batch_checkpoint_every: int = 10
+    # 「LLM 不可用而降级」的文章最多完整重试几次。上游限流是常态，
+    # 不重试就整篇停在英文；重试要有上限，否则真的坏数据会被无限重试。
+    retry_max_attempts: int = 6
 
 
 class Settings(BaseModel):
@@ -193,6 +204,36 @@ class Settings(BaseModel):
         """数据库绝对路径（相对路径按项目根解析）。"""
         raw = Path(self.storage.db_path)
         return raw if raw.is_absolute() else (self.project_root / raw)
+
+
+def _parse_extra_headers(raw: str) -> dict[str, str]:
+    """把 ``LLM_EXTRA_HEADERS`` 的 JSON 对象解析成请求头字典。
+
+    写坏了不静默吞掉：这是用户显式配置的东西，解析不了就说清楚是哪一项，
+    否则「配置了却没生效」会变成一次很难查的排查。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return {}
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ConfigError(
+            f"LLM_EXTRA_HEADERS 不是合法 JSON：{text!r}（{exc}）。"
+            '示例：LLM_EXTRA_HEADERS={"x-9router-token-saver":"off"}'
+        ) from exc
+    if not isinstance(parsed, dict):
+        raise ConfigError(f"LLM_EXTRA_HEADERS 必须是 JSON 对象：{text!r}")
+    # 值必须是字符串，不做 str() 静默转换。写成 {"...": false} 是最容易犯的错
+    # （想表达「关掉」却写成了布尔），转成 "False" 发出去上游根本不认，
+    # 于是「我明明关掉了」变成一个查不出来的假象 —— 宁可当场报错。
+    bad = {key: value for key, value in parsed.items() if not isinstance(value, str)}
+    if bad:
+        raise ConfigError(
+            f"LLM_EXTRA_HEADERS 的值必须是字符串，这几项不是：{bad!r}。"
+            '示例：LLM_EXTRA_HEADERS={"x-9router-token-saver":"off"}'
+        )
+    return {str(key): value for key, value in parsed.items()}
 
 
 def _read_yaml(path: Path, *, required: bool = True) -> dict[str, Any]:
@@ -292,6 +333,7 @@ def load_settings(
         timeout_seconds=float((raw_settings.get("llm") or {}).get("timeout_seconds", 60)),
         max_retries=int((raw_settings.get("llm") or {}).get("max_retries", 2)),
         temperature=float((raw_settings.get("llm") or {}).get("temperature", 0.3)),
+        extra_headers=_parse_extra_headers(user.llm_extra_headers),
     )
 
     topic = user.research_topic.strip()

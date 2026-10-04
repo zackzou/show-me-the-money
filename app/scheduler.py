@@ -12,7 +12,7 @@ from sqlalchemy import delete, func, select
 
 from app.ai.client import LLMClient
 from app.ai.cluster import merge_duplicates
-from app.ai.processor import backfill_translations, process_pending
+from app.ai.processor import backfill_translations, process_pending, retry_degraded
 from app.config import Settings
 from app.db import session_scope
 from app.fetcher.content import backfill_body_images, backfill_content, strip_shared_openings
@@ -26,6 +26,24 @@ from app.utils.text import now_local
 log = get_logger(__name__)
 
 _scheduler: BackgroundScheduler | None = None
+
+
+def _llm_client(settings: Settings) -> LLMClient:
+    """按当前配置建一个 LLM 客户端。
+
+    统一在这里建，是为了让 ``extra_headers`` 这类网关参数只写一处 ——
+    调度里一共有三个地方要发 LLM 请求，漏掉任何一个，那一路就会静默地
+    用不到网关要求的请求头。
+    """
+    return LLMClient(
+        settings.llm.api_base,
+        settings.llm.api_key,
+        settings.llm.model,
+        timeout=settings.llm.timeout_seconds,
+        retries=settings.llm.max_retries,
+        temperature=settings.llm.temperature,
+        extra_headers=settings.llm.extra_headers,
+    )
 
 
 def run_fetch_job(settings: Settings) -> dict[str, Any]:
@@ -45,14 +63,15 @@ def run_fetch_job(settings: Settings) -> dict[str, Any]:
 
 def run_process_job(settings: Settings) -> dict[str, Any]:
     """处理 status=pending 的文章（相关度 → 摘要 → 标签），随后刷新今天的实时日报。"""
-    client = LLMClient(
-        settings.llm.api_base,
-        settings.llm.api_key,
-        settings.llm.model,
-        timeout=settings.llm.timeout_seconds,
-        retries=settings.llm.max_retries,
-        temperature=settings.llm.temperature,
-    )
+    client = _llm_client(settings)
+    # 先把「因 LLM 不可用而降级」的文章放回 pending。上游限流会让整篇停在英文，
+    # 而 process_pending 只捞 pending —— 不放回来就永远等不到中文版。
+    try:
+        with session_scope() as session:
+            requeued = retry_degraded(session, max_attempts=settings.ai.retry_max_attempts)
+        log.info("降级文章重排队：%s", requeued)
+    except Exception as exc:
+        log.warning("重排降级文章失败：%s", exc)
     try:
         with session_scope() as session:
             stats = process_pending(session, client, settings, limit=settings.ai.batch_size)
@@ -72,14 +91,7 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
     # 补译正文：正文翻译是可选步骤，限流或抖动失败的文章到这里再试一次
     try:
         if settings.i18n.enabled and settings.i18n.translate_content:
-            translator = LLMClient(
-                settings.llm.api_base,
-                settings.llm.api_key,
-                settings.llm.model,
-                timeout=settings.llm.timeout_seconds,
-                retries=settings.llm.max_retries,
-                temperature=settings.llm.temperature,
-            )
+            translator = _llm_client(settings)
             try:
                 with session_scope() as session:
                     log.info("补译中文正文：%s", backfill_translations(session, translator, settings))
@@ -232,14 +244,7 @@ def run_merge_job(settings: Settings) -> dict[str, Any]:
     """
     if not settings.merge.enabled:
         return {"candidates": 0, "pairs": 0, "merged": 0, "kept": 0}
-    client = LLMClient(
-        settings.llm.api_base,
-        settings.llm.api_key,
-        settings.llm.model,
-        timeout=settings.llm.timeout_seconds,
-        retries=settings.llm.max_retries,
-        temperature=settings.llm.temperature,
-    )
+    client = _llm_client(settings)
     try:
         with session_scope() as session:
             stats = merge_duplicates(session, client, settings, limit=settings.merge.window)

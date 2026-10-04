@@ -13,7 +13,7 @@ from typing import Any
 from fastapi import APIRouter, Depends, Query, Request
 from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.cluster import duplicates_of, primary_of
@@ -25,9 +25,10 @@ from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import is_chinese_text, now_local, split_tags, strip_markdown, truncate
 from app.utils.text import looks_english as is_english
 from app.web.search import (
-    SCOPE_FULL,
+    SCOPE_LABELS,
     SCOPE_META,
     count_by_category,
+    normalize_scope,
     search_articles,
     search_metadata,
 )
@@ -123,11 +124,15 @@ def _body_blocks(raw: str | None) -> list[str]:
     return [part.strip() for part in raw.split("\n\n") if part.strip()]
 
 
-def mark_headings(blocks: list[str]) -> list[dict[str, Any]]:
+def mark_headings(blocks: list[str], *, prefix: str = "sec") -> list[dict[str, Any]]:
     """把正文里「短句、不以标点结尾」的段落标成小标题。
 
     这样详情页能像图1 那样给一个本文目录，并把小标题渲染成 ``<h3>``；
     剩下的当普通段落。判不准就当普通段落，不会漏内容。
+
+    ``prefix`` 用来给锚点 id 分命名空间：详情页会同时把原文与译文渲染进
+    DOM（靠 CSS 按语言隐藏其一），两边都从 0 开始编号就会撞 id，
+    目录会跳到另一版的位置去。
     """
     marked: list[dict[str, Any]] = []
     for index, text in enumerate(blocks):
@@ -137,7 +142,7 @@ def mark_headings(blocks: list[str]) -> list[dict[str, Any]]:
             and stripped[-1] not in _SENTENCE_END
             and not stripped[0].isdigit()
         )
-        marked.append({"i": index, "text": stripped, "heading": is_heading})
+        marked.append({"i": index, "id": f"{prefix}-{index}", "text": stripped, "heading": is_heading})
     return marked
 
 
@@ -231,7 +236,14 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "topics": _topics_of(article),
         "tags": split_tags(article.tags),
         "images": _images(article.image_urls),
-        "degraded": article.status == "failed",
+        # 「降级」按读者看到的样子判定：有英文原文、却还没中文版。
+        # 不按 status 判 —— 重排队期间 status 是 pending，读者看到的还是英文，
+        # 这时候把提示收掉等于假装没问题。
+        "degraded": bool(article.status != "processed" and is_english(article.digest or article.summary or "")),
+        "degraded_reason": article.degraded_reason or "",
+        # 中文版还在排队（第几次尝试、什么时候试的）
+        "pending_translation": bool(article.status == "failed" and not str(article.digest_zh or "").strip()),
+        "attempts": article.process_attempts or 0,
     }
 
 
@@ -240,23 +252,6 @@ def articles_of_day(session: Session, date_str: str, now: datetime | None = None
     now = now or now_local()
     try:
         rows = list(session.execute(_day_statement(date_str)))
-    except ValueError:
-        return []
-    return [_card(article, name, url, now) for article, name, url in rows]
-
-
-def articles_of_day_paged(
-    session: Session,
-    date_str: str,
-    page: int = 1,
-    size: int = PAGE_SIZE,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    """分页取某一天的文章（首页用，避免一次渲染全部）。"""
-    now = now or now_local()
-    try:
-        statement = _day_statement(date_str).limit(size).offset(max(0, page - 1) * size)
-        rows = list(session.execute(statement))
     except ValueError:
         return []
     return [_card(article, name, url, now) for article, name, url in rows]
@@ -304,23 +299,18 @@ def filter_by(
     return result
 
 
-def count_of_day(session: Session, date_str: str) -> int:
-    try:
-        start, end = day_window(date_str)
-    except ValueError:
-        return 0  # 非法日期当作「这一天没有内容」
-    return int(
-        session.execute(
-            select(func.count(Article.id)).where(
-                Article.relevance == 1,
-                Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
-                Article.published_at >= start,
-                Article.published_at < end,
-            )
-        ).scalar()
-        or 0
-    )
+def paginate(cards: list[dict[str, Any]], page: int, size: int = PAGE_SIZE) -> tuple[list[dict[str, Any]], int, int]:
+    """先过滤后分页：返回 ``(当前页卡片, 总条数, 总页数)``。
+
+    必须按这个顺序：分类 / 标签是在应用层过滤的（标签是逗号串，用 SQL LIKE
+    会把「AI」误配到「AI Agent」）。先按数据库分页再过滤的话，总条数与页数
+    算的是**过滤前**的数量 —— 翻到第 3 页可能一条都没有，而页码还显示有 5 页。
+    """
+    total = len(cards)
+    pages = max(1, -(-total // size))
+    page = max(1, min(page, pages))
+    start = (page - 1) * size
+    return cards[start : start + size], total, pages
 
 
 def _settings(request: Request) -> Settings | None:
@@ -338,7 +328,13 @@ def _categories(request: Request) -> list[dict[str, str]]:
 
 
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
-    return {"topics": _topics(request), "categories": _categories(request), **extra}
+    return {
+        "topics": _topics(request),
+        "categories": _categories(request),
+        # 导航高亮标记；不传就一个都不亮（base.html 里逐个比 nav 值）
+        "nav": "",
+        **extra,
+    }
 
 
 @page_router.get("/", response_class=HTMLResponse)
@@ -353,16 +349,16 @@ def index(
     latest = session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(1)).scalar_one_or_none()
     date_str = latest.date if latest else now_local().strftime("%Y-%m-%d")
     now = now_local()
-    total = count_of_day(session, date_str)
-    pages = max(1, -(-total // PAGE_SIZE))
-    page = min(page, pages)
-    cards = articles_of_day_paged(session, date_str, page, PAGE_SIZE, now)
-    cards = filter_by(cards, category=cat, tag=tag)
+    # 先过滤再分页：过滤是在应用层做的（见 paginate 的注释），
+    # 反过来的话总条数与页数算的是过滤前的数量，翻页会翻出空页。
+    cards = filter_by(articles_of_day(session, date_str, now), category=cat, tag=tag)
+    cards, total, pages = paginate(cards, page, PAGE_SIZE)
     return templates.TemplateResponse(
         request,
         "index.html",
         _ctx(
             request,
+            nav="home",
             report=latest,
             date_str=date_str,
             groups=group_by_date(cards, date_str),
@@ -386,9 +382,9 @@ def search_page(
     tag: str | None = None,
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
-    """站内搜索。``scope=全文`` 时连正文一起搜。"""
+    """站内搜索。``scope=full`` 时连正文一起搜。"""
     keyword = (q or "").strip()
-    effective_scope = SCOPE_FULL if scope == SCOPE_FULL else SCOPE_META
+    effective_scope = normalize_scope(scope)
     rows = (
         search_articles(session, keyword, scope=effective_scope, category=cat, tag=tag)
         if keyword
@@ -403,8 +399,10 @@ def search_page(
         "search.html",
         _ctx(
             request,
+            nav="home",
             q=keyword,
             scope=effective_scope,
+            scope_label=SCOPE_LABELS.get(effective_scope, ""),
             groups=group_cards(cards),
             total=len(cards),
             found=len(rows),
@@ -443,7 +441,7 @@ def _attach_sources(
 @page_router.get("/saved", response_class=HTMLResponse)
 def saved_page(request: Request) -> HTMLResponse:
     """收藏页：收藏存在浏览器 localStorage，这里只提供一个空壳页面。"""
-    return templates.TemplateResponse(request, "saved.html", _ctx(request, title="我的收藏"))
+    return templates.TemplateResponse(request, "saved.html", _ctx(request, nav="saved", title="我的收藏"))
 
 
 @page_router.get("/daily/{date}", response_class=HTMLResponse)
@@ -460,6 +458,7 @@ def daily(
         "daily.html",
         _ctx(
             request,
+            nav="archive",
             report=report,
             articles=cards,
             groups=group_by_date(cards, date),
@@ -494,9 +493,8 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
         return next((c for c in candidates if c and is_real_body(c)), "") or ""
 
     original = _body(article.content_full, article.content)
-    marked = mark_headings(_body_blocks(original))
+    marked = mark_headings(_body_blocks(original), prefix="sec-en")
     item["body_blocks"] = marked
-    item["toc"] = table_of_contents(marked)
     item["content_preview"] = truncate(original, 400)
     # 正文内联配图：按原站的做法插在段落之间，位置随抓取时一起存下来
     anchors = _body_image_anchors(article.body_images)
@@ -505,10 +503,14 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文
     translated = article.content_zh or ""
     item["has_translation"] = bool(translated.strip())
-    marked_zh = mark_headings(_body_blocks(translated)) if item["has_translation"] else []
+    marked_zh = mark_headings(_body_blocks(translated), prefix="sec-zh") if item["has_translation"] else []
     item["body_blocks_zh"] = marked_zh
     item["content_preview_zh"] = truncate(translated, 400) if item["has_translation"] else ""
     item["shots_zh"] = _shift_image_slots(item["shots"], len(marked), len(marked_zh))
+    # 本文目录指向**读者当前看到的那一版**：有译文就指译文的小标题。
+    # 译文的段落数可能与原文不同（翻译失败的那几段会被丢掉），
+    # 拿原文的下标去点译文的标题会跳错位置甚至跳到不存在的锚点。
+    item["toc"] = table_of_contents(marked_zh if item["has_translation"] else marked)
     # 没有译文时要说清楚，避免「中文模式却整页英文」看着像坏了
     item["body_is_foreign"] = bool(original.strip()) and not item["has_translation"] and is_english(original)
     item["body_missing"] = not original.strip()
@@ -526,7 +528,9 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
         {"id": row.id, "source": _source_name(session, row.source_id), "title": row.title_zh or row.title}
         for row in duplicates_of(session, article.id)
     ]
-    return templates.TemplateResponse(request, "story.html", _ctx(request, item=item, title=article.title[:40]))
+    return templates.TemplateResponse(
+        request, "story.html", _ctx(request, nav="home", item=item, title=article.title[:40])
+    )
 
 
 def _source_name(session: Session, source_id: int | None) -> str:
@@ -592,5 +596,5 @@ def archive(request: Request, session: Session = Depends(get_session)) -> HTMLRe
     return templates.TemplateResponse(
         request,
         "archive.html",
-        _ctx(request, reports=rows, total=len(rows), title="历史日报"),
+        _ctx(request, nav="archive", reports=rows, total=len(rows), title="历史日报"),
     )

@@ -53,6 +53,9 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.body_images": "TEXT",
     "articles.i18n_attempts": "INTEGER NOT NULL DEFAULT 0",
     "articles.duplicate_of": "INTEGER",
+    "articles.process_attempts": "INTEGER NOT NULL DEFAULT 0",
+    "articles.process_last_at": "DATETIME",
+    "articles.degraded_reason": "VARCHAR(300)",
 }
 
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import httpx
 import pytest
@@ -19,6 +20,7 @@ from app.ai.prompts import render_relevance_prompt, render_summary_prompt, rende
 from app.config import Settings
 from app.db import session_scope
 from app.models import Article
+from app.utils.text import now_local
 
 from .conftest import make_article
 
@@ -279,7 +281,12 @@ def test_chat_parses_sse_response():
 
 
 def test_chat_reads_responses_api_shape():
-    """Responses API 风格的 output_text 也能取到。"""
+    """兜底：只给了顶层 ``output_text`` 字符串的网关也能取到。
+
+    注意这条只是**兜底**形状。真实网关（实测 9router 的 wb/hy3）从不这么回，
+    它回的是 ``output`` 数组 / ``response.output_text.delta`` —— 见下面几条。
+    早期就是因为只有这一条测试，整条 Responses 路径没人走，产品全英文而测试全绿。
+    """
     import httpx
 
     from app.ai.client import LLMClient
@@ -289,6 +296,210 @@ def test_chat_reads_responses_api_shape():
 
     with httpx.Client(transport=httpx.MockTransport(handler)) as client:
         assert LLMClient("http://gw/v1", "k", "m", client=client).chat("判断") == "no"
+
+
+# 下面几条用的是**真实抓包**的形状（9router / wb/hy3），字段一个不少：
+# reasoning 条目在前、message 条目在后，且流里既有增量事件又有整段事件。
+_RESPONSES_JSON = {
+    "id": "resp_cmb-7b452dee",
+    "object": "response",
+    "status": "completed",
+    "error": None,
+    "output": [
+        {
+            "id": "rs_resp_cmb-7b452dee_0",
+            "type": "reasoning",
+            "summary": [{"type": "summary_text", "text": "用户要求只输出译文。"}],
+        },
+        {
+            "id": "msg_resp_cmb-7b452dee_0",
+            "type": "message",
+            "role": "assistant",
+            "content": [
+                {"type": "output_text", "annotations": [], "logprobs": [], "text": "切换提前两年。"}
+            ],
+        },
+    ],
+}
+
+
+def _sse(*events: tuple[str, dict]) -> str:
+    return "".join(f"event: {name}\ndata: {json.dumps(body, ensure_ascii=False)}\n\n" for name, body in events)
+
+
+def _event(name: str, seq: int, **extra: object) -> tuple[str, dict]:
+    return name, {"type": name, "sequence_number": seq, **extra}
+
+
+def _reasoning_item(summary: str = "") -> dict:
+    """真实抓包里 reasoning 条目的形状。``summary`` 为空时是真抓包里的 ``[]``。"""
+    return {
+        "id": "rs_x_0",
+        "type": "reasoning",
+        "summary": [{"type": "summary_text", "text": summary}] if summary else [],
+    }
+
+
+def _message_item(text: str) -> dict:
+    """真实抓包里 message 条目的形状 —— 回答就藏在这里的 output_text 块里。"""
+    return {
+        "id": "msg_x_0",
+        "type": "message",
+        "role": "assistant",
+        "content": [{"type": "output_text", "annotations": [], "logprobs": [], "text": text}],
+    }
+
+
+def _reasoning_delta(delta: str, seq: int) -> tuple[str, dict]:
+    return _event(
+        "response.reasoning_summary_text.delta", seq,
+        item_id="rs_x_0", output_index=0, summary_index=0, delta=delta,
+    )
+
+
+def _reasoning_done(text: str, seq: int) -> tuple[str, dict]:
+    return _event(
+        "response.reasoning_summary_text.done", seq,
+        item_id="rs_x_0", output_index=0, summary_index=0, text=text,
+    )
+
+
+def _text_delta(delta: str, seq: int) -> tuple[str, dict]:
+    return _event(
+        "response.output_text.delta", seq,
+        item_id="msg_x_0", output_index=0, content_index=0, delta=delta,
+    )
+
+
+def _text_done(text: str, seq: int) -> tuple[str, dict]:
+    return _event(
+        "response.output_text.done", seq,
+        item_id="msg_x_0", output_index=0, content_index=0, text=text,
+    )
+
+
+def _item_done(item: dict, seq: int) -> tuple[str, dict]:
+    return _event("response.output_item.done", seq, output_index=0, item=item)
+
+
+# 真实 SSE 事件序列（关键几帧，顺序与抓包一致）：
+# reasoning 增量 → reasoning 整段 → output_text 增量 → output_text 整段 → completed。
+_RESPONSES_SSE = _sse(
+    _event("response.created", 1, response={"id": "resp_x", "status": "in_progress", "output": []}),
+    _event("response.output_item.added", 3, output_index=0, item=_reasoning_item()),
+    _reasoning_delta("用户要求只输出", 5),
+    _reasoning_delta("译文。", 6),
+    _reasoning_done("用户要求只输出译文。", 7),
+    _item_done(_reasoning_item("用户要求只输出译文。"), 8),
+    _text_delta("切换提前", 389),
+    _text_delta("两年。", 390),
+    _text_done("切换提前两年。", 391),
+    _item_done(_message_item("切换提前两年。"), 393),
+    _event("response.completed", 394, response={"id": "resp_x", "output": _RESPONSES_JSON["output"]}),
+) + "data: [DONE]\n\n"
+
+
+def test_responses_non_stream_output_items():
+    """回归（本次事故的根因）：``output`` 数组里取 message 条目的文本。
+
+    只认顶层 ``output_text`` 的写法在这里解析出空串 → 每个 LLM 调用都抛
+    ``LLMFormatError`` → 文章整篇停在英文。这条测试就是钉住这个根因。
+    """
+    from app.ai.client import _content_from_payload
+
+    assert _content_from_payload(_RESPONSES_JSON) == "切换提前两年。"
+    # 有些网关把 response 对象再包一层
+    assert _content_from_payload({"response": _RESPONSES_JSON}) == "切换提前两年。"
+    # reasoning 条目是思维摘要，绝不能当回答
+    assert _content_from_payload({"output": [_RESPONSES_JSON["output"][0]]}) == ""
+
+
+def test_responses_stream_uses_deltas_exactly_once():
+    """回归：流里既有增量又有整段，两个都收会拼出两倍内容。"""
+    from app.ai.client import parse_sse
+
+    text = parse_sse(_RESPONSES_SSE)
+    assert text == "切换提前两年。"
+    assert text.count("切换提前两年。") == 1
+    # 思维摘要不能混进回答
+    assert "用户要求只输出译文" not in text
+
+
+def test_responses_reasoning_only_yields_empty():
+    """只有 reasoning 增量、没有 output_text 的流：必须判为「没有内容」。
+
+    抓包里确实出现过这种帧（模型还在想）。把它当回答，等于把草稿当成品，
+    而且会把「上游还没答完」伪装成成功。
+    """
+    from app.ai.client import parse_sse
+
+    body = _sse(
+        _reasoning_delta("用户要求", 5),
+        _item_done(_reasoning_item("用户要求"), 6),
+    )
+    assert parse_sse(body) == ""
+
+
+def test_chat_sse_deltas_keep_leading_space():
+    """英文分片按 token 切，前导空格有意义：逐片 strip 会拼出 HelloWorld。"""
+    from app.ai.client import parse_sse
+
+    body = _sse(
+        ("message", {"choices": [{"delta": {"content": "Hello"}}]}),
+        ("message", {"choices": [{"delta": {"content": " world"}}]}),
+    )
+    assert parse_sse(body) == "Hello world"
+
+
+def test_sse_done_only_falls_back_to_whole_text():
+    """没有增量、只给了整段（output_text.done）时，兜底用整段。"""
+    from app.ai.client import parse_sse
+
+    body = _sse(
+        ("response.output_text.done", {"type": "response.output_text.done", "text": "只有整段", "sequence_number": 2}),
+    )
+    assert parse_sse(body) == "只有整段"
+
+
+def test_llm_extra_headers_reach_the_request():
+    """``LLM_EXTRA_HEADERS`` 必须真的发出去。
+
+    9router 靠 ``x-9router-token-saver: off`` 关掉它注入的「回答要简短」指令；
+    头没发出去的话，译文会被上游悄悄压成电报体，而本地日志一切正常。
+    """
+    import httpx
+
+    from app.ai.client import LLMClient
+
+    seen: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.update(request.headers)
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+
+    llm = LLMClient(
+        "http://gw/v1", "k", "m",
+        extra_headers={"x-9router-token-saver": "off"},
+        client=httpx.Client(
+            transport=httpx.MockTransport(handler),
+            headers={"Authorization": "Bearer k", "x-9router-token-saver": "off"},
+        ),
+    )
+    assert llm.chat("判断") == "ok"
+    assert seen.get("x-9router-token-saver") == "off"
+
+
+def test_llm_client_builds_headers_when_owning_the_client():
+    """自己建 httpx.Client 时也要带上自定义头（不能只加 Authorization）。"""
+    from app.ai.client import LLMClient
+
+    llm = LLMClient("http://gw/v1", "k", "m", extra_headers={"x-9router-token-saver": "off"})
+    try:
+        headers = llm._http().headers
+        assert headers.get("authorization") == "Bearer k"
+        assert headers.get("x-9router-token-saver") == "off"
+    finally:
+        llm.close()
 
 
 def test_chat_format_error_is_not_retried():
@@ -796,3 +1007,199 @@ def test_backfill_translations_fills_titles_and_digests_before_bodies(seeded_db,
         assert stored.title_zh == "外骨骼时代开启"
         assert "西雅图" in stored.digest_zh
         assert stored.content_zh
+
+
+def test_retry_degraded_requeues_articles_failed_by_llm(seeded_db):
+    """回归：上游限流让整篇降级后，必须能放回 pending 重来一次。
+
+    一次 429 就让 process_article 在第一个调用处抛异常、文章被标成 failed，
+    而 process_pending 只捞 pending —— 不放回来，标题 / 导读 / 正文的中文版
+    一个都不会有，页面上就整篇英文。
+    """
+    from app.ai.processor import retry_degraded
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="Capcom is preparing for a future where we create games with AI",
+            link="https://example.com/llm-down",
+            status="failed",
+            relevance=1,
+            process_attempts=1,
+            process_last_at=now_local() - timedelta(hours=3),
+        )
+        article_id = article.id
+
+    with session_scope() as session:
+        stats = retry_degraded(session)
+    assert stats["requeued"] == 1
+    with session_scope() as session:
+        stored = session.get(Article, article_id)
+        # 放回 pending 之后，下一轮 process_pending 就会重新完整处理它
+        assert stored.status == "pending"
+
+
+def test_retry_degraded_backs_off_and_stops_at_the_cap(seeded_db):
+    """刚试过的先退避；用完重试次数的不再放回，避免无限重试。"""
+    from app.ai.processor import retry_degraded
+
+    with session_scope() as session:
+        just_tried = make_article(
+            session, title="Just tried", link="https://example.com/just", status="failed",
+            relevance=1, process_attempts=1, process_last_at=now_local(),
+        )
+        exhausted = make_article(
+            session, title="Out of attempts", link="https://example.com/out", status="failed",
+            relevance=1, process_attempts=99, process_last_at=now_local() - timedelta(days=1),
+        )
+        just_id, out_id = just_tried.id, exhausted.id
+
+    with session_scope() as session:
+        stats = retry_degraded(session)
+    assert stats["requeued"] == 0
+    assert stats["exhausted"] == 1
+    with session_scope() as session:
+        assert session.get(Article, just_id).status == "failed"
+        assert session.get(Article, out_id).status == "failed"
+
+
+def test_retry_degraded_leaves_processed_articles_alone(seeded_db):
+    """已经处理成功的文章不该被重排队。"""
+    from app.ai.processor import retry_degraded
+
+    with session_scope() as session:
+        make_article(session, title="已处理", link="https://example.com/done", status="processed")
+
+    with session_scope() as session:
+        assert retry_degraded(session)["requeued"] == 0
+
+
+def test_backfill_translations_marks_missing_digest_as_done(seeded_db, settings: Settings):
+    """回归：压根没有导读的文章，digest_zh 要标成已处理，不能每轮都来占名额。
+
+    story/169 的现场：digest 本来就是空，补译轮上来就调翻译、拿回空、
+    digest_zh 永远 NULL —— 下一轮又被捞回来，名额全耗在这类文章上。
+    """
+    import httpx
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="English headline that is definitely long enough to count as English text",
+            status="processed",
+            relevance=1,
+            content_full="Apple says it is changing its macOS privacy settings for developers today.",
+            digest=None,
+        )
+        article.content_zh = "苹果表示将修改 macOS 的隐私设置。"
+        article_id = article.id
+        session.commit()
+
+    reply = {"choices": [{"message": {"content": "苹果修改隐私设置"}}]}
+    client = _client(lambda r: httpx.Response(200, json=reply), retries=0)
+    try:
+        with session_scope() as session:
+            stats = backfill_translations(session, client, settings, limit=10)
+            assert stats["titles"] == 1
+            stored = session.get(Article, article_id)
+            assert stored.title_zh
+            assert stored.digest_zh == ""
+            # 第二轮不该再捞到它
+            assert backfill_translations(session, client, settings, limit=10)["candidates"] == 0
+    finally:
+        client.close()
+
+
+def test_process_article_irrelevant_still_archives_chinese_title(seeded_db, settings: Settings):
+    """回归：不相关的也要存中文标题（story/169）。
+
+    详情页直接链接照样可访问，中文模式顶着英文标题看着像没处理完。
+    正文/导读不翻（不进日报），digest_zh 标空，页面缺译文会如实说明。
+    """
+    answers = iter(["no 5", "外骨骼时代开启"])
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session,
+                title="The dawn of the age of the exoskeleton",
+                content="English body",
+                status="pending",
+                relevance=None,
+            )
+            assert process_article(session, article, client, settings) == "processed"
+            assert article.relevance == 0
+            assert article.title_zh == "外骨骼时代开启"
+            assert article.digest_zh == ""
+            assert article.summary is None
+    finally:
+        client.close()
+
+
+def test_backfill_translations_covers_irrelevant_titles_only(seeded_db, settings: Settings):
+    """回归：补译轮要捞到不相关但缺中文标题的存量，只补标题，不碰正文。"""
+    import httpx
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            title="English headline that is definitely long enough to count as English text",
+            status="processed",
+            relevance=0,
+            content_full="Apple says it is changing its macOS privacy settings for developers today.",
+            digest=None,
+        )
+        article_id = article.id
+        session.commit()
+
+    reply = {"choices": [{"message": {"content": "苹果修改隐私设置"}}]}
+    client = _client(lambda r: httpx.Response(200, json=reply), retries=0)
+    try:
+        with session_scope() as session:
+            stats = backfill_translations(session, client, settings, limit=10)
+            assert stats["candidates"] == 1
+            assert stats["titles"] == 1
+            stored = session.get(Article, article_id)
+            assert stored.title_zh == "苹果修改隐私设置"
+            assert stored.digest_zh == ""
+            # 正文不翻（不进日报，省调用）
+            assert not stored.content_zh
+            assert backfill_translations(session, client, settings, limit=10)["candidates"] == 0
+    finally:
+        client.close()
+
+
+def test_translate_chunk_gate_fits_chinese_density(seeded_db, settings: Settings):
+    """回归：英译中正常密度只有 0.3~0.45，门槛不能按英文习惯设 0.4。
+
+    story/169 的现场：hy4 的整句译文 ratio 0.35~0.38 被 0.4 门槛误杀，
+    而网关压缩的电报体是 0.26 —— 0.3 能把两者分开。
+    """
+    import httpx
+
+    body = "\n\n".join("English paragraph content that is long enough to pass the gate." for _ in range(4))
+    assert len(body) > 200
+    # 0.35 的整句译文要收
+    good = "完整译文。" * (len(body) * 35 // 100 // 5)
+    assert 0.3 <= len(good) / len(body) < 0.4
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": good}}]}), retries=0
+    )
+    try:
+        assert translate_to_chinese(client, settings.prompts, body) == good
+    finally:
+        client.close()
+    # 0.26 的电报体照样丢掉
+    bad = "电报体 " * (len(body) * 26 // 100 // 4)
+    client2 = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": bad.strip()}}]}),
+        retries=0,
+    )
+    try:
+        assert translate_to_chinese(client2, settings.prompts, body) is None
+    finally:
+        client2.close()

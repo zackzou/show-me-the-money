@@ -480,6 +480,7 @@ def strip_shared_openings(
                 trimmed = strip_leading_paragraph(article.content_full)
                 if trimmed and trimmed != article.content_full:
                     article.content_full = trimmed
+                    _shift_body_image_anchors(article)
                     stats["articles"] += 1
                     stats["paragraphs"] += 1
     session.flush()
@@ -497,6 +498,36 @@ def strip_leading_paragraph(text: str | None) -> str | None:
     _, sep, rest = text.partition("\n\n")
     rest = rest.strip()
     return rest or None
+
+
+def _shift_body_image_anchors(article: Article) -> None:
+    """删掉正文第一段后，配图锚点整体上移一段。
+
+    ``body_images`` 存的是「接在第 n 段之后」：删掉下标 0 的段，
+    原来接在第 n 段之后的图现在接在第 n-1 段之后。头图（锚点 0，本来就在
+    第一段之前）不受影响，钳在 0 不让它变负数。
+
+    坏数据不碰：解析失败就原样保留，展示侧本来就会把它当没有。
+    """
+    raw = article.body_images
+    if not raw:
+        return
+    try:
+        parsed = json.loads(raw)
+    except (TypeError, ValueError):
+        return
+    if not isinstance(parsed, list):
+        return
+    shifted = False
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        index = item.get("i")
+        if isinstance(index, int) and not isinstance(index, bool) and index > 0:
+            item["i"] = index - 1
+            shifted = True
+    if shifted:
+        article.body_images = json.dumps(parsed, ensure_ascii=False)
 
 
 def count_with_full_text(session: Session) -> int:

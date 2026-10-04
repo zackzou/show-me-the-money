@@ -72,6 +72,14 @@ class Article(Base):
     # 列表页 / 日报 / 搜索都不再展示它（详情页仍可直达）
     duplicate_of: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    # 完整处理（含中英双版本）已经尝试过几次。上游 LLM 限流会让整篇降级，
+    # 没有这个计数就永远重试；有了它就能「重试到成功为止，但别无限重试」
+    process_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 最后一次尝试处理的时间，用于退避：别每 2 小时就去撞同一堵墙
+    process_last_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # 降级原因（LLM 不可用之类）。页面上要能说清「为什么这篇是英文」，
+    # 排查时也要一眼看出是数据问题还是上游问题
+    degraded_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
 
     source: Mapped[Source | None] = relationship(back_populates="articles")
