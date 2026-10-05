@@ -98,34 +98,51 @@ def _probe(url: str, *, timeout: float = 12.0) -> dict[str, Any]:
     }
 
 
+def _all_source_stats(session: Session) -> dict[int, dict[str, Any]]:
+    """一次查出所有信源的篇数与最新一篇时间。
+
+    原来每个源单独查 2 次（篇数 + 最新），信源页就是 ``2N+2`` 条 SQL；
+    而 ``articles.source_id`` 是外键却没有索引，SQLite 也不会自动建外键索引，
+    于是每次都是全表扫描（3 万篇时每个源 12ms，9 个源 108ms）。现在压成
+    一次 ``GROUP BY``，配合 ix_articles_source_id 走索引。
+    """
+    rows = session.execute(
+        select(
+            Article.source_id,
+            func.count(Article.id),
+            func.max(Article.published_at),
+        )
+        .where(Article.source_id.isnot(None))
+        .group_by(Article.source_id)
+    ).all()
+    out: dict[int, dict[str, Any]] = {}
+    for source_id, total, latest in rows:
+        if source_id is None:      # WHERE 已排除，这里只是让类型收敛
+            continue
+        out[source_id] = {
+            "total": int(total or 0),
+            "latest": latest.strftime("%Y-%m-%d %H:%M") if latest else None,
+        }
+    return out
+
+
 def _source_stats(session: Session, source_id: int | None) -> dict[str, Any]:
     """这个源已经产出了多少篇文章（管理页要显示，免得误删有用的源）。"""
     if source_id is None:
         return {"total": 0, "latest": None}
-    total = int(
-        session.execute(
-            select(func.count(Article.id)).where(Article.source_id == source_id)
-        ).scalar()
-        or 0
-    )
-    latest = session.execute(
-        select(Article.published_at)
-        .where(Article.source_id == source_id)
-        .order_by(Article.published_at.desc())
-        .limit(1)
-    ).scalar()
-    return {"total": total, "latest": latest.strftime("%Y-%m-%d %H:%M") if latest else None}
+    return _all_source_stats(session).get(source_id, {"total": 0, "latest": None})
 
 
-def _rows(session: Session) -> list[dict[str, Any]]:
+def _rows(session: Session, stats: dict[int, dict[str, Any]] | None = None
+          ) -> list[dict[str, Any]]:
     # 软删除的源不出现在列表里（见 models.Source.deleted）
     sources = list(
         session.execute(select(Source).where(Source.deleted == 0).order_by(Source.id)).scalars()
     )
-    return [_row(session, row) for row in sources]
+    return _rows_from(sources, stats if stats is not None else _all_source_stats(session))
 
 
-def _deleted_rows(session: Session) -> list[dict[str, Any]]:
+def _deleted_rows(session: Session, stats: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
     """已软删除的源。
 
     之前只有 ``/sources/{id}/restore`` 这个路由，页面上**没有任何入口**能点它 ——
@@ -139,10 +156,15 @@ def _deleted_rows(session: Session) -> list[dict[str, Any]]:
             select(Source).where(Source.deleted != 0).order_by(Source.id.desc())
         ).scalars()
     )
-    return [_row(session, row) for row in rows]
+    return _rows_from(rows, stats)
 
 
-def _row(session: Session, row: Source) -> dict[str, Any]:
+def _rows_from(sources: list[Source], stats: dict[int, dict[str, Any]]) -> list[dict[str, Any]]:
+    """组装信源行；篇数统计由调用方查一次后传进来（见 _all_source_stats）。"""
+    return [_row(row, stats) for row in sources]
+
+
+def _row(row: Source, stats: dict[int, dict[str, Any]]) -> dict[str, Any]:
     return {
         "id": row.id,
         "name": row.name,
@@ -151,20 +173,23 @@ def _row(session: Session, row: Source) -> dict[str, Any]:
         "lang": row.lang,
         "enabled": bool(row.enabled),
         "created": row.created_at.strftime("%Y-%m-%d") if row.created_at else "",
-        **_source_stats(session, row.id),
+        **stats.get(row.id, {"total": 0, "latest": None}),
     }
 
 
 def _render(request: Request, session: Session, *, notice: dict[str, str] | None = None,
             status: int = 200) -> HTMLResponse:
+    # 篇数统计整页只查一次：活跃列表与已删除列表共用同一份统计，
+    # 否则这一页会重复跑同一条 GROUP BY。
+    stats = _all_source_stats(session)
     return templates.TemplateResponse(
         request,
         "sources.html",
         _ctx(
             request,
             nav="sources",
-            sources=_rows(session),
-            deleted_sources=_deleted_rows(session),
+            sources=_rows(session, stats),
+            deleted_sources=_deleted_rows(session, stats),
             notice=notice or {},
         ),
         status_code=status,

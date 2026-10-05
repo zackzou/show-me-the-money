@@ -70,15 +70,19 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
 # 在所有升级上来的库里都缺失，导致 duplicate_of 查询退化成全表扫描
 # （3 万篇时 12ms），而新建的库有。索引名与 SQLAlchemy 生成的一致，
 # 所以 CREATE INDEX IF NOT EXISTS 对两者都幂等。
-_INDEX_MIGRATIONS: tuple[tuple[str, str], ...] = (
-    ("ix_articles_duplicate_of", "CREATE INDEX IF NOT EXISTS ix_articles_duplicate_of "
-                                 "ON articles (duplicate_of)"),
+_INDEX_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    (
+        "articles", "ix_articles_duplicate_of",
+        "CREATE INDEX IF NOT EXISTS ix_articles_duplicate_of ON articles (duplicate_of)",
+    ),
     # articles.source_id 是外键但没建索引，SQLite 不会自动建。
     # 信源页要按 source_id 统计篇数 + 取最新一篇，这个复合索引把它从
     # 全表扫描（12ms @3万篇）降到索引查找（0.05ms）。
-    ("ix_articles_source_id",
-     "CREATE INDEX IF NOT EXISTS ix_articles_source_id "
-     "ON articles (source_id, published_at DESC)"),
+    (
+        "articles", "ix_articles_source_id",
+        "CREATE INDEX IF NOT EXISTS ix_articles_source_id "
+        "ON articles (source_id, published_at DESC)",
+    ),
 )
 
 
@@ -111,15 +115,66 @@ def _migrate_indexes(engine: Engine) -> list[str]:
     created: list[str] = []
     with engine.begin() as conn:
         tables = set(inspector.get_table_names())
-        for name, ddl in _INDEX_MIGRATIONS:
-            table = ddl.split()[-1]
+        # 表名与索引列都显式写在元组里：从 DDL 字符串里 split 出来的最后一个词
+        # 对复合索引会得到 "(source_id," 这种东西，于是索引静默地一个都没建。
+        for table, name, ddl in _INDEX_MIGRATIONS:
             if table not in tables:
                 continue
             if name in {idx["name"] for idx in inspector.get_indexes(table)}:
                 continue
+            columns = {row["name"] for row in inspector.get_columns(table)}
+            if not _index_columns_ok(ddl, columns):
+                # 列还不齐（老库正在补列的过程中）就跳过；下次启动列齐了自然会建。
+                log.debug("跳过索引 %s：%s 上缺少它需要的列", name, table)
+                continue
             conn.execute(sql_text(ddl))
             created.append(name)
     return created
+
+
+def _index_columns_ok(ddl: str, columns: set[str]) -> bool:
+    """索引 DDL 用到的列是否都已存在。
+
+    老库是分批补列的：``init_db`` 补完列之后表结构就齐了，但迁移本身也可能
+    在中途失败或被中断。建索引前确认一下列在，少了就跳过而不是让整个启动
+    抛 ``no such column``。
+    """
+    open_paren = ddl.rfind("(")
+    close_paren = ddl.rfind(")")
+    if open_paren == -1 or close_paren <= open_paren:
+        return True
+    inner = ddl[open_paren + 1: close_paren]
+    for part in inner.split(","):
+        token = part.strip().split()
+        if not token:
+            continue
+        # 去掉 ASC/DESC 这类修饰与 COLLATE ...
+        column = token[0]
+        if column.upper() in ("ASC", "DESC", "COLLATE", "TEXT", "NOCASE"):
+            continue
+        if column not in columns:
+            return False
+    return True
+
+
+def _analyze(engine: Engine) -> None:
+    """收集统计信息，让查询规划器知道各索引的真实选择性。
+
+    不跑 ANALYZE 就没有 ``sqlite_stat1``，规划器只能靠默认值猜。结果是
+    首页那条查询选了**低选择性的** ``ix_articles_relevance`` 当驱动索引，
+    再把命中的每一行丢进临时 B 树排序。同一句 SQL、同样的列，实测 3 万篇时
+    176.56ms；跑了 ANALYZE 之后改走 ``ix_articles_published_at``，56.91ms；
+    再补上投影列与 LIMIT 就是 0.07ms（2500 倍）。
+
+    这是一次性的写操作（读全部索引统计、写入 sqlite_stat1），表大时值得。
+    """
+    from sqlalchemy import text as sql_text
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(sql_text("ANALYZE"))
+    except Exception as exc:  # pragma: no cover - 统计信息缺失不影响正确性
+        log.debug("ANALYZE 失败（不影响功能）：%r", exc)
 
 
 def init_db(db_file: Path | str) -> Engine:
@@ -140,6 +195,7 @@ def init_db(db_file: Path | str) -> Engine:
     created = _migrate_indexes(engine)
     if created:
         log.info("数据库已补齐索引：%s", "、".join(created))
+    _analyze(engine)
     _engine = engine
     _session_factory = sessionmaker(bind=engine, expire_on_commit=False, future=True)
     _db_file = path

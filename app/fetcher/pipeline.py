@@ -21,6 +21,10 @@ from app.utils.text import extract_images, now_local, strip_html, truncate, unes
 log = get_logger(__name__)
 
 MAX_CONTENT_CHARS = 20_000
+
+# pubDate 最多允许比「现在」晚多久。留一点余量是为了容忍源与本机几秒的时钟
+# 偏差，以及 RSS 里常见的「整点时间」；超出这个量就不是偏差而是错的。
+FUTURE_TOLERANCE = timedelta(hours=6)
 Fetcher = Callable[..., list[dict[str, Any]]]
 
 
@@ -40,6 +44,23 @@ def _enabled_sources(session: Session) -> list[Source]:
     )
 
 
+def _safe_link(raw: str) -> str:
+    """只接受 http/https 链接；其它协议一律当成没有链接。
+
+    Jinja 会把引号转义，但**不会中和 URL 的协议**。所以一个 ``javascript:``
+    的 link 会被原样渲染进详情页的 ``href`` —— 恶意或被攻陷的 feed 因此能在
+    本站自己的源上执行脚本，而本站能读到设置页。在入库这一层挡掉，比在
+    渲染时补救可靠：渲染路径有五处，入口只有一个。
+    """
+    link = (raw or "").strip()
+    if not link:
+        return ""
+    scheme = link.split(":", 1)[0].casefold() if ":" in link else ""
+    if scheme not in ("http", "https"):
+        return ""
+    return link
+
+
 def _admit(
     items: list[dict[str, Any]],
     *,
@@ -57,9 +78,19 @@ def _admit(
     """
     cutoff = now - timedelta(days=max_age_days) if max_age_days > 0 else None
     kept: list[dict[str, Any]] = []
-    dropped = {"stale": 0, "over_cap": 0, "no_content": 0, "no_date": 0}
+    dropped = {"stale": 0, "over_cap": 0, "no_content": 0, "no_date": 0, "future": 0}
     for item in items:
         published = item.get("published_at")
+        if published is not None and published > now + FUTURE_TOLERANCE:
+            # pubDate 落在未来：要么源把本地时间当成了 GMT（实测 InfoQ 的
+            # CST/GMT 混用会让文章凭空提前 7.5 小时），要么时钟坏了。
+            # 照单全收就会算进「未来那一天」的日报 —— 而那一天还没发生，
+            # 于是这篇文章在当期日报里消失、明天又冒出来。
+            # 钳到「现在」，宁可同一天偏早，也不要落到错误的一天。
+            log.info("pubDate 在未来（%s > %s），已钳到当前时间", published, now)
+            item["published_at"] = now
+            published = now
+            dropped["future"] += 1
         if published is None:
             # 没有 pubDate 就没法判断新旧，只能收下；单独计数，方便发现「无日期源」。
             dropped["no_date"] += 1
@@ -102,6 +133,8 @@ def run_fetch_pipeline(
         "capped": 0,
         "no_content": 0,
         "no_date": 0,
+        "future": 0,
+        "bad_link": 0,
         "failed": 0,
         "empty_sources": 0,
         "details": [],
@@ -139,12 +172,14 @@ def run_fetch_pipeline(
             stats["capped"] += dropped["over_cap"]
             stats["no_content"] += dropped["no_content"]
             stats["no_date"] += dropped["no_date"]
+            stats["future"] += dropped["future"]
 
             added = 0
             for item in admitted:
-                link = str(item.get("link") or "").strip()
+                link = _safe_link(str(item.get("link") or ""))
                 title = str(item.get("title") or "").strip()
                 if not link or not title:
+                    stats["bad_link"] += 1
                     continue
                 if is_duplicate(session, link, title, window=dedup_window):
                     stats["duplicated"] += 1

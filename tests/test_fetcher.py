@@ -210,3 +210,58 @@ def test_run_fetch_pipeline_counts_items_without_date(seeded_db):
     stats = run_fetch_pipeline(fetcher=undated_fetcher, max_age_days=14)
     assert stats["no_date"] == 1
     assert stats["new"] == 1
+
+
+# ── 抓取入口的两道闸：链接协议与未来时间 ──────────────────────────────
+
+def test_javascript_link_is_not_stored():
+    """恶意 feed 的 ``javascript:`` link 能在本站源上执行脚本。
+
+    Jinja 会转义引号，但**不会中和 URL 的协议**，所以它会被原样渲染进详情页
+    的 href。在入库这一层挡掉：渲染路径有五处，入口只有一个。
+    """
+    from app.fetcher.pipeline import _safe_link
+
+    assert _safe_link("javascript:alert(document.domain)") == ""
+    assert _safe_link("  JavaScript:alert(1)") == ""
+    assert _safe_link("data:text/html,<script>alert(1)</script>") == ""
+    assert _safe_link("file:///etc/passwd") == ""
+    assert _safe_link("vbscript:msgbox(1)") == ""
+    # 正常链接照常通过
+    assert _safe_link("https://example.com/a") == "https://example.com/a"
+    assert _safe_link("http://example.com/a") == "http://example.com/a"
+    assert _safe_link("") == ""
+
+
+def test_future_pubdate_is_clamped_to_now():
+    """pubDate 落在未来会被钳到当前时间。
+
+    实测 InfoQ 的 pubDate 把北京时间当成 GMT，文章凭空提前 7.5 小时 ——
+    于是一篇 10-04 19:22 抓到的文章被记成 10-05 02:39，进了 10-05 的日报，
+    在 10-04 那期里消失、明天又冒出来。库里 6 行 published_at > created_at，
+    全是 InfoQ。
+    """
+    from datetime import timedelta
+
+    from app.fetcher.pipeline import _admit
+
+    now = now_local()
+    items = [
+        {"link": "https://example.com/future", "title": "Future",
+         "content": "<p>" + "body text " * 40 + "</p>",
+         "published_at": now + timedelta(hours=8)},
+        {"link": "https://example.com/ok", "title": "OK",
+         "content": "<p>" + "body text " * 40 + "</p>",
+         "published_at": now},
+        # 小幅超前属于时钟偏差，应当保留
+        {"link": "https://example.com/slightly", "title": "Slight",
+         "content": "<p>" + "body text " * 40 + "</p>",
+         "published_at": now + timedelta(minutes=2)},
+    ]
+    kept, dropped = _admit(
+        items, max_age_days=30, max_items=10, min_content_chars=10, now=now)
+    assert dropped["future"] == 1
+    assert len(kept) == 3
+    assert kept[0]["published_at"] == now, "未来时间应被钳到 now"
+    assert kept[1]["published_at"] == now
+    assert kept[2]["published_at"] > now, "几秒的时钟偏差不该被改写"

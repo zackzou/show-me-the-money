@@ -2184,3 +2184,90 @@ def test_category_tab_count_respects_active_tag(client, seeded_db):
     all_tab = re.search(r'class="n">(\d+)</span>', page.text)
     assert all_tab, "页面上找不到「全部」tab 的计数"
     assert found.group(1) == all_tab.group(1)
+
+
+# ── 跨站请求：没有鉴权，就靠同源检查兜住改状态的接口 ──────────────────
+
+def test_cross_site_post_is_rejected(client):
+    """恶意网页能用表单驱动这 8 个 POST 吗？必须不能。
+
+    application/x-www-form-urlencoded 是「CORS 简单请求」，浏览器不会预检，
+    所以只靠 CORS 挡不住。实测一个带 Origin: https://evil.example 的
+    POST /settings 会被执行，并把 api_base 改到攻击者的端点。
+    """
+    response = client.post(
+        "/settings",
+        data={"api_base": "https://evil.example/v1", "model": "m", "api_key": ""},
+        headers={"Origin": "https://evil.example", "Referer": "https://evil.example/x"},
+    )
+    assert response.status_code == 403
+
+
+def test_same_origin_post_is_allowed(client, settings: Settings, monkeypatch):
+    """同源必须照常工作，否则等于把功能全禁了。"""
+    import app.web.settings as mod
+
+    monkeypatch.setattr(
+        mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 3})
+    host = client.get("/settings").headers.get("host", "testserver")
+    response = client.post(
+        "/settings",
+        data={"api_base": "https://x/v1", "model": "m", "api_key": "sk-abc"},
+        headers={"Origin": f"http://{host}", "Referer": f"http://{host}/settings"},
+    )
+    assert response.status_code == 200
+
+
+def test_file_origin_post_is_rejected(client):
+    """``Origin: null`` 来自 file:// 页面，同样要挡。"""
+    response = client.post(
+        "/sources/1/toggle", data={}, headers={"Origin": "null"})
+    assert response.status_code == 403
+
+
+def test_cross_site_sources_delete_is_rejected(client):
+    """删信源是破坏性操作，跨站一律拒绝。"""
+    response = client.post(
+        "/sources/1/delete", data={}, headers={"Origin": "https://evil.example"})
+    assert response.status_code == 403
+
+
+def test_same_origin_reveal_key_uses_custom_header(client):
+    """设置页取明文 key 的 fetch 用自定义头 + same-origin，不受影响。"""
+    response = client.post("/settings/key", headers={"X-Requested-With": "settings"})
+    assert response.status_code == 200
+
+
+def test_reveal_key_via_bare_cross_site_post_is_rejected(client):
+    """但如果有人直接拿表单打这个接口（没有自定义头），仍要拒绝。"""
+    response = client.post("/settings/key", headers={"Origin": "https://evil.example"})
+    assert response.status_code == 403
+
+
+def test_homepage_falls_back_to_last_day_with_content(client, seeded_db):
+    """回归：首页不能指向一份 0 篇的日报。
+
+    每天 00:00 之后、第一批文章处理完之前，滚动任务会先写下一份 0 篇的当日
+    日报。原来首页直接取 max(DailyReport.date)，于是页面全空，而昨天那份
+    已经定稿、内容完整的日报还躺在归档里。实测日志里当日 0 篇日报连着出现
+    四次，首页空了约两小时。
+    """
+    from datetime import timedelta
+
+    from app.models import DailyReport
+
+    yesterday = (now_local() - timedelta(days=1)).strftime("%Y-%m-%d")
+    today = now_local().strftime("%Y-%m-%d")
+    with session_scope() as session:
+        make_article(
+            session, title="昨天那条重要新闻", title_zh="昨天那条重要新闻",
+            published_at=now_local() - timedelta(days=1), relevance=1, status="processed",
+        )
+        session.add(DailyReport(date=yesterday, content_md="x", content_html="x",
+                                article_count=1))
+        session.add(DailyReport(date=today, content_md="", content_html="",
+                                article_count=0))
+
+    page = client.get("/")
+    assert page.status_code == 200
+    assert "昨天那条重要新闻" in page.text, "首页应该回退到最近有内容的一天"

@@ -12,8 +12,11 @@ from __future__ import annotations
 import threading
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from urllib.parse import urlsplit
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import JSONResponse
 
 from app import __version__
 from app.config import ConfigError, Settings, load_settings
@@ -35,9 +38,59 @@ from app.web.sources import sources_router
 
 log = get_logger(__name__)
 
+# 会被改动的路径（POST/PUT/PATCH/DELETE）。这些必须做同源检查。
+_MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+# 请求头里带这些的可以放行：非浏览器客户端（curl、脚本、TestClient）不会
+# 带 Origin，而它们本来就不是 CSRF 的受害者 —— CSRF 的前提是「浏览器自动
+# 带上用户的 cookie/凭据」。设置页的「取明文 key」也走 POST，用的是自定义
+# 头 + same-origin，同样放行。
+_SAME_ORIGIN_HEADERS = frozenset({"x-requested-with", "x-smtt-csrf"})
+
+
+async def _same_origin_guard(request: Request, call_next):
+    """改状态的请求必须同源。
+
+    这个服务**没有任何鉴权**，而且 README 建议监听 0.0.0.0。于是任何一个
+    恶意网页都能用表单 POST 驱动这 8 个接口：改掉模型设置（把 api_base 指向
+    攻击者的端点，后续每一次调用的提示词与回复都会发过去）、删光信源。
+
+    ``application/x-www-form-urlencoded`` 是「CORS 简单请求」，浏览器**不会**
+    预检，所以只靠 CORS 挡不住 —— 必须服务端自己检查。
+    判断依据用 Origin，其次 Referer；两者都没有就放行，因为非浏览器客户端
+    （curl、脚本、测试）本来就不构成 CSRF —— CSRF 的前提是浏览器自动带上
+    用户的凭据。
+    """
+    if request.method not in _MUTATING_METHODS:
+        return await call_next(request)
+    if any(name in request.headers for name in _SAME_ORIGIN_HEADERS):
+        return await call_next(request)
+    host = request.headers.get("host", "")
+    present = False
+    for header in ("origin", "referer"):
+        value = request.headers.get(header)
+        if not value:
+            continue
+        present = True
+        # Origin: null 出现在 file:// 页面发起的请求里，一律拒绝
+        if value == "null":
+            break
+        parsed = urlsplit(value)
+        if parsed.netloc and parsed.netloc == host:
+            return await call_next(request)
+        break
+    if not present:
+        # 既没有 Origin 也没有 Referer = 非浏览器客户端（curl、脚本、测试），
+        # 本来就不构成 CSRF，放行。
+        return await call_next(request)
+    log.warning("拒绝跨站请求：%s %s（Origin=%s）", request.method, request.url.path,
+                request.headers.get("origin", ""))
+    return JSONResponse(
+        {"detail": "跨站请求已被拒绝：改状态的接口只接受同源提交"},
+        status_code=403,
+    )
+
 
 def _bootstrap(settings: Settings) -> None:
-    """进程级初始化：日志、数据库、默认信源、调度器。"""
     setup_logging(log_file=settings.project_root / "data" / "smtm.log")
     init_db(settings.db_file)
     added = seed_sources(settings.sources)
@@ -87,6 +140,11 @@ def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> F
             shutdown_scheduler()
 
     app = FastAPI(title="Show Me the Money", version=__version__, lifespan=lifespan)
+    # 全站没有任何压缩。实测页面体积：/search?scope=full 144KB、
+    # /story/29 91KB、/settings 67KB、/sources 56KB，而 base.html 一张皮就
+    # 占 41KB 的其中 38KB。HTML 是高度可压缩的文本，这一层几乎是白捡的。
+    app.add_middleware(GZipMiddleware, minimum_size=800)
+    app.middleware("http")(_same_origin_guard)
     app.state.settings = resolved
     # 页面保存过的模型配置优先于环境变量（启动时就套上，别等用户点保存）
     apply_stored(app.state, load_stored(resolved))

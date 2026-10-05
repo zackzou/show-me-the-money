@@ -500,6 +500,26 @@ def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
     }
 
 
+def _homepage_date(session: Session, now: datetime) -> str:
+    """首页展示哪一天：最近一份**真有内容**的日报。
+
+    原来直接取 ``max(DailyReport.date)``，于是每天 00:00 之后、第一批文章
+    处理完之前，滚动任务先写下一份 0 篇的当日日报，首页就指向它 —— 页面
+    全空，而昨天那份已经定稿的日报还躺在归档里。实测日志里
+    「日报已生成：2026-10-05（0 篇）」连着出现四次，首页就空了约两小时。
+
+    这里从最新往回找第一份真有文章的日期；一份都没有才退回今天。
+    """
+    reports = session.execute(
+        select(DailyReport.date).order_by(DailyReport.date.desc()).limit(14)
+    ).scalars().all()
+    counts = counts_by_day(session, list(reports))
+    for date_str in reports:
+        if counts.get(date_str, 0) > 0:
+            return str(date_str)
+    return now.strftime("%Y-%m-%d")
+
+
 @page_router.get("/", response_class=HTMLResponse)
 def index(
     request: Request,
@@ -509,9 +529,11 @@ def index(
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
     """首页：热点资讯时间轴。按时间倒序 + 分页，可用 ?cat= / ?tag= 过滤。"""
-    latest = session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(1)).scalar_one_or_none()
-    date_str = latest.date if latest else now_local().strftime("%Y-%m-%d")
     now = now_local()
+    date_str = _homepage_date(session, now)
+    latest = session.execute(
+        select(DailyReport).where(DailyReport.date == date_str)
+    ).scalar_one_or_none()
     # 先过滤再分页：过滤是在应用层做的（见 paginate 的注释），
     # 反过来的话总条数与页数算的是过滤前的数量，翻页会翻出空页。
     cards = filter_by(articles_of_day(session, date_str, now), category=cat, tag=tag)
