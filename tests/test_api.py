@@ -604,13 +604,19 @@ def test_base_script_tags_are_balanced(client):
 
 
 def test_language_switcher_present(client):
-    """顶栏要有 中文 / EN / 双语 三档，默认中文。"""
+    """切换样式与默认中文是全局的；控件本体只挂在**故事页**的 AI 导读行。
+
+    语言是「这一篇」的属性，不是全站导航的属性 —— 顶栏不再放切换。
+    没有控件的页面（列表页）由 base.html 的 JS 强制回中文，
+    不会沿用上次选的英文把内容藏成空白。
+    """
     text = client.get("/").text
-    assert 'data-lang="zh"' in text
-    assert 'data-lang="en"' in text
-    assert 'data-lang="both"' in text
+    # 列表页不再渲染切换控件本体
+    assert '<div class="lang" id="lang"' not in text
     assert 'localStorage.getItem("smtm-lang") || "zh"' in text   # 默认中文
-    # 纯 CSS 控制显隐，不来回请求服务器
+    # 没有控件 = 强制中文，而不是沿用上次的选择
+    assert 'document.documentElement.setAttribute("data-lang", "zh")' in text
+    # 纯 CSS 控制显隐，不来回请求服务器（样式仍是全局的）
     assert 'html[data-lang="zh"] .en { display:none; }' in text
     assert 'html[data-lang="en"] .zh { display:none; }' in text
     assert 'html[data-lang="both"] .en' in text
@@ -676,19 +682,43 @@ def test_saved_page_has_working_script(client):
     assert "还没有收藏" in text
 
 
-def test_lang_control_is_rendered(client):
-    """语言控件必须真的输出到页面里。
+def test_lang_control_is_rendered(client, seeded_db):
+    """语言控件渲染在**故事页**的 AI 导读行，并按文章能力出按钮。
 
-    回归：曾只加了 CSS 和 JS，却忘了插控件，导致 getElementById("lang") 为 null、
-    全局脚本在 addEventListener 处抛错，收藏与收藏页一起失效。
+    回归一：曾只加了 CSS 和 JS，却忘了插控件，导致 getElementById("lang")
+    为 null、全局脚本在 addEventListener 处抛错，收藏与收藏页一起失效。
+    回归二：控件原在顶栏，语言却是「这一篇」的属性 —— 现在挂在 AI 导读行：
+    英文信源三键（中文/EN/双语）；中文原生只有「中文」一个状态钮，
+    本来就不翻译，摆 EN/双语是永远切不出内容的死按钮。
     """
-    text = client.get("/").text
-    assert '<div class="lang" id="lang"' in text
+    with session_scope() as session:
+        en = make_article(
+            session,
+            title="Apple ships a new model",
+            content_full="Apple announced a new enterprise agent framework today. " * 12,
+        )
+        zh = make_article(
+            session,
+            title="中文标题的文章",
+            content_full=(
+                "第一段中文正文内容，这里补足到足够长度以通过正文字数门槛的判定。\n\n"
+                "第二段中文正文内容，同样补足长度，确保整段都会被渲染出来。"
+            ),
+        )
+        en_id, zh_id = en.id, zh.id
+
+    en_text = client.get(f"/story/{en_id}").text
+    assert '<div class="lang" id="lang"' in en_text
     for value in ("zh", "en", "both"):
-        assert f'data-lang="{value}"' in text
-    # 取到元素后才绑定，且绑定前判空
-    assert 'if (box) {' in text
-    assert 'box.addEventListener' in text
+        assert f'data-lang="{value}"' in en_text
+    # 控件挂在 AI 导读行里（sec-head 在控件之前），取到元素后才绑定，且绑定前判空
+    assert en_text.index('class="sec-head"') < en_text.index('id="lang"')
+    assert 'if (box) {' in en_text
+    assert 'box.addEventListener' in en_text
+
+    zh_text = client.get(f"/story/{zh_id}").text
+    assert '<div class="lang" id="lang"' not in zh_text, "中文原生不该有切不出的 EN/双语死按钮"
+    assert 'aria-pressed="true"' in zh_text, "只摆一个「中文」状态钮"
 
 
 def test_global_script_survives_missing_element(client):
