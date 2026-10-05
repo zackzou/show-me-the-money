@@ -27,7 +27,14 @@ from app.ai.prompts import (
 )
 from app.config import PromptsConfig, Settings
 from app.fetcher.content import is_real_body
-from app.models import Article
+from app.fetcher.lang import (
+    LANG_AUTO,
+    LANG_EN,
+    LANG_ZH,
+    article_is_foreign,
+    resolve_lang,
+)
+from app.models import Article, Source
 from app.utils.logger import get_logger
 from app.utils.text import (
     has_long_latin_run,
@@ -328,59 +335,188 @@ _STRUCTURE_MIN_RATIO = 0.8
 
 
 def parse_sections(raw: str) -> list[dict[str, str]] | None:
-    """解析章节排版结果：``## 小标题`` 开头新节，其余是该节段落。
+    """解析章节排版结果，返回 ``[{"h_zh","h_en","t"}]``；不合格返回 ``None``。
 
-    段数太少（单节无标题）、节数超限、文字量对不上的一律返回 ``None``，
-    调用方回退原文直排 —— 排版是锦上添花，不能把正文排丢了。
+    期望 JSON：``[{"h_zh": "...", "h_en": "...", "paras": ["...", "..."]}]``。
+    同时兼容旧的 ``## 小标题`` 纯文本格式（那时 ``h_en`` 留空，调用方会把
+    ``h_zh`` 当英文标题用不到 —— 只在有英文原文时才需要）。
+
+    一次给出两个语言的小标题，是为了让双语视图**节对节对齐**。以前只给一个
+    标题，于是英文原文侧没有章节结构（实测 337 篇里只有 3 篇有 body_sections，
+    而 body_sections_zh 有 30 篇）—— 双语模式下中文那一半有小标题横幅、英文
+    那一半没有，读者看到的就是「有些段落有、有些没有」。
     """
-    lines = [line.strip() for line in (raw or "").splitlines()]
+    text = (raw or "").strip()
+    if not text:
+        return None
+    sections = _sections_from_json(text)
+    if sections is None:
+        sections = _sections_from_markdown(text)
+    if not sections:
+        return None
+    if len(sections) > MAX_SECTIONS + 2:
+        return None
+    if len(sections) == 1 and not sections[0]["h_zh"]:
+        return None  # 等于没分，不占存储
+    return sections
+
+
+def _sections_from_json(text: str) -> list[dict[str, str]] | None:
+    body = text
+    if body.startswith("```"):
+        body = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", body).strip()
+    start, end = body.find("["), body.rfind("]")
+    if start == -1 or end <= start:
+        return None
+    try:
+        parsed = json.loads(body[start:end + 1])
+    except ValueError:
+        return None
+    if not isinstance(parsed, list):
+        return None
+    out: list[dict[str, str]] = []
+    for item in parsed:
+        if not isinstance(item, dict):
+            continue
+        paras = item.get("paras")
+        if isinstance(paras, str):
+            paras = [paras]
+        if not isinstance(paras, list):
+            continue
+        kept = [strip_markdown(str(p)).strip() for p in paras if str(p).strip()]
+        kept = [p for p in kept if p]
+        if not kept:
+            continue
+        out.append({
+            "h_zh": str(item.get("h_zh") or "").strip()[:40],
+            "h_en": str(item.get("h_en") or "").strip()[:80],
+            "t": "\n\n".join(kept),
+        })
+    return out or None
+
+
+def _sections_from_markdown(text: str) -> list[dict[str, str]] | None:
+    """兼容旧配置/旧输出的 ``## 小标题`` 格式。
+
+    这种格式只有一个标题，双语视图没法用它对齐，所以 ``h_en`` 留空 ——
+    调用方看到 ``h_en`` 为空就知道英文侧只能退化成整篇平铺。
+    """
     headings: list[str] = []
     buckets: list[list[str]] = []
-    for line in lines:
+    for line in text.splitlines():
+        line = line.strip()
         if not line:
             continue
         if line.startswith("##"):
-            heading = line.lstrip("#").strip().strip("：:* ").strip()[:30]
-            headings.append(heading)
+            headings.append(line.lstrip("#").strip().strip("：:* ").strip()[:30])
             buckets.append([])
             continue
         clean = strip_markdown(line)
-        if not clean:
-            continue
-        if not buckets:
-            headings.append("")
-            buckets.append([])
-        buckets[-1].append(clean)
-    # 去掉空节
+        if clean:
+            if not buckets:
+                headings.append("")
+                buckets.append([])
+            buckets[-1].append(clean)
     pairs = [(h, p) for h, p in zip(headings, buckets, strict=True) if p]
-    if not pairs or len(pairs) > MAX_SECTIONS + 2:
+    if not pairs:
         return None
-    if len(pairs) == 1 and not pairs[0][0]:
-        return None  # 等于没分，不占存储
-    return [{"h": h, "t": "\n\n".join(p)} for h, p in pairs]
+    return [{"h_zh": h, "h_en": "", "t": "\n\n".join(p)} for h, p in pairs]
+
+
+def section_pair(
+    sections: list[dict[str, str]], *, chinese: bool
+) -> list[dict[str, str]] | None:
+    """章节结构落库前的最后一道闸：双语两侧都要有小标题。
+
+    只要有一节的 ``h_en`` 是空的，中英对照就会缺一段结构 —— 与其存一个
+    必然不一致的数据，不如整篇退回「原文直排」，页面显示的是一段没有层次
+    的正文，但至少两个语言版本是对称的、不会互相错位。
+    """
+    usable = [s for s in sections if s["t"].strip()]
+    if not usable:
+        return None
+    needs_en = any(not s["h_en"].strip() for s in usable)
+    if chinese:
+        # 中文原文的文章没有英文侧，只需要中文标题
+        return [{"h": s["h_zh"], "t": s["t"]} for s in usable]
+    if needs_en:
+        return None
+    return [{"h": s["h_en"], "t": s["t"]} for s in usable]
+
+
+# 排版时一次喂给模型的正文上限。
+#
+# 早先是把**整篇**丢进去让模型照放，实测长文必然被截断：文章 289 原文 20689 字
+# / 47 段，模型只回得出 7993 字（占 38.8%），而「丢字超过两成就丢弃」那道闸
+# 于是把整篇排版结果扔掉 —— 结果是长文**一个横幅都没有**（实测 337 篇里
+# body_sections 只有 3 篇），也正是双语模式「中文有横幅、英文没有」的根源。
+#
+# 改成按预算分块、逐块排版、结果拼起来。每一块各自校验丢字率，任何一块不合格
+# 就整篇放弃（宁可没有横幅，也不能让正文少一段）。
+SECTION_BUDGET_CHARS = 2400
+
+
+def _section_chunks(paragraphs: list[str], budget: int) -> list[list[str]]:
+    """把段落按预算切成若干**段落组**（每组仍是段落列表）。
+
+    注意不能直接复用 ``chunk_for_rewrite``：它返回的是「拼好的字符串列表」，
+    不是段落列表 —— 拿它的结果再 ``"\n\n".join()`` 会把**每个字符**之间都插上
+    换行，模型收到的是彻底错乱的正文。
+    """
+    groups: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for para in paragraphs:
+        current.append(para)
+        size += len(para) + 2
+        if size >= budget:
+            groups.append(current)
+            current, size = [], 0
+    if current:
+        groups.append(current)
+    return groups or [paragraphs]
 
 
 def structure_sections(
     client: LLMClient, prompts: PromptsConfig, title: str, body: str
 ) -> list[dict[str, str]] | None:
-    """NYT 责任编辑视角：只分段加小标题，不改写。
+    """NYT 责任编辑视角：只分段加**双语**小标题，不改写。
 
-    太短（3 段以内）不值得分；结构化丢字超两成直接丢掉。失败返回 ``None``。
+    太短（3 段以内）不值得分；任何一块结构化丢字超两成就整篇放弃。
     """
     paras = split_paragraphs(body)
     if len(paras) <= 3:
         return None
-    raw = _optional_llm(client, render_structure_prompt(prompts, title, body), "")
-    if not raw.strip():
+    collected: list[dict[str, str]] = []
+    for group in _section_chunks(paras, SECTION_BUDGET_CHARS):
+        chunk_body = "\n\n".join(group)
+        raw = _optional_llm(
+            client, render_structure_prompt(prompts, title, chunk_body), ""
+        )
+        if not raw.strip():
+            return None
+        sections = parse_sections(raw)
+        if not sections:
+            return None
+        kept = sum(len(s["t"]) for s in sections)
+        total = sum(len(p) for p in group)
+        if total <= 0 or kept < total * _STRUCTURE_MIN_RATIO:
+            return None
+        collected.extend(sections)
+    if not collected:
         return None
-    sections = parse_sections(raw)
-    if not sections:
-        return None
-    kept = sum(len(s["t"]) for s in sections)
-    total = sum(len(p) for p in paras)
-    if total <= 0 or kept < total * _STRUCTURE_MIN_RATIO:
-        return None
-    return sections[:MAX_SECTIONS]
+    # 分块必然产生很多小节（实测一篇 2 万字的长文被切成 8 块、产出 28 节），
+    # 而页面上一篇文章挂 28 个横幅没人读得下去。超出的并进最后一节：
+    # **正文一个字都不丢**（这是硬要求），只是标题少了几个。
+    if len(collected) > MAX_SECTIONS:
+        head = collected[: MAX_SECTIONS - 1]
+        tail = collected[MAX_SECTIONS - 1:]
+        merged = dict(tail[0])
+        merged["t"] = "\n\n".join(s["t"] for s in tail if s["t"].strip())
+        if not merged["h_zh"] and tail[0].get("h_zh"):
+            merged["h_zh"] = tail[0]["h_zh"]
+        collected = [*head, merged]
+    return collected
 
 
 def chunk_for_rewrite(paragraphs: list[str], *, budget: int = TRANSLATE_CHUNK_CHARS) -> list[str]:
@@ -493,6 +629,31 @@ def translate_to_chinese(
     return joined
 
 
+def split_digest(raw: str) -> tuple[str, str]:
+    """把导语结果拆成 ``(中文, 英文)``。
+
+    提示词要求一次输出两行（第一行中文、第二行 ``EN: `` 前缀的英文），
+    这样英文信源的「英文」模式下 AI 导读也是英文 —— 以前那里直接顶着
+    中文摘要，读者看到的是「英文文章配中文导读」。
+
+    模型不听指令（只回一行、或者把 EN: 写在第一行）时退化成「没有英文行」，
+    展示层会如实显示，而不是把中文当英文端出去。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return "", ""
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    en_parts: list[str] = []
+    zh_parts: list[str] = []
+    for line in lines:
+        stripped = re.sub(r"^EN\s*[:：]\s*", "", line, flags=re.I).strip()
+        if stripped != line or line.lower().startswith("en"):
+            en_parts.append(stripped)
+        else:
+            zh_parts.append(line)
+    return strip_markdown(" ".join(zh_parts)), strip_markdown(" ".join(en_parts))
+
+
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
     """跑一个「锦上添花」的 LLM 步骤；失败就用 fallback，不影响主流程。"""
     if not prompt:
@@ -504,11 +665,47 @@ def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:
         return fallback
 
 
-def process_article(session: Session, article: Article, client: LLMClient, settings: Settings) -> str:
+def body_for_lang(article: Article) -> str:
+    """用来判语言的正文：优先抓回来的全文，没有就退回摘要。
+
+    刻意不看 ``content``（RSS 摘要）：有的源摘要写的是英文标题，混进来会
+    把中文正文判成「需要翻译」，于是中文站的文章也被翻一遍。
+    """
+    return article.content_full or article.content or article.summary or ""
+
+
+def resolves_native_zh(article: Article, source_lang: str = LANG_AUTO) -> bool:
+    """这篇要不要「只留中文、不产出英文版」。
+
+    auto（默认）：按**这篇自己的正文**判定。同一个源里中英文混排很常见，
+    按站点一刀切会把中文文章也翻一遍。
+    显式 zh/en：信源上的设置是用户的明确指定，压过内容判断 —— 否则信源选了
+    「中文」，只因为抓到的正文里混了两句英文就被翻成双语；选了「英文」却因为
+    正文全是中文而不产出中文版，正是用户不想要的。
+    """
+    forced = resolve_lang(source_lang)
+    if forced == LANG_ZH:
+        return True
+    if forced == LANG_EN:
+        return False
+    return not article_is_foreign(article.title or "", body_for_lang(article))
+
+
+def process_article(
+    session: Session,
+    article: Article,
+    client: LLMClient,
+    settings: Settings,
+    *,
+    source_lang: str = LANG_AUTO,
+) -> str:
     """处理单篇文章，返回最终 status（processed / failed）。
 
     每次调用都记一次尝试：上游 LLM 限流会在第一个调用就抛异常，整篇降级成英文，
     必须留下「试过几次、什么时候试的」才能在配额恢复后回来重试（见 ``retry_degraded``）。
+
+    ``source_lang`` 是信源上配的语言（auto/en/zh）。``auto`` 时按**这篇自己的
+    正文**判定：中文正文不产出英文版，英文正文必须有中文版。
     """
     article.process_attempts = (article.process_attempts or 0) + 1
     article.process_last_at = now_local()
@@ -548,16 +745,26 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
         article.relevance = 1
         article.score = score
 
+        # 「中文原生」要在这里就定下来：速览提示词据此决定要不要顺带产出一行
+        # EN 英文。先出速览、再判语言的话，中文文章的英文行既白花 token 又只能
+        # 丢掉 —— 用户要的是「中文原文不做英文翻译」。
+        native_zh = resolves_native_zh(article, source_lang)
+
         summary = client.chat(render_summary_prompt(settings.prompts, topic, article.title, excerpt))
         article.summary = truncate(summary, 500)
 
         # 速览：让读者在页内读完，不用跳原站
         digest = _optional_llm(
             client,
-            render_digest_prompt(settings.prompts, article.title, summary, excerpt),
+            render_digest_prompt(
+                settings.prompts, article.title, summary, excerpt, bilingual=not native_zh
+            ),
             _fallback_digest(article, settings.prompts.fallback_digest_chars),
         )
-        article.digest = truncate(digest, 400)
+        article.digest, digest_en = split_digest(digest)
+        article.digest = truncate(article.digest, 400)
+        if digest_en and not native_zh:
+            article.digest_en = truncate(digest_en, 400)
 
         # 推荐理由：回答「为什么要点开这条」
         reason = _optional_llm(
@@ -584,70 +791,107 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
             article.category = category
             article.topics = json.dumps(topics, ensure_ascii=False) if topics else None
 
-        # 中英双语。标题和导语分别判断：英文信源常见「英文标题 + 中文导语」，
-        # 整段一起判断会漏掉该翻的导语，也会给纯英文标题翻出一份一模一样的自己。
-        if settings.i18n.enabled:
-            # 判「要不要翻」只看有没有汉字，与长短无关：
-            # 短英文标题会被 looks_english 判成「不是英文」，于是白白翻一次英文→英文
-            title_needs = is_chinese_text(article.title)
-            digest_needs = is_chinese_text(summary)
-            if not title_needs and not digest_needs:
-                # 整篇本来就是英文，直接复用，不必再花一次调用
-                article.title_en = article.title
-                article.digest_en = truncate(summary, 400)
-            else:
-                raw_en = _optional_llm(
-                    client,
-                    render_translate_prompt(settings.prompts, article.title, summary),
-                    "",
+        # 中文原生文章**不做英文翻译**。
+        # 中文译中文既浪费调用，又把「AI 重写」的质量损耗套到本来不需要改写的
+        # 原文上；页面上也不该出现 EN / 双语按钮（见 routes.story 的 langs）。
+        #
+        # 关键：这里**不能提前 return**。早先的写法在这里
+        # `return STATUS_PROCESSED`，于是下面两段（标签、早报推送语）永远轮不到，
+        # 中文文章被标成「处理完成」却 tags / brief 全空。改成 if/else 才能让
+        # 「不做英文翻译」只关掉翻译那几步，不关掉整篇文章的处理。
+        if native_zh:
+            article.title_en = None
+            article.digest_en = None
+            article.title_zh = article.title_zh or article.title
+            article.digest_zh = article.digest_zh or ""
+            article.content_zh = ""
+            if not article.body_sections_zh:
+                sections = structure_sections(
+                    client, settings.prompts, article.title or "",
+                    article.content_full or article.content or "",
                 )
-                en_title, en_digest = parse_translate(raw_en)
-                article.title_en = en_title if title_needs else article.title
-                article.digest_en = en_digest if digest_needs else truncate(summary, 400)
-            # 英文信源补一套中文版：标题、速览、正文一个都不能少。
-            # 少了任何一样，「中文」模式下就会在标题 / 导读 / 正文其中一处
-            # 露出英文，看起来像没处理完。
-            if not title_needs:
-                article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title)
-            if not is_chinese_text(article.digest or ""):
-                article.digest_zh = translate_digest_to_chinese(
-                    client, settings.prompts, article.digest or ""
-                )
-            else:
-                # 本来就是中文，标成已处理，补译那一轮就不会再来扫它
-                article.digest_zh = article.digest_zh or ""
-            # 英文原文正文整篇译成中文，中文模式下才读得到中文
-            body_text = article.content_full or article.content or ""
-            sections = structure_sections(client, settings.prompts, article.title or "", body_text)
-            if sections is not None:
-                article.body_sections = json.dumps(sections, ensure_ascii=False)
-            if settings.i18n.translate_content:
-                if sections is not None and looks_english(body_text):
-                    # 按节翻：节与节之间天然对齐，中英文对照不会错位；
-                    # 某一节失败就整篇回退整翻，不留半中半英
-                    zh_sections: list[dict[str, str]] = []
-                    failed = False
-                    for section in sections:
-                        one = translate_to_chinese(client, settings.prompts, section["t"])
-                        if not one:
-                            failed = True
-                            break
-                        zh_sections.append({"h": section["h"], "t": one})
-                    if not failed:
-                        article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
-                        article.content_zh = "\n\n".join(s["t"] for s in zh_sections)
+                zh_sections = section_pair(sections, chinese=True) if sections else None
+                if zh_sections is not None:
+                    article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+        else:
+            # 中英双语。标题和导语分别判断：英文信源常见「英文标题 + 中文导语」，
+            # 整段一起判断会漏掉该翻的导语，也会给纯英文标题翻出一份一模一样的自己。
+            if settings.i18n.enabled:
+                # 判「要不要翻」只看有没有汉字，与长短无关：
+                # 短英文标题会被 looks_english 判成「不是英文」，于是白白翻一次英文→英文
+                title_needs = is_chinese_text(article.title)
+                # 英文导读的来源，按优先级：
+                #   1. 导语那次调用顺带产出的 "EN: " 行 —— 一次调用两种语言，最省；
+                #   2. 都没有才单独翻一次中文摘要。
+                # **绝不能拿中文摘要直接顶上去**：那样英文模式下的 AI 导读会写着
+                # 中文，读者看到的是「英文文章配中文导读」。
+                # 早先的写法就是 `digest_en = truncate(summary, 400)`，而 summary
+                # 永远是中文 —— 实测 22 篇英文相关报道里 13 篇 digest_en 是空的，
+                # 剩下的也是中文。
+                article.digest_en = digest_en or None
+                if title_needs or article.digest_en is None:
+                    raw_en = _optional_llm(
+                        client,
+                        render_translate_prompt(settings.prompts, article.title, summary),
+                        "",
+                    )
+                    en_title, en_digest = parse_translate(raw_en)
+                    if title_needs and en_title:
+                        article.title_en = en_title
+                    if article.digest_en is None and en_digest:
+                        article.digest_en = en_digest
+                if not title_needs:
+                    # 整篇本来就是英文，标题直接复用，不必再花一次调用
+                    article.title_en = article.title
+                # 英文信源补一套中文版：标题、速览、正文一个都不能少。
+                # 少了任何一样，「中文」模式下就会在标题 / 导读 / 正文其中一处
+                # 露出英文，看起来像没处理完。
+                if not title_needs:
+                    article.title_zh = translate_title_to_chinese(client, settings.prompts, article.title)
+                if not is_chinese_text(article.digest or ""):
+                    article.digest_zh = translate_digest_to_chinese(
+                        client, settings.prompts, article.digest or ""
+                    )
+                else:
+                    # 本来就是中文，标成已处理，补译那一轮就不会再来扫它
+                    article.digest_zh = article.digest_zh or ""
+                # 英文原文正文整篇译成中文，中文模式下才读得到中文
+                body_text = article.content_full or article.content or ""
+                foreign = looks_english(body_text)
+                sections = structure_sections(client, settings.prompts, article.title or "", body_text)
+                # 章节结构一次拿到中英两套小标题，于是 body_sections（英文侧）与
+                # body_sections_zh（中文侧）**节数与顺序天然一一对应** —— 双语视图
+                # 逐节对照不会错位。以前只存一套，英文侧大面积缺失（337 篇里只有
+                # 3 篇有），双语模式下中文那一半有小标题、英文那一半没有。
+                en_sections = section_pair(sections, chinese=False) if (sections and foreign) else None
+                zh_sections = section_pair(sections, chinese=True) if sections else None
+                if en_sections is not None:
+                    article.body_sections = json.dumps(en_sections, ensure_ascii=False)
+                if zh_sections is not None:
+                    article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+                if settings.i18n.translate_content and foreign:
+                    if en_sections is not None and zh_sections is not None:
+                        # 按节翻：节与节之间天然对齐，中英文对照不会错位；
+                        # 某一节失败就整篇回退整翻，不留半中半英
+                        translated: list[dict[str, str]] = []
+                        failed = False
+                        for zh_sec, en_sec in zip(zh_sections, en_sections, strict=True):
+                            one = translate_to_chinese(client, settings.prompts, en_sec["t"])
+                            if not one:
+                                failed = True
+                                break
+                            translated.append({"h": zh_sec["h"], "t": one})
+                        if not failed:
+                            article.body_sections_zh = json.dumps(translated, ensure_ascii=False)
+                            article.content_zh = "\n\n".join(s["t"] for s in translated)
+                        else:
+                            article.content_zh = translate_to_chinese(
+                                client, settings.prompts, body_text
+                            )
                     else:
                         article.content_zh = translate_to_chinese(
                             client, settings.prompts, body_text
                         )
-                elif sections is not None:
-                    # 中文原文：章节直接复用，不花翻译调用
-                    article.body_sections_zh = article.body_sections
-                    article.content_zh = ""
-                else:
-                    article.content_zh = translate_to_chinese(
-                        client, settings.prompts, body_text
-                    )
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
@@ -703,12 +947,23 @@ def process_pending(
         statement = statement.limit(limit)
     articles = list(session.execute(statement).scalars())
 
+    # 信源上配的语言（auto/en/zh）。**必须真的传给 process_article**：
+    # 以前这个参数只有默认值 auto，用户在信源页选的「中文/英文」在
+    # 处理链里完全不生效 —— 页面上写着语言，产出还是按 auto 走。
+    langs = dict(session.execute(select(Source.id, Source.lang)).all())
+
     stats = {"pending": len(articles), "processed": 0, "irrelevant": 0, "failed": 0, "crashed": 0}
     checkpoint = max(1, settings.ai.batch_checkpoint_every)
     for index, article in enumerate(articles, start=1):
         previous_relevance = article.relevance
         try:
-            status = process_article(session, article, client, settings)
+            status = process_article(
+                session,
+                article,
+                client,
+                settings,
+                source_lang=(langs.get(article.source_id) if article.source_id else None) or LANG_AUTO,
+            )
         except Exception as exc:  # 兜底：任何意外都不该中断整批
             article.status = STATUS_FAILED
             if article.summary is None:
@@ -792,7 +1047,9 @@ def backfill_translations(
     pending_content: list[tuple[Article, str]] = []
     for article in rows:
         source = article.content_full or ""
-        if not looks_english(source):
+        # 与 process_article 用同一个判定（含信源上的显式语言设置），
+        # 否则会出现「处理时翻了、补译时又当成中文原文标成已处理」的矛盾状态。
+        if resolves_native_zh(article, article.source.lang if article.source else LANG_AUTO):
             # 中文原文不需要译文，三个字段一起标成已处理，别每轮都来扫
             article.content_zh = ""
             article.digest_zh = article.digest_zh or ""
@@ -836,13 +1093,13 @@ def backfill_translations(
             # 早先只在 process_article（新入库）里排版，补译这条路不排 ——
             # 于是所有「补出来的译文」正文里一个标题都没有，读者看到的是一整片
             # 没有层次的段落，段落横幅/本文目录也就永远不会出现。
-            if not article.body_sections_zh:
-                sections = structure_sections(
-                    client, settings.prompts, article.title_zh or article.title or "", translated
-                )
-                if sections:
-                    article.body_sections_zh = json.dumps(sections, ensure_ascii=False)
-                    stats["sections"] = stats.get("sections", 0) + 1
+            #
+            # 关键：**基于英文原文**排版，而不是基于译文。译文是重新组织的，
+            # 拿它切出来的分节与原文对不上；而原文那一份的英文小标题正好是
+            # 双语视图英文侧要用的。两边由同一节结构派生，所以逐节对齐。
+            if not article.body_sections_zh or not article.body_sections:
+                _build_bilingual_sections(client, settings.prompts, article, source)
+                stats["sections"] = stats.get("sections", 0) + 1
     session.flush()
     if any(stats[key] for key in ("titles", "digests", "contents")):
         log.info(
@@ -853,6 +1110,42 @@ def backfill_translations(
             stats["candidates"],
         )
     return stats
+
+
+def _build_bilingual_sections(
+    client: LLMClient,
+    prompts: PromptsConfig,
+    article: Article,
+    original: str,
+) -> bool:
+    """基于**英文原文**排一次版，同时写出中英两套章节。返回是否成功。
+
+    为什么必须基于原文而不是译文：译文是重新组织的（实测 45 段压成 15 段），
+    拿它切出来的分节与原文对不上。而原文那一次的英文小标题，正好就是双语
+    视图英文侧要用的 —— 两侧由同一份节结构派生，逐节一一对应。
+    中文原文的文章只需要中文侧（``section_pair(chinese=True)``）。
+    """
+    body = (original or "").strip()
+    if not body:
+        body = (article.content_zh or "").strip()
+    if not body:
+        return False
+    sections = structure_sections(client, prompts, article.title or "", body)
+    if not sections:
+        return False
+    chinese_source = not looks_english(body)
+    zh_sections = section_pair(sections, chinese=True)
+    if zh_sections is not None:
+        article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+    if chinese_source:
+        article.content_zh = ""          # 本来就是中文，标成已译完
+        return zh_sections is not None
+    en_sections = section_pair(sections, chinese=False)
+    if en_sections is not None:
+        article.body_sections = json.dumps(en_sections, ensure_ascii=False)
+    # 英文侧缺小标题就整篇不用章节结构：与其存一个必然错位的组合，
+    # 不如让两个语言版本都退回「原文直排」，至少是对称的。
+    return en_sections is not None
 
 
 def backfill_sections(
@@ -871,7 +1164,9 @@ def backfill_sections(
         session.execute(
             select(Article)
             .where(
-                Article.body_sections_zh.is_(None),
+                # 缺**任何一侧**的章节都算待补：只补中文侧会让双语模式变成
+                # 「中文有小标题、英文没有」，看起来就是有些段落有双语有些没有。
+                Article.body_sections_zh.is_(None) | Article.body_sections.is_(None),
                 Article.content_zh.isnot(None),
                 Article.content_zh != "",
                 Article.relevance == 1,
@@ -886,12 +1181,7 @@ def backfill_sections(
         if stats["filled"] >= limit:
             break
         stats["candidates"] += 1
-        sections = structure_sections(
-            client, settings.prompts, article.title_zh or article.title or "",
-            article.content_zh or "",
-        )
-        if sections:
-            article.body_sections_zh = json.dumps(sections, ensure_ascii=False)
+        if _build_bilingual_sections(client, settings.prompts, article, article.content_full or ""):
             stats["filled"] += 1
     session.flush()
     if stats["filled"]:

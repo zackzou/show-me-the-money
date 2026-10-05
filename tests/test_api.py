@@ -12,11 +12,43 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db import session_scope
+from app.models import Source
 from app.report.generator import generate_daily_report
 from app.utils.text import now_local
 from app.web.routes import PAGE_SIZE
 
 from .conftest import make_article
+
+
+def test_reading_stats_labels_each_script(seeded_db):
+    """阅读提示的单位要按文字种类给，不能笼统写成「字词」。
+
+    「253 字词」在中文里读起来是「词素」的意思，读者会以为算错了；
+    中英混排要写成「字 / 词」，纯中文是「字」，纯英文是「词」。
+    """
+    from app.web.routes import reading_stats
+
+    assert reading_stats("这是一篇纯中文的正文，讲的是漏洞赏金计划。")["label"] == (
+        "约 19 字 · 预计 1 分钟读完"
+    )
+    assert reading_stats("This is an English only article body about bug bounties.")["label"] == (
+        "约 10 词 · 预计 1 分钟读完"
+    )
+    mixed = reading_stats("谷歌冻结了开源漏洞赏金计划，Google 暂停 bounty 发放。")
+    assert "字 / 词" in mixed["label"], mixed["label"]
+    assert reading_stats("")["label"] == "正文较短"
+    # 混排也要分别计数再相加，不能整段按一个语种算
+    assert mixed["chars"] > 0
+    assert mixed["words"] > 0
+
+
+def test_reading_stats_ignores_layout_whitespace():
+    from app.web.routes import reading_stats
+
+    # 排版换行与缩进不算内容：否则「1200 字」可能只有 900 字
+    tight = reading_stats("中文正文内容")
+    loose = reading_stats("中文正文\n\n    内容")
+    assert tight["chars"] == loose["chars"] == 6
 
 
 def _today() -> str:
@@ -655,7 +687,8 @@ def test_lang_control_is_rendered(client):
     for value in ("zh", "en", "both"):
         assert f'data-lang="{value}"' in text
     # 取到元素后才绑定，且绑定前判空
-    assert 'if (box) box.addEventListener' in text
+    assert 'if (box) {' in text
+    assert 'box.addEventListener' in text
 
 
 def test_global_script_survives_missing_element(client):
@@ -1279,6 +1312,18 @@ def test_story_page_renders_ai_sections(client, settings: Settings, seeded_db):
                 "第三段译文内容，继续补足长度，让章节结构有意义。"
             ),
         )
+        # 中英两侧结构对齐（由同一次排版派生），小标题才渲染
+        article.body_sections = json.dumps(
+            [
+                {"h": "Background", "t": "First paragraph of the English original body text."},
+                {
+                    "h": "",
+                    "t": "Second paragraph of the English original body text.\n\n"
+                    "Third paragraph of the English original body text.",
+                },
+            ],
+            ensure_ascii=False,
+        )
         article.body_sections_zh = json.dumps(
             [
                 {"h": "背景", "t": "第一段译文内容，这里补足到足够长度以通过正文字数门槛的判定。"},
@@ -1295,7 +1340,37 @@ def test_story_page_renders_ai_sections(client, settings: Settings, seeded_db):
     page = client.get(f"/story/{article_id}")
     assert page.status_code == 200
     assert ">背景</h3>" in page.text  # AI 定好的小标题渲染成 h3
+    assert ">Background</h3>" in page.text, "英文侧也要有小标题（双语逐节对照）"
     assert "本文目录" in page.text or "toc" in page.text.lower() or "sec-zh-0" in page.text
+
+
+def test_story_page_flattens_when_bilingual_structures_differ(client, seeded_db):
+    """中英结构对不上时，两边一起退回平铺 —— 不能一半有一半没有。
+
+    历史上只给中文译文存过章节结构（body_sections_zh 有 30 篇、body_sections
+    只有 3 篇），于是双语模式下中文那一半有小标题横幅、英文那一半没有，
+    读者看到的就是「有些段落双语、有些只有一种语言」。
+    """
+    import json
+
+    with session_scope() as session:
+        article = make_article(
+            session, title="Structure mismatch", relevance=1, status="processed",
+            content_full="English paragraph one.\n\nEnglish paragraph two.",
+            content_zh="第一段译文。\n\n第二段译文。",
+        )
+        # 只存中文侧结构 —— 英文侧空着，正是历史上的样子
+        article.body_sections_zh = json.dumps(
+            [{"h": "背景", "t": "第一段译文。"}, {"h": "", "t": "第二段译文。"}],
+            ensure_ascii=False,
+        )
+        article.body_sections = None
+        article_id = article.id
+
+    page = client.get(f"/story/{article_id}")
+    assert page.status_code == 200
+    assert ">背景</h3>" not in page.text, "结构不对称时不应只给中文显示横幅"
+    assert "第二段译文" in page.text, "正文内容不能因为退回平铺而丢失"
 
 
 # ── 信源管理页 ────────────────────────────────────────────────────────────
@@ -1308,6 +1383,36 @@ def test_sources_page_lists_seeded_sources(client, seeded_db):
     assert "测试源" in page.text
     # 导航里有入口
     assert 'href="/sources"' in page.text
+    # 回收站面板即使为空也必须渲染出来：局部更新靠 replaceWith(#src-trash)
+    # 换面板，回收站为空时整个面板不存在的话，「删掉第一个信源」这种从无到有
+    # 的情况就没有替换目标，新面板会被悄悄丢掉（页面上看不到回收站）。
+    assert 'id="src-trash"' in page.text
+    assert "已删除的信源" not in page.text, "空的回收站不该显示标题"
+
+
+def test_sources_partial_list_always_contains_trash_slot(client, seeded_db):
+    """局部更新用的列表片段必须恒带 #src-trash（空的时候带 hidden）。
+
+    没有它就会同时坏两个方向：删除第一个源时新面板被丢掉（看不到回收站），
+    撤回最后一个源时旧面板留在页面上不消失。
+    """
+    part = client.get("/sources/list?tab=on&page=1", headers={"X-Smtt-Partial": "1"})
+    assert part.status_code == 200
+    assert 'id="src-trash"' in part.text
+    assert "hidden" in part.text
+
+    # 真删一个源之后，片段里的面板要变成可见且带条目
+    with session_scope() as session:
+        sid = session.query(Source).where(Source.deleted == 0).first().id  # type: ignore[union-attr]
+    client.post(f"/sources/{sid}/delete", headers={"X-Smtt-Partial": "1"}, follow_redirects=False)
+    part2 = client.get("/sources/list?tab=on&page=1", headers={"X-Smtt-Partial": "1"})
+    assert 'id="src-trash"' in part2.text
+    assert "<summary>已删除的信源" in part2.text
+    client.post(f"/sources/{sid}/restore", headers={"X-Smtt-Partial": "1"}, follow_redirects=False)
+
+    # 撤回之后又变回 hidden，但面板本身还在
+    part3 = client.get("/sources/list?tab=on&page=1", headers={"X-Smtt-Partial": "1"})
+    assert 'id="src-trash" hidden' in part3.text or 'hidden id="src-trash"' in part3.text, part3.text[-400:]
 
 
 def test_sources_create_probes_before_saving(client, monkeypatch, seeded_db):

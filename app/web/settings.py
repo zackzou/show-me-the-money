@@ -324,6 +324,62 @@ def record_llm_call(settings: Settings, *, model: str, ok: bool,
     record_usage(settings, event)
 
 
+def compact_num(value: object) -> str:
+    """把大数字压成 ``4.72M`` 这种写法。
+
+    为什么：按天那张表有 7 列，右栏只有 440px 宽，``4,724,826`` 这种 9 字符的
+    千分位写法让最后一列被裁掉半截（实测「7,1…」看不全）—— 而被裁掉的恰好是
+    最想看的那一列。压成 4.72M 之后每格只要 55px，整行放得下。
+    精确值仍在 title 属性里，需要核对时鼠标悬停就能看到。
+    """
+    try:
+        number = int(str(value or 0))
+    except (TypeError, ValueError):
+        return "0"
+    if abs(number) < 1000:
+        return str(number)
+    if abs(number) < 1_000_000:
+        text = f"{number / 1000:.1f}"
+        return text[:-2] + "K" if text.endswith(".0") else text + "K"
+    if abs(number) < 1_000_000_000:
+        text = f"{number / 1_000_000:.2f}".rstrip("0").rstrip(".")
+        return text + "M"
+    text = f"{number / 1_000_000_000:.2f}".rstrip("0").rstrip(".")
+    return text + "B"
+
+
+def _match_preset(base: str) -> str:
+    """当前 base_url 对应哪个厂商预设（匹配不上返回空串）。
+
+    匹配方式是**前缀**：用户经常填 ``https://api.deepseek.com``（不带 /v1），
+    或者在预设地址后面又追加了一段路径。只做全等比对的话这两种都匹配不上，
+    卡片就不会被选中，用户仍然要自己找。
+    """
+    target = (base or "").strip().rstrip("/")
+    if not target:
+        return ""
+    best = ""
+    for preset in PROVIDER_PRESETS:
+        # 有些厂商允许省略 /v1（DeepSeek 两个都行），所以根地址也要参与匹配
+        for candidate in _preset_roots(str(preset.get("base", ""))):
+            matches = target == candidate or target.startswith(candidate + "/")
+            if matches and len(candidate) > len(best):
+                best = str(preset.get("id", ""))
+    return best
+
+
+def _preset_roots(base: str) -> list[str]:
+    """一个预设地址的可匹配根：原地址，以及去掉尾部 ``/v1`` 之后的地址。"""
+    root = base.rstrip("/")
+    roots = [root] if root else []
+    for suffix in ("/v1", "/v4", "/compatible-mode/v1"):
+        if root.endswith(suffix):
+            trimmed = root[: -len(suffix)].rstrip("/")
+            if trimmed and trimmed not in roots:
+                roots.append(trimmed)
+    return roots
+
+
 def _split_models(raw: str) -> list[str]:
     """把逗号分隔的备用模型串拆成列表（去空格、去空项、去重保序）。"""
     seen: set[str] = set()
@@ -490,6 +546,10 @@ def _page(request: Request, *, notice: dict[str, str] | None = None,
             log_pages=total_pages,
             log_total=len(rows),
             log_window=_page_window(log_page, total_pages),
+            compact=compact_num,
+            # 当前配置命中哪个厂商预设 —— 页面据此默认选中那张卡片，
+            # 用户一眼能看到「我现在用的是哪一家」，不用自己对着地址猜。
+            active_preset=_match_preset(settings.llm.api_base if settings else ""),
             current={
                 "api_base": settings.llm.api_base if settings else "",
                 "api_key_masked": _mask(settings.llm.api_key) if settings else "",

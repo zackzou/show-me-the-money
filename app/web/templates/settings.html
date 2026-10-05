@@ -5,8 +5,7 @@
   <div class="kicker">SETTINGS</div>
   <h1>模型设置</h1>
   <p class="meta">
-    改完点「保存并生效」，下一个抓取/处理任务就用新配置 —— <b>不需要重启</b>。
-    保存前会自动发一次真实请求测连通性，不通就不存。
+    改完点「保存并生效」，下个任务就用新配置，<b>不需要重启</b>；保存前会先测连通性。
   </p>
 </div>
 
@@ -26,6 +25,7 @@
         {% if u.input %}<span class="chip">输入 {{ u.input }}</span>{% endif %}
         {% if u.output %}<span class="chip">输出 {{ u.output }}</span>{% endif %}
         {% if u.cached %}<span class="chip">缓存命中 {{ u.cached }}</span>{% endif %}
+        {% if u.cache_write %}<span class="chip">缓存写入 {{ u.cache_write }}</span>{% endif %}
         {% if u.reasoning %}<span class="chip">思考 {{ u.reasoning }}</span>{% endif %}
         {% if u.total %}<span class="chip strong">合计 {{ u.total }}</span>{% endif %}
       </div>
@@ -33,22 +33,36 @@
   </div>
 {% endif %}
 
-<section class="sec">
-  <div class="sec-t">厂商预设<span class="sec-h">点一下自动填入，之后都能改</span></div>
+{#
+  两栏布局：左边「选厂商 + 填配置」，右边「用量与日志」。
+  早先是三个大 section 竖着排，用量表和日志在页面最下面，用户要一路拖到底
+  才能看到「今天花了多少 token」—— 而那恰恰是他最常看的东西。现在并排放，
+  1440px 下一屏能看到全部内容。
+#}
+<div class="cfg2col">
+
+<section class="sec col-a">
+  <div class="sec-t">厂商预设
+    <span class="sec-h">
+      {%- if active_preset %}当前：{{ presets|selectattr('id','equalto',active_preset)|map(attribute='name')|first }}
+      {%- else %}点一下自动填入，之后都能改{% endif -%}
+    </span>
+  </div>
   <div class="presets">
     {% for p in presets %}
-      <button type="button" class="preset" data-base="{{ p.base }}"
+      <button type="button" class="preset {{ 'on' if p.id == active_preset }}"
+              data-base="{{ p.base }}" data-id="{{ p.id }}"
               data-models="{{ p.models|join(',') }}"
-              {% if p.note %}title="{{ p.name }}：{{ p.note }}"{% endif %}>
+              {% if p.note %}title="{{ p.name }}：{{ p.note }}"{% endif %}
+              {% if p.id == active_preset %}aria-pressed="true"{% endif %}>
         <b>{{ p.name }}</b><em>{{ p.models[0] }}{% if p.models|length > 1 %} 等{% endif %}</em>
+        {% if p.id == active_preset %}<i class="pin" aria-hidden="true">使用中</i>{% endif %}
       </button>
     {% endfor %}
   </div>
-</section>
 
-<section class="sec">
-  <div class="sec-t">API 配置</div>
   <form class="cfg" method="post" action="/settings" id="cfg-form" autocomplete="off">
+
     <label class="fld">
       <span class="lbl">API Base URL</span>
       <input type="text" name="api_base" id="f-base" required
@@ -100,6 +114,7 @@
   </form>
 </section>
 
+<div class="col-b">
 <section class="sec">
   <div class="sec-t">Token 用量<span class="sec-h">抓取与处理任务的真实消耗</span></div>
   <div class="kpis">
@@ -110,30 +125,33 @@
     <div class="kpi accent"><b>{{ '{:,}'.format(usage.totals.charged_tokens or 0) }}</b><span>计费口径合计</span></div>
     <div class="kpi"><b>{{ usage.totals.calls }}</b><span>调用 · 失败 {{ usage.totals.fail }}</span></div>
   </div>
+  {# 这段注脚在 432px 的右栏里会占 85px（4 行），整页因此超出一屏。
+     保留「为什么不直接用 total_tokens」这个结论，例子缩成一个。 #}
   <p class="ftip">
-    「计费口径合计」= 输入 − 缓存命中 + 输出 + 思考超出输出的部分。
-    网关报的 <code>total_tokens</code> 在实测中<b>不含思考 token</b>
-    （一次改写调用 thought 用了 2045 而 output 只有 19，直接用它会少算一半），
-    所以这里按上面的口径自己算；缓存命中是从输入里扣的，不重复加。
+    「计费口径合计」= 输入 − 缓存命中 + 输出 + 思考超出部分。网关报的
+    <code>total_tokens</code> 实测<b>不含思考 token</b>，直接用会少算一半。
   </p>
 
   {% if usage.days %}
     <table class="utbl">
       <thead>
-        <tr><th>日期</th><th>调用</th><th>成功</th><th>失败</th>
-            <th>输入</th><th>输出</th><th>缓存</th><th>思考</th><th>计费合计</th></tr>
+        {# 7 列才塞得进右栏：9 列时最后一列被裁掉半截（实测「1,94…」看不全）。
+           「成功」这一列等于 调用 − 失败，信息冗余，去掉；「缓存」在下面的
+           KPI 卡里已经有了，不必在表里再占一列。 #}
+        <tr><th>日期</th><th>调用</th><th>失败</th>
+            <th>输入</th><th>输出</th><th>思考</th><th>计费合计</th></tr>
       </thead>
       <tbody>
         {% for day, st in usage.days %}
           <tr>
             <td class="d">{{ day }}</td>
-            <td>{{ st.calls }}</td><td>{{ st.ok }}</td>
+            <td>{{ st.calls }}</td>
             <td class="{{ 'bad' if st.fail else 'zero' }}">{{ st.fail }}</td>
-            <td>{{ '{:,}'.format(st.input_tokens) }}</td>
-            <td>{{ '{:,}'.format(st.output_tokens) }}</td>
-            <td class="{{ 'zero' if not st.cached_tokens }}">{{ '{:,}'.format(st.cached_tokens) }}</td>
-            <td class="dim">{{ '{:,}'.format(st.reasoning_tokens) }}</td>
-            <td class="tot">{{ '{:,}'.format(st.charged_tokens) }}</td>
+            {# 压成 4.72M 这种写法，7 列才放得进右栏；精确值在 title 里 #}
+            <td title="{{ '{:,}'.format(st.input_tokens) }}">{{ compact(st.input_tokens) }}</td>
+            <td title="{{ '{:,}'.format(st.output_tokens) }}">{{ compact(st.output_tokens) }}</td>
+            <td class="dim" title="{{ '{:,}'.format(st.reasoning_tokens) }}">{{ compact(st.reasoning_tokens) }}</td>
+            <td class="tot" title="{{ '{:,}'.format(st.charged_tokens) }}">{{ compact(st.charged_tokens) }}</td>
           </tr>
         {% endfor %}
       </tbody>
@@ -143,7 +161,7 @@
   {% endif %}
 </section>
 
-<section class="sec">
+<section class="sec sec-log">
   <div class="sec-t">调用日志<span class="sec-h">共 {{ log_total }} 条 · 第 {{ log_page }}/{{ log_pages }} 页</span></div>
   {% if log_rows %}
     <ul class="ulog">
@@ -186,11 +204,50 @@
     <p class="ftip">暂无记录。</p>
   {% endif %}
 </section>
+</div>{# /col-b #}
+
+</div>{# /cfg2col #}
 
 {% endblock %}
 
 {% block extra %}
 <style>
+  /* 两栏：左边选厂商+填配置，右边用量+日志。
+     用户要求「所有内容一个页面显示完，不要一路拖到底」—— 用并排 + 内部滚动
+     把页面高度锁在一屏附近；窄屏自动退回单列（各自内部仍然可滚）。 */
+  .cfg2col { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);
+             gap:0 34px; align-items:start; }
+  .cfg2col .col-a { grid-column:1; }
+  .cfg2col .col-b { grid-column:2; min-width:0; }
+  /* 日志与按天表格都用固定高度 + 内部滚动，页面本身不被它们撑长 */
+  /* 日志列表内部滚动，不撑高整页：原来 46vh/420px 在 1000px 高的屏上就把
+     整页顶到 1247px，用户要一路拖到底才看得见下面的分页。 */
+  .col-b .ulog { max-height:min(24vh,212px); overflow-y:auto; }
+
+  /* 宽屏：两栏整体锁在一屏高度内，日志列表吃掉剩下的空间自己滚。
+     这样 1366x900 这种常见笔记本也不用拖到底 —— 之前只能靠写死
+     min(24vh,212px)，换个屏高就得重新试。窄屏（单栏）不适用，媒体查询
+     限定 1080px 以上。 */
+  @media (min-width:1080px) {
+    /* grid-template-rows 必须写 minmax(0,1fr)：只给容器写 height 的话，
+       那唯一一行 auto 轨道仍然按内容（952px）撑开，容器高度形同虚设，
+       页面照样超出一屏。minmax(0,1fr) 才让行可以被压到容器高度。 */
+    /* 还要 align-items:stretch：基线上的 .cfg2col 是 align-items:start，
+       两栏各按内容高度摆放，行高 790px 也压不住 col-b 那 952px 的内容。 */
+    .cfg2col { height:calc(100vh - 254px); grid-template-rows:minmax(0,1fr); align-items:stretch; }
+    .col-a { min-height:0; overflow-y:auto; }
+    .col-b { display:flex; flex-direction:column; min-height:0; }
+    .col-b .sec-log { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
+    .col-b .ulog { flex:1 1 auto; min-height:64px; max-height:none; }
+  }
+  .col-b .utbl { max-height:min(30vh,260px); overflow-y:auto; }
+  .col-b .ftip { margin-top:8px; }
+  @media (max-width:1080px) {
+    .cfg2col { grid-template-columns:minmax(0,1fr); }
+    .cfg2col .col-a, .cfg2col .col-b { grid-column:1; }
+    .col-b .ulog, .col-b .utbl { max-height:320px; }
+  }
+
   .notice { margin:18px 0 0; padding:13px 16px; border-radius:10px; font-size:13.5px; line-height:1.7;
             border:1px solid var(--line); display:flex; gap:10px; align-items:flex-start; }
   .notice .ico { width:18px; height:18px; border-radius:50%; flex:none; margin-top:1px;
@@ -213,6 +270,13 @@
 
   .sec-t .sec-h { float:right; font-size:11.5px; font-weight:400; color:var(--faint);
                   letter-spacing:0; margin-top:2px; }
+  /* 选中的厂商卡片：加粗 + 主色描边 + 角标，一眼看到「现在用的是哪家」 */
+  .preset.on { border-color:var(--accent); background:var(--accent-soft); color:var(--accent); }
+  .preset.on b { color:var(--accent); }
+  .preset.on .pin { position:absolute; top:-7px; right:-7px; font-style:normal;
+                    font-size:10px; font-weight:700; padding:1px 6px; border-radius:999px;
+                    background:var(--accent); color:#fff; }
+  .preset { position:relative; }
   .presets { display:flex; flex-wrap:wrap; gap:8px; }
   .preset { display:flex; flex-direction:column; gap:3px; align-items:flex-start; cursor:pointer;
             padding:10px 14px; border:1px solid var(--line); border-radius:10px;
@@ -224,6 +288,12 @@
                font-family:ui-monospace,Menlo,monospace; }
 
   .cfg { display:flex; flex-direction:column; gap:19px; max-width:760px; }
+  /* 宽屏两列：4 个字段并排放两行，按钮独占一行。col-a 本来就空着右边，
+     单列排 4 个字段要 479px，两列只要 ~270px —— 这是「设置一页放下」的关键。 */
+  @media (min-width:1240px) {
+    .cfg { display:grid; grid-template-columns:1fr 1fr; gap:15px 18px; max-width:none; align-items:start; }
+    .cfg .btns { grid-column:1 / -1; }
+  }
   .fld { display:flex; flex-direction:column; gap:7px; }
   .fld .lbl { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--muted); }
   .lbl .tag-ok { font-style:normal; font-size:10.5px; font-weight:500; color:#1f8a5a;
@@ -257,6 +327,8 @@
   .ghost { border:1px solid var(--line); background:var(--surface); color:var(--muted); }
   .ghost:hover { color:var(--accent); border-color:var(--accent); }
 
+  /* 别为了塞成一行而把最小宽度调到 100px：实测那样「缓存命中 22%」会折行，
+     两行指标反而比原来高 36px。112px 是试出来的下限。 */
   .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:9px; margin-bottom:18px; }
   .kpi { padding:13px 15px; border:1px solid var(--line); border-radius:11px; background:var(--surface); }
   .kpi b { display:block; font-size:19px; font-weight:700; color:var(--text);
@@ -323,6 +395,13 @@
 </style>
 <script>
   var models = document.getElementById("model-list");
+  function markPreset(btn) {
+    document.querySelectorAll(".preset").forEach(function (b) {
+      var on = b === btn;
+      b.classList.toggle("on", on);
+      if (on) { b.setAttribute("aria-pressed", "true"); } else { b.removeAttribute("aria-pressed"); }
+    });
+  }
   document.querySelectorAll(".preset").forEach(function (btn) {
     btn.addEventListener("click", function () {
       document.getElementById("f-base").value = btn.getAttribute("data-base") || "";
@@ -334,6 +413,9 @@
       models.innerHTML = list.map(function (m) {
         return '<option value="' + m.replace(/"/g, "") + '"></option>';
       }).join("");
+      // 点过的卡片高亮：让「当前用的是哪家」始终有视觉指示，
+      // 而不是要靠对照输入框里的地址才知道
+      markPreset(btn);
     });
   });
 

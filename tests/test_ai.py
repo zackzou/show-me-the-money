@@ -99,21 +99,39 @@ def test_llm_client_endpoint_normalisation():
 
 
 def test_process_article_relevant(seeded_db, settings: Settings):
-    answers = iter(
-        [
-            "yes 88", "这是摘要", "这是速览：两三句导语", "这是推荐理由",
-            "模型\nOpenAI, 大模型", "English Title\nEnglish digest here", "标签一,标签二",
-            "这是推送语",
-        ]
-    )
+    """中文原文：相关度/摘要/分类照常产出，但**不做英文翻译**。
+
+    中文译中文既浪费调用，又把「AI 重写」的质量损耗套到本来不需要改写的原文上；
+    页面上也不该出现 EN / 双语按钮。
+    """
+    seen: list[str] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
+        prompt = request.content.decode("utf-8", "ignore")
+        seen.append(prompt[:60].replace("\n", " "))
+        # 顺序要紧：几乎每个提示词里都有「摘要」两个字，所以按提示词最独特的
+        # 那句话来匹配，摘要放最后兜底。
+        answers = [
+            ("写一段导语", "这是速览：两三句导语"),
+            ("为什么值得关心", "这是推荐理由"),
+            ("分类和主题标注", "模型\nOpenAI, 大模型"),
+            ("提取 3~5 个中文关键词", "标签A,标签B"),
+            ("早报推送语", "这家公司发布了新的智能体框架。"),
+            ("行业情报分析师", "这是摘要"),
+            ("直接相关", "yes 88"),
+        ]
+        for key, value in answers:
+            if key in prompt:
+                return httpx.Response(200, json={"choices": [{"message": {"content": value}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "通用内容。"}}]})
 
     client = _client(handler, retries=0)
     try:
         with session_scope() as session:
-            article = make_article(session, title="相关文章", content="正文", status="pending", relevance=None)
+            article = make_article(
+                session, title="相关文章",
+                content="这是一篇中文正文，讲的是模型这件事。", status="pending", relevance=None,
+            )
             status = process_article(session, article, client, settings)
             assert status == "processed"
             assert article.relevance == 1
@@ -122,10 +140,216 @@ def test_process_article_relevant(seeded_db, settings: Settings):
             assert article.reason == "这是推荐理由"
             assert article.category == "模型"
             assert article.topics == '["OpenAI", "大模型"]'
-            assert article.title_en == "English Title"
-            assert article.digest_en == "English digest here"
             assert article.score == 88
-            assert article.tags == "标签一,标签二"
+            # 中文原生：不产出英文版
+            assert article.title_en is None
+            assert article.digest_en is None
+            assert article.title_zh == "相关文章"
+            assert article.content_zh == ""
+    finally:
+        client.close()
+
+
+def test_process_article_english_source_gets_chinese_version(seeded_db, settings: Settings):
+    """英文原文：标题/导读/正文都必须有中文版（页面默认显示中文）。
+
+    按提示词内容应答，不按调用顺序 —— 这条路径的调用次数会随实现变化，
+    用固定序列的话改一处实现就得跟着改一处测试。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if "判断下面这条内容是否与调研方向" in prompt:
+            out = "yes 88"
+        elif "写一段导语" in prompt:
+            # 按提示词输出两行：中文一行 + "EN: " 开头的英文一行
+            out = "中文速览内容。\nEN: English digest line."
+        elif "改写成一个中文标题" in prompt:
+            out = "中文标题内容"
+        elif "纽约时报" in prompt:
+            out = "[]"
+        elif "重新写成" in prompt or "编译" in prompt:
+            # 长度必须落在原文的 0.25~1.3 倍之间，否则会被整篇长度校验拒掉
+            out = ("苹果今天发布了面向企业场景的新一代智能体框架，"
+                   "这套框架面向生产环境的部署需求，提供了完整的工具调用与状态管理能力。"
+                   "公司在发布会上说明了设计取舍，并给出了可迁移的接入方式。") * 3
+        else:
+            out = "中文内容"
+        return httpx.Response(200, json={"choices": [{"message": {"content": out}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session,
+                title="Apple ships a new model",
+                content=("Apple announced a new enterprise agent framework today. " * 12),
+                status="pending", relevance=None,
+            )
+            status = process_article(session, article, client, settings)
+            assert status == "processed"
+            assert article.relevance == 1
+            # 纯英文标题直接复用原文，不花一次调用
+            assert article.title_en == article.title
+            assert article.title_zh, "英文原文必须有中文标题"
+            assert article.digest, "必须有中文导语"
+            # 英文导读来自导语提示词里的 "EN: " 那一行，不能拿中文导语顶上去
+            assert article.digest_en == "English digest line."
+            assert article.content_zh, "英文原文必须有中文正文"
+    finally:
+        client.close()
+
+
+def test_source_lang_zh_forces_no_translation_even_for_english_text(
+    seeded_db, settings: Settings
+):
+    """用户把信源固定成中文站时，即使这批文章是英文也不翻。
+
+    「自适应」是默认值，但不是唯一入口 —— 站点混发、或者判定被样本带偏时，
+    用户需要能强制覆盖。
+    """
+    calls = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        prompt = request.content.decode("utf-8", "ignore")
+        if prompt.lstrip().startswith("yes") or "相关度" in prompt[:200]:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "yes 88"}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "内容"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session, title="Apple ships a new model",
+                content=("Apple announced a new enterprise agent framework today. " * 12),
+                status="pending", relevance=None,
+            )
+            process_article(session, article, client, settings, source_lang="zh")
+            assert article.title_en is None, "强制中文源时不应产出英文版"
+            assert article.content_zh == ""
+    finally:
+        client.close()
+
+
+def test_source_lang_zh_still_produces_tags_and_brief(seeded_db, settings: Settings):
+    """中文原生文章必须走完整个处理流程，不能只做「不翻译」就提前返回。
+
+    早先的写法在中文分支里直接 `return STATUS_PROCESSED`，标签与早报推送语
+    都被跳过：文章状态是「已处理」，tags / brief 却全空，日报里少了标签，
+    补早报那一轮也会一直把它捞回来。这里锁住「不翻译」只关掉翻译那几步。
+    """
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if prompt.lstrip().startswith("yes") or "相关度" in prompt[:200]:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "yes 88"}}]})
+        if "EN:" in prompt or "只输出中文速览" in prompt:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "这是一条中文速览。"}}]}
+            )
+        if "标签" in prompt:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "标签A,标签B"}}]})
+        # 早报推送语要求是完整一句（以句末标点收尾），这里给一句合法的
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "这家公司推出了新的智能体框架。"}}]}
+        )
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session,
+                title="某公司发布新一代智能体框架",
+                content=("这家公司今天发布了面向企业场景的新框架，提供完整的工具调用能力。" * 6),
+                status="pending",
+                relevance=None,
+            )
+            assert process_article(session, article, client, settings) == "processed"
+            assert article.title_en is None
+            assert article.tags, "中文文章也要打标签"
+            assert article.brief_zh, "中文文章也要有早报推送语"
+    finally:
+        client.close()
+
+
+def test_digest_prompt_skips_english_line_for_native_chinese(seeded_db, settings: Settings):
+    """中文原文不生成英文速览：提示词里要明确说「只输出中文一行」。
+
+    否则模型照模板顺手把 EN 行也写了 —— 那段英文既没人看（页面上没有 EN
+    按钮），又是白花的 token。
+    """
+    prompts: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        prompts.append(prompt)
+        if prompt.lstrip().startswith("yes") or "相关度" in prompt[:200]:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "yes 88"}}]})
+        if "速览" in prompt:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "中文速览一行。\nEN: english"}}]}
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "内容"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(
+                session,
+                title="中文标题",
+                content=("这是一篇中文原文，正文里全是汉字，没有任何英文单词。" * 8),
+                status="pending",
+                relevance=None,
+            )
+            process_article(session, article, client, settings)
+            digest_prompts = [p for p in prompts if "速览" in p]
+            assert digest_prompts, "应该有速览提示词"
+            assert any("只输出中文速览" in p for p in digest_prompts)
+            # 即便模型不听话多给了 EN 行，也必须丢掉
+            assert article.digest_en is None
+    finally:
+        client.close()
+
+
+def test_process_pending_passes_source_lang(seeded_db, settings: Settings):
+    """信源上配的语言必须真的进到处理流程里。
+
+    以前 `process_pending` 调 `process_article` 时没传 `source_lang`，
+    参数一直用默认值 auto —— 用户在信源页选的语言形同虚设。
+
+    用「中文正文 + 信源固定英文」这个组合来分辨：auto 会判成中文原生、
+    title_en 留空；只有 source_lang=en 真的传进去了，才会去翻出英文标题。
+    """
+    from app.models import Source
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if prompt.lstrip().startswith("yes") or "相关度" in prompt[:200]:
+            return httpx.Response(200, json={"choices": [{"message": {"content": "yes 88"}}]})
+        if "英文标题" in prompt:
+            return httpx.Response(
+                200, json={"choices": [{"message": {"content": "English Title Here"}}]}
+            )
+        return httpx.Response(200, json={"choices": [{"message": {"content": "内容"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            source = Source(name="英文站", url="https://example.com/feed-en", lang="en")
+            session.add(source)
+            session.flush()
+            article = make_article(
+                session,
+                source_id=source.id,
+                title="某公司发布新一代智能体框架",
+                content=("这家公司今天发布了面向企业场景的新框架，能力覆盖工具调用。" * 6),
+                status="pending",
+                relevance=None,
+            )
+            stats = process_pending(session, client, settings)
+            assert stats["processed"] == 1
+            assert article.title_en == "English Title Here", (
+                "信源固定为英文时，中文正文也该翻出英文标题"
+            )
     finally:
         client.close()
 
@@ -602,32 +826,29 @@ def test_parse_translate():
     assert parse_translate("") == (None, None)
 
 
-def test_english_source_skips_translation(seeded_db, settings: Settings):
-    """整篇英文的信源不必再翻一次，省一次调用；英文直接复用原文。"""
-    import httpx
+def test_english_source_skips_redundant_translation(seeded_db, settings: Settings):
+    """整篇英文的信源不该再花一次调用去做「中译英」。
 
-    en_summary = (
-        "Google will end free access to its Flash and Pro models, "
-        "a move that tightens monetization for large language model providers."
-    )
-    # 纯英文信源：正文与摘要复用原文不翻（没有中译英那一跳），
-    # 但标题与导读都要补中文版 → 6 次 + 中文标题 + 中文导读
-    answers = iter([
-        "yes 80",
-        en_summary,
-        "English digest",
-        "reason",
-        "产品\\nAI",
-        "苹果收紧隐私设置",
-        "谷歌将结束对 Flash 与 Pro 模型的免费访问",
-        "标签",
-        "谷歌收紧模型免费访问，转向商业化变现。",
-    ])
-    calls = {"n": 0}
+    标题是英文 → 直接复用原文；英文导读用导语那次调用顺带产出的 "EN: " 行。
+    两者都不需要额外的翻译调用 —— 以前这里会白翻一次。
+    """
+    calls = {"prompts": []}
 
     def handler(request: httpx.Request) -> httpx.Response:
-        calls["n"] += 1
-        return httpx.Response(200, json={"choices": [{"message": {"content": next(answers)}}]})
+        prompt = request.content.decode("utf-8", "ignore")
+        calls["prompts"].append(prompt)
+        if "判断下面这条内容是否与调研方向" in prompt:
+            out = "yes 80"
+        elif "写一段导语" in prompt:
+            out = ("谷歌将结束对 Flash 与 Pro 模型的免费访问。\n"
+                   "EN: Google will end free access to its Flash and Pro models.")
+        elif "改写成一个中文标题" in prompt:
+            out = "谷歌收紧模型免费访问"
+        elif "纽约时报" in prompt:
+            out = "[]"
+        else:
+            out = "中文内容"
+        return httpx.Response(200, json={"choices": [{"message": {"content": out}}]})
 
     client = _client(handler, retries=0)
     try:
@@ -635,20 +856,22 @@ def test_english_source_skips_translation(seeded_db, settings: Settings):
             article = make_article(
                 session,
                 title="An English headline about AI agents shipping to production this week",
+                content=("Google said it will end free access to its Flash and Pro models "
+                         "for all developers starting next quarter. " * 6),
                 status="pending",
                 relevance=None,
             )
             assert process_article(session, article, client, settings) == "processed"
-            assert article.title_en == article.title, "纯英文标题直接复用原文，不翻"
-            assert article.digest_en == en_summary, "纯英文导语直接复用摘要原文"
-            # relevance/summary/digest/reason/classify + 中文标题 + 中文导读 + tags + 推送语
-            assert calls["n"] == 9
-            assert article.title_zh == "苹果收紧隐私设置"
-            # 中文模式下导读读的是中文版，不是那段英文
-            assert article.digest_zh == "谷歌将结束对 Flash 与 Pro 模型的免费访问"
-            assert article.brief_zh == "谷歌收紧模型免费访问，转向商业化变现。"
+            assert article.title_en == article.title, "纯英文标题直接复用原文"
+            assert article.digest_en == (
+                "Google will end free access to its Flash and Pro models."
+            )
+            assert article.title_zh == "谷歌收紧模型免费访问"
+            assert article.digest_zh == "", "导语本来就是中文，标记成已处理即可"
     finally:
         client.close()
+    # 不该出现「把中文资讯翻译成英文」那一跳
+    assert not any("把下面这条中文资讯翻译成英文" in p for p in calls["prompts"])
 
 
 def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settings):
@@ -1342,18 +1565,46 @@ def test_backfill_briefs_skips_without_chinese_digest(seeded_db, settings: Setti
         client.close()
 
 
-def test_parse_sections_reads_headings(settings: Settings):
+def test_parse_sections_reads_bilingual_headings(settings: Settings):
+    """章节一次给出中英两个标题 —— 双语视图靠它逐节对齐。"""
     from app.ai.processor import parse_sections
+
+    raw = (
+        '[{"h_zh": "背景", "h_en": "Background", "paras": ["第一段。", "第二段。"]},'
+        ' {"h_zh": "进展", "h_en": "What happens next", "paras": ["第三段。"]}]'
+    )
+    assert parse_sections(raw) == [
+        {"h_zh": "背景", "h_en": "Background", "t": "第一段。\n\n第二段。"},
+        {"h_zh": "进展", "h_en": "What happens next", "t": "第三段。"},
+    ]
+    # 模型有时会裹上 Markdown 代码块
+    assert parse_sections("```json\n" + raw + "\n```") == parse_sections(raw)
+    # ���解析不了就返回 None，调用方退回原文直排
+    assert parse_sections("完全不是 JSON 的东西") is None
+    assert parse_sections("") is None
+
+
+def test_parse_sections_still_accepts_legacy_markdown(settings: Settings):
+    """旧的 ``## 小标题`` 格式仍要能解析（老配置/缓存输出）。
+
+    但它只有一个标题，所以 ``h_en`` 必须是空的 —— section_pair 会因此拒绝
+    用它建英文侧结构，双语视图退回对称的「原文直排」，而不是错位。
+    """
+    from app.ai.processor import parse_sections, section_pair
 
     raw = "## 背景\n\n第一段。\n\n第二段。\n\n## 进展\n\n第三段。"
     sections = parse_sections(raw)
     assert sections == [
+        {"h_zh": "背景", "h_en": "", "t": "第一段。\n\n第二段。"},
+        {"h_zh": "进展", "h_en": "", "t": "第三段。"},
+    ]
+    assert section_pair(sections, chinese=True) == [
         {"h": "背景", "t": "第一段。\n\n第二段。"},
         {"h": "进展", "t": "第三段。"},
     ]
+    assert section_pair(sections, chinese=False) is None, "缺英文标题就不能建英文侧"
     # 单节无标题等于没分
     assert parse_sections("第一段。\n\n第二段。") is None
-    assert parse_sections("") is None
 
 
 def test_structure_sections_skips_short_body(settings: Settings):
@@ -1443,19 +1694,21 @@ def test_backfill_translations_also_builds_sections(seeded_db, settings: Setting
 
     def handler(request: httpx.Request) -> httpx.Response:
         prompt = request.content.decode("utf-8", "ignore")
-        if "用中文重新写成一篇中国读者能顺畅读完的文章" in prompt:
+        if "纽约时报" in prompt and "责任编辑" in prompt:
+            # 排版一次给出中英两套小标题；段落必须**原样照放**英文原文，
+            # 否则 structure_sections 的「丢字超过两成就丢弃」会把它拒掉。
+            paras = [f"This is English body paragraph number {i} here." for i in range(8)]
+            half = len(paras) // 2
+            out = json.dumps([
+                {"h_zh": "背景", "h_en": "Background", "paras": paras[:half]},
+                {"h_zh": "进展", "h_en": "What happens next", "paras": paras[half:]},
+            ], ensure_ascii=False)
+        elif "用中文重新写成一篇中国读者能顺畅读完的文章" in prompt:
             # 长度要落在 0.25~1.3 的合格区间，否则会被长度校验拒掉
             out = (
-                "## 背景\n\n这是第一段中文内容，长度足够通过长度门槛校验，不会被误判成压缩摘要。\n\n"
+                "这是第一段中文内容，长度足够通过长度门槛校验，不会被误判成压缩摘要。\n\n"
                 "这是第二段中文内容，同样足够长，读者能看到完整的信息。\n\n"
-                "## 进展\n\n这是第三段中文内容，交代了后续的进展与关键数字。\n\n"
-                "这是第四段中文内容，收尾说明整体影响与限制条件。"
-            )
-        elif "纽约时报" in prompt and "责任编辑" in prompt:
-            out = (
-                "## 背景\n\n这是第一段中文内容，长度足够通过长度门槛校验，不会被误判。\n\n"
-                "这是第二段中文内容，同样足够长，读者能看到完整的信息。\n\n"
-                "## 进展\n\n这是第三段中文内容，交代了后续的进展与关键数字。\n\n"
+                "这是第三段中文内容，交代了后续的进展与关键数字。\n\n"
                 "这是第四段中文内容，收尾说明整体影响与限制条件。"
             )
         elif "英文标题" in prompt:
@@ -1486,10 +1739,12 @@ def test_backfill_translations_also_builds_sections(seeded_db, settings: Setting
         stored = session.get(Article, article_id)
         assert stored.content_zh, "正文译文应该补上"
         assert stored.body_sections_zh, "补译时也要建章节结构"
-        import json
-
-        sections = json.loads(stored.body_sections_zh)
-        assert [s["h"] for s in sections] == ["背景", "进展"]
+        zh_sections = json.loads(stored.body_sections_zh)
+        assert [s["h"] for s in zh_sections] == ["背景", "进展"]
+        # 双语模式要逐节对照，英文侧也必须有结构，且节数与顺序一致
+        en_sections = json.loads(stored.body_sections)
+        assert [s["h"] for s in en_sections] == ["Background", "What happens next"]
+        assert len(en_sections) == len(zh_sections)
 
 
 def test_translate_to_chinese_is_all_or_nothing(seeded_db, settings: Settings):

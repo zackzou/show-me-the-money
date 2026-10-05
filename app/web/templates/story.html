@@ -59,6 +59,12 @@
     <section class="sec">
       <div class="sec-t">AI 导读{% if item.digest_missing_zh %}<span class="t-note">原文为英文，中文导读还在翻译队列里</span>{% endif %}</div>
       <p class="lead-p">{{ bi(item.digest or item.reason or '（没有生成导读）', item.digest_en) }}</p>
+      {# 阅读提示：先说清楚要读多久，读者才能决定现在读还是先收藏（图 7） #}
+      {% if item.reading and item.reading.minutes %}
+        <p class="read-hint" data-reading-minutes="{{ item.reading.minutes }}">
+          <span class="rh-ico" aria-hidden="true">◷</span>{{ item.reading.label }}
+        </p>
+      {% endif %}
     </section>
 
     {# 正文：中文/双语读译文，英文读原文；没有译文时退回原文并说明原因 #}
@@ -75,14 +81,34 @@
       {% endfor %}
     {% endmacro %}
 
+    {#
+      双语模式的排版原则（这张图暴露的问题）：
+      **两个语言版本必须是结构对称的两块**，而不是看起来像一篇文章里
+      「有些段落有双语、有些没有」。
+
+      以前只给中文译文存了章节结构（body_sections_zh），英文原文那一份
+      body_sections 大面积缺失 —— 于是中文那一半有小标题横幅、英文那一半
+      没有，读者眼里就是「有些段落有、有些没有」。现在两套结构由同一次
+      排版派生，节数与顺序一一对应。
+
+      另外每一块都要有自己的语言标签和分隔线。译文是「重新写成一篇中文
+      文章」，段数与原文本来就不对应（实测 45 段压成 15 段），所以不能按
+      段落交替排列 —— 那才是真的会错位。正确做法是：完整中文在前、完整
+      英文在后，各自完整，用一条明确的分隔线告诉读者「到此切换语言」。
+    #}
     {% if item.body_blocks_zh %}
       <div class="rule"></div>
       <section class="sec">
-        <div class="sec-t plain">正文<span class="t-zh">中文译文</span>{% if item.body_blocks %}<span class="t-en">英文原文</span>{% endif %}</div>
-        <div class="prose zh">{{ prose(item.body_blocks_zh, item.shots_zh) }}</div>
+        <div class="sec-t plain">正文</div>
+        <div class="lang-block" data-lang-block="zh">
+          <div class="lang-cap"><span class="lc-zh">中文译文</span></div>
+          <div class="prose zh">{{ prose(item.body_blocks_zh, item.shots_zh) }}</div>
+        </div>
         {% if item.body_blocks %}
-          {# 有译文时原文也要跟着语言切换走：中文模式读译文，双语模式上下对照 #}
-          <div class="prose en">{{ prose(item.body_blocks, item.shots) }}</div>
+          <div class="lang-block" data-lang-block="en">
+            <div class="lang-cap"><span class="lc-en">英文原文</span></div>
+            <div class="prose en">{{ prose(item.body_blocks, item.shots) }}</div>
+          </div>
         {% endif %}
       </section>
     {% elif item.body_blocks %}
@@ -201,6 +227,7 @@
 <div class="jump" id="jump" hidden aria-label="快速跳转">
   <button type="button" data-go="top" title="回到顶部" aria-label="回到顶部">↑</button>
   <span class="jump-bar" aria-hidden="true"><i id="jump-bar-fill"></i></span>
+  <span class="jump-pct" id="jump-pct" aria-hidden="true">0%</span>
   <button type="button" data-go="bottom" title="回到底部" aria-label="回到底部">↓</button>
 </div>
 {% endif %}
@@ -259,6 +286,29 @@
               overflow:hidden; display:flex; }
   .jump-bar i { display:block; width:100%; height:0; border-radius:3px; background:var(--accent);
                 transition:height .12s linear; }
+  /* 阅读百分比：夹在跳转条中间，进度线走完就显示 100%（图 6） */
+  .jump-pct { font-size:10.5px; font-weight:600; color:var(--muted);
+             font-variant-numeric:tabular-nums; min-width:30px; text-align:center;
+             line-height:1; }
+
+  /* ── 双语正文的两块（见 story.html 的注释）─────────────────
+     每块有自己的语言标签，两块之间一条明确的分隔线。单语模式下只显示一块，
+     标签自动隐藏 —— 单语时再挂一个「中文译文」是多余的字。 */
+  .lang-block .lang-cap { display:none; margin:0 0 10px; }
+  .lang-cap .lc-zh, .lang-cap .lc-en {
+    display:inline-block; padding:2px 9px; border-radius:999px;
+    font-size:11px; font-weight:600; letter-spacing:.02em;
+    background:var(--chip); color:var(--muted); }
+  .lang-cap .lc-en { background:transparent; border:1px solid var(--line); }
+  html[data-lang="both"] .lang-block .lang-cap { display:block; }
+  html[data-lang="both"] .lang-block + .lang-block {
+    margin-top:26px; padding-top:22px;
+    border-top:1px dashed var(--line); }
+
+  /* 阅读提示（AI 导读下方） */
+  .read-hint { display:flex; align-items:center; gap:6px; margin:12px 0 0;
+              font-size:12.5px; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .read-hint .rh-ico { color:var(--accent); font-size:13px; }
   /* 窄屏**不要隐藏**这条：长文恰恰在手机上最难翻，藏掉等于白做。
      之前的 @media(max-width:1180px){display:none} 让它在 1180px 以下整个消失，
      而自动检查只看了 [hidden] 属性、没看 computed style，所以一直没被发现。
@@ -271,14 +321,16 @@
     /* 给悬浮条**留出一条空槽**，而不是让它盖在正文上。
        缩小 + 半透明只解决了「挡视线」，没解决「压字」：实测 390px 下正文栏
        右边缘离屏幕边只有 14px，而悬浮条就在那 14px 里，量到 3 行文字的字形
-       盒被盖住；滚到底时盖住的正是文章最后一行。这里让正文让出 38px，
-       悬浮条落在空槽里，两者不再相交。 */
-    .story .prose { margin-right:38px; }
+       盒被盖住；滚到底时盖住的正是文章最后一行。这里让**整篇文章栏**让出
+       38px，悬浮条落在空槽里，两者不再相交。
+       坑：早先只给 .prose 加了 margin，标题、AI 导读（.lead-p）、各小节标题
+       全都还在槽里 —— 实测被压住的是导读第一段，28×95px。 */
+    .story > article { margin-right:38px; }
   }
   /* 极窄屏：靠边贴紧，别压到正文 */
   @media (max-width:420px) {
     .jump { right:2px; opacity:.6; }
-    .story .prose { margin-right:30px; }
+    .story > article { margin-right:30px; }
   }
 </style>
 <script>
@@ -292,21 +344,65 @@
     var prose = document.querySelector(".prose");
     if (!prose) return;
 
-    // 正文不到一屏半就说明文章本来不长，加按钮反而是噪音
-    if (prose.offsetHeight < window.innerHeight * 1.4) return;
-    box.hidden = false;
+    // 正文不到一屏半就说明文章本来不长，加按钮反而是噪音。
+    // 判定放在 ensureVisible 里（函数声明会提升，这里可以直接调）。
+    ensureVisible();
 
     function clamp01(value) {
       return Math.max(0, Math.min(1, value));
     }
 
+    // 阅读百分比（图 6）：按**正文**的位置算，而不是整页。
+    // 整页还包含顶部标题、AI 导读、右栏推荐理由 —— 那些都不是要读的内容，
+    // 按整页算会「正文才读了一半，百分比已经 80%」，读者以为漏读了。
+    var pct = document.getElementById("jump-pct");
+    var body = document.querySelector(".story article");
+    var doc = document.documentElement;
+    var finished = false;   // 读者是否已经读到正文末尾（见 sync 里的说明）
+
+    // 「正文够长才显示悬浮条」这个判断**不能在脚本一跑就定死**：
+    // 那时字体还没加载完，.prose 量出来偏矮。实测 390px 视口下
+    // DOMContentLoaded 时正文只有 1241px（阈值 900*1.4=1260），于是判定
+    // 「文章不长」，悬浮条永远不出现；等字体到位后正文其实有 1747px。
+    // 结果就是同一篇文章在 360px 有跳转条、390px 没有，纯属量早了。
+    // 改成每次 sync 都补一次判定：够长就显示，且只显示一次。
+    var shown = false;
+    function ensureVisible() {
+      if (shown) return;
+      if (prose.offsetHeight >= window.innerHeight * 1.4) {
+        box.hidden = false;
+        shown = true;
+      }
+    }
+
     function sync() {
-      var top = window.scrollY || document.documentElement.scrollTop || 0;
-      var max = document.documentElement.scrollHeight - window.innerHeight;
+      ensureVisible();
+      var top = window.scrollY || doc.scrollTop || 0;
+      var max = doc.scrollHeight - window.innerHeight;
       var ratio = max > 0 ? clamp01(top / max) : 0;
       fill.style.height = (ratio * 100).toFixed(1) + "%";
       btnTop.disabled = top < 8;
       btnBottom.disabled = max - top < 8;
+
+      // 正文阅读进度：从正文起点读到当前视口底边。
+      // 视口底边比顶部更准 —— 屏幕底部那一行也是已经读过的。
+      // 滚到文档底部时直接给 100%：正文后面还有页脚等尾部内容，只按正文
+      // 高度算的话最后停在 98%，读者会以为还有内容没加载出来。
+      if (pct && body) {
+        // 用**当下**的文档高度算「已到底」，并且**锁住**。
+        // 正文里的图是 loading="lazy"，滚过去才加载、加载完页面又变高 ——
+        // 于是刚滚到底时页面其实还不是底，百分比会从 100% 掉回 92%。
+        // 读者既然已经读完了，就不该再被后来加载的图片拽回去。
+        var docBottom = window.scrollY + window.innerHeight;
+        if (docBottom >= document.documentElement.scrollHeight - 8) finished = true;
+        else if (window.scrollY < body.offsetTop) finished = false;
+        if (finished) {
+          pct.textContent = "100%";
+          return;
+        }
+        var read = clamp01((docBottom - body.offsetTop) / Math.max(1, body.offsetHeight));
+        pct.textContent = Math.round(read * 100) + "%";
+      }
     }
 
     function go(which) {
@@ -318,6 +414,9 @@
     btnBottom.addEventListener("click", function () { go("bottom"); });
     window.addEventListener("scroll", sync, { passive: true });
     window.addEventListener("resize", sync);
+    // 懒加载的图片让文档高度持续变化：不盯着它，百分比会越读越小
+    if (window.ResizeObserver) { new ResizeObserver(sync).observe(document.body); }
+    window.addEventListener("load", sync);
     sync();
   })();
 </script>

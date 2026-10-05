@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
@@ -244,7 +245,9 @@ def _section_blocks(raw: str | None, *, prefix: str) -> list[dict[str, Any]] | N
     return marked or None
 
 
-def mark_headings(blocks: list[str], *, prefix: str = "sec") -> list[dict[str, Any]]:
+def mark_headings(
+    blocks: list[str], *, prefix: str = "sec", want_headings: bool = True
+) -> list[dict[str, Any]]:
     """把正文里「短句、不以标点结尾」的段落标成小标题。
 
     这样详情页能像图1 那样给一个本文目录，并把小标题渲染成 ``<h3>``；
@@ -253,11 +256,14 @@ def mark_headings(blocks: list[str], *, prefix: str = "sec") -> list[dict[str, A
     ``prefix`` 用来给锚点 id 分命名空间：详情页会同时把原文与译文渲染进
     DOM（靠 CSS 按语言隐藏其一），两边都从 0 开始编号就会撞 id，
     目录会跳到另一版的位置去。
+
+    ``want_headings=False`` 时一律不标小标题 —— 双语结构对不上时要让两个
+    语言版本退回同一种朴素排版（见 story 里的 ``_structure_matches``）。
     """
     marked: list[dict[str, Any]] = []
     for index, text in enumerate(blocks):
         stripped = text.strip()
-        is_heading = (
+        is_heading = want_headings and (
             _HEADING_MIN_CHARS <= len(stripped) <= _HEADING_MAX_CHARS
             and stripped[-1] not in _SENTENCE_END
             and not stripped[0].isdigit()
@@ -492,6 +498,49 @@ def _categories(request: Request) -> list[dict[str, str]]:
     return [{"name": c.name, "hint": c.hint} for c in getattr(settings, "categories", []) or []]
 
 
+# 中文与英文的阅读速度差别很大，用同一个数字估会差出一倍。
+# 取值参考常见的中英文阅读速度区间（约 300~500 字/分、200~250 词/分）。
+_CJK_PER_MINUTE = 400
+_LATIN_PER_MINUTE = 230
+
+
+def _structure_matches(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> bool:
+    """中英两版的分节结构是否一致（逐位看是不是同一类块）。"""
+    if not left or not right or len(left) != len(right):
+        return False
+    return all(bool(a.get("heading")) == bool(b.get("heading")) for a, b in zip(left, right, strict=True))
+
+
+def reading_stats(text: str) -> dict[str, Any]:
+    """正文规模与预计阅读时长。
+
+    中文按「汉字数 ÷ 400 字/分」，英文按「词数 ÷ 230 词/分」—— 混排时分别
+    计数再相加。字数用**实际可见字符**（去掉空白），不然排版产生的换行和
+    缩进会被算进去，显示出来的「1200 字」可能只有 900 字。
+    """
+    body = re.sub(r"\s+", " ", text or "").strip()
+    if not body:
+        return {"chars": 0, "words": 0, "units": 0, "minutes": 0, "label": "正文较短"}
+    han = sum(1 for ch in body if "\u4e00" <= ch <= "\u9fff")
+    latin_words = len(re.findall(r"[A-Za-z][A-Za-z'\-]*", body))
+    units = han + latin_words
+    minutes = han / _CJK_PER_MINUTE + latin_words / _LATIN_PER_MINUTE
+    rounded = max(1, round(minutes))
+    if han and not latin_words:
+        size = f"{han:,} 字"
+    elif latin_words and not han:
+        size = f"{latin_words:,} 词"
+    else:
+        size = f"{han + latin_words:,} 字 / 词"
+    return {
+        "chars": han,
+        "words": latin_words,
+        "units": units,
+        "minutes": rounded,
+        "label": f"约 {size} · 预计 {rounded} 分钟读完",
+    }
+
+
 def _ctx(request: Request, **extra: Any) -> dict[str, Any]:
     return {
         "topics": _topics(request),
@@ -724,6 +773,27 @@ def story(
         else []
     )
     item["body_blocks_zh"] = marked_zh
+    # 双语模式下两个语言版本的**结构必须对称**。
+    #
+    # 症状（用户图 2 报的）：中文那一半有小标题横幅，英文那一半没有 ——
+    # 读者眼里就成了「有些段落双语、有些只有一种语言」。根因是历史上只给中文
+    # 译文存了章节结构（body_sections_zh 有 30 篇，body_sections 只有 3 篇）。
+    #
+    # 这里做一道展示层的兜底：两边的小标题数量/位置对不上就**一起退回平铺**。
+    # 与其显示一个必然错位的组合，不如两个版本都用同一种朴素排版 —— 少了
+    # 横幅，但读者看到的是一份对称、可对照的正文。新入库的文章由同一次排版
+    # 派生两套结构，永远对称；这条兜底只保护存量数据。
+    if item["has_translation"] and not _structure_matches(marked, marked_zh):
+        log.info("文章 %s 的中英结构不一致（%d vs %d 段小标题），"
+                 "双语视图退回平铺正文", article.id,
+                 sum(1 for b in marked if b.get("heading")),
+                 sum(1 for b in marked_zh if b.get("heading")))
+        marked = mark_headings(_body_blocks(original), prefix="sec-en", want_headings=False)
+        marked_zh = mark_headings(_body_blocks(translated), prefix="sec-zh", want_headings=False)
+        item["body_blocks"] = marked
+        item["body_blocks_zh"] = marked_zh
+        item["shots"] = _image_slots_for_blocks(anchors, marked)
+        item["toc"] = []
     item["content_preview_zh"] = truncate(translated, 400) if item["has_translation"] else ""
     plain_en = sum(1 for b in marked if not b.get("heading"))
     plain_zh = sum(1 for b in marked_zh if not b.get("heading"))
@@ -735,6 +805,15 @@ def story(
     # 没有译文时要说清楚，避免「中文模式却整页英文」看着像坏了
     item["body_is_foreign"] = bool(original.strip()) and not item["has_translation"] and is_english(original)
     item["body_missing"] = not original.strip()
+    # 阅读时长按「读者默认看到的那一版」算：有译文就算译文（默认中文模式），
+    # 没译文才算原文。给英文原文报中文读法的时间是错的。
+    item["reading"] = reading_stats(translated if item["has_translation"] else original)
+    # 这个页面**实际提供哪几种语言**。中文原生文章不翻译成英文，所以页面上
+    # 不该出现 EN / 双语按钮 —— 给一个永远切不出内容的按钮比不给更糟。
+    # 这也是判断「要不要做英文版」的唯一依据：有英文原文才需要中文版，
+    # 本来就是中文的原文不需要任何翻译。
+    item["native_zh"] = bool(original.strip()) and not is_english(original)
+    item["langs"] = ["zh"] if item["native_zh"] else ["zh", "en"]
     # 导读同理：英文原文还没有中文导读时，页面上说清楚，别让「中文」模式看着像坏了
     item["digest_missing_zh"] = (
         is_english(article.digest or "") and not str(article.digest_zh or "").strip()
@@ -750,7 +829,13 @@ def story(
         for row in duplicates_of(session, article.id)
     ]
     return templates.TemplateResponse(
-        request, "story.html", _ctx(request, nav="home", item=item, title=article.title[:40])
+        request,
+        "story.html",
+        _ctx(
+            request, nav="home", item=item, title=article.title[:40],
+            # 中文原生文章不提供英文版，页面上就不该出现语言切换
+            langs=item["langs"],
+        )
     )
 
 

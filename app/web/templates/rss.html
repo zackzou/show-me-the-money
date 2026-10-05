@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">RSS</div>
+  <h1>RSS 订阅</h1>
+  <p class="meta">
+    RSS 就是一个「订阅地址」：把它填进阅读器，之后每天的新内容会自己推给你，
+    不用反复打开这个网站。
+  </p>
+</div>
+
+<div class="rss-grid">
+
+  <section class="sec">
+    <div class="sec-t">你的订阅地址</div>
+    <div class="feedbox">
+      <code id="feed-url">{{ feed_url }}</code>
+      <button type="button" class="mini" id="feed-copy">复制</button>
+    </div>
+    <p class="ftip">
+      这个地址随时可以打开看内容（就是下面的「原始 XML」）。它返回的是一份
+      标准 RSS 2.0，任何阅读器都能读。
+    </p>
+    <div class="ftip">
+      <b>想看某一天的？</b>在地址后面加 <code>?date=2026-10-04</code> 就能拿到那天的。
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-t">怎么订阅</div>
+    <ol class="steps">
+      <li>
+        <b>装一个 RSS 阅读器</b>
+        <p>手机上装 Inoreader、Feedly、FreshRSS 这类；电脑上用浏览器插件也行。
+           它们的作用就是「定期去取这个地址」。</p>
+      </li>
+      <li>
+        <b>把上面那个地址贴进去</b>
+        <p>大多数阅读器都有「添加订阅 / Add feed」，粘贴后点确认就行。
+           看到文章列表出现了就成了。</p>
+      </li>
+      <li>
+        <b>等着收</b>
+        <p>每天早上 8 点定稿之后，订阅端就会有新内容。阅读器一般会自己去拉，
+           不用管。</p>
+      </li>
+    </ol>
+  </section>
+
+  <section class="sec">
+    <div class="sec-t">订阅之后会看到什么</div>
+    <ul class="plain-list">
+      <li><b>每篇文章一条</b>，不是把整份日报塞成一大段 ——
+        标题带标签，正文是 AI 写的中文摘要。</li>
+      <li><b>只包含进了日报的内容。</b>后台会先用模型判断每篇文章跟你的调研
+        方向相不相关，不相关的不会出现在订阅里。</li>
+      <li><b>中文原文。</b>英文信源的条目会被翻成中文再推给你。</li>
+      <li><b>点标题跳原站。</b>订阅里给的是摘要，想读全文点回原文网站。</li>
+    </ul>
+    <p class="ftip">
+      想调整「哪些算相关」或者订阅哪些网站，去
+      <a href="/settings">设置</a> 和 <a href="/sources">信源管理</a>。
+    </p>
+  </section>
+
+  <section class="sec">
+    <div class="sec-t">最近的日报</div>
+    {% if recent %}
+    <ul class="rel-list">
+      {% for row in recent %}
+        <li>
+          <a href="{{ row.url }}">{{ row.date }}</a>
+          <em class="src">{{ row.n }} 篇</em>
+          <a class="feed-one" href="/rss?date={{ row.date }}" title="这一天的 RSS">当日 XML</a>
+        </li>
+      {% endfor %}
+    </ul>
+    {% else %}
+      <p class="ftip">还没有生成过日报。</p>
+    {% endif %}
+    <p class="ftip">
+      没有默认订阅地址？很多阅读器也支持「网页版」：直接给它
+      <a href="/">首页</a> 或 <a href="/archive">历史日报</a>，能抓到多少算多少。
+    </p>
+  </section>
+
+</div>
+
+<section class="sec">
+  <div class="sec-t">原始 XML<span class="sec-h">给阅读器和程序用的就是这个</span></div>
+  <p class="ftip">
+    点开看看就是一个纯文本窗口，里面是 <code>&lt;item&gt;</code>、<code>&lt;title&gt;</code>
+    这些标签 —— 这是 RSS 的标准格式，阅读器就是照着它解析的。人看的话用上面的地址就行。
+  </p>
+  <p class="ftip">
+    <a href="/rss" style="color:var(--accent)">打开 {{ feed_url }} →</a>
+  </p>
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  /* min(320px, 100%)：纯 minmax(320px,1fr) 的轨道最小宽度写死 320px，
+     容器本身只有 292px 时轨道仍然 320px，整页会横向溢出（实测 14px）。 */
+  .rss-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(min(320px, 100%), 1fr));
+             gap:0 34px; align-items:start; }
+  .feedbox { display:flex; gap:10px; align-items:center; padding:11px 13px;
+             border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  /* min-width:0 + overflow-wrap:anywhere 都要：flex 子项默认不肯小于内容宽度，
+     一个长 URL 会把整行撑到 320px 屏之外（实测溢出 14px）。 */
+  .feedbox code { flex:1 1 auto; min-width:0; font-size:12.5px;
+                  overflow-wrap:anywhere; word-break:break-all;
+                  color:var(--text); font-family:ui-monospace, SFMono-Regular, Menlo, monospace; }
+  .mini { padding:6px 12px; border:1px solid var(--line); border-radius:7px; background:var(--chip);
+          color:var(--muted); font-size:12.5px; font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .steps { margin:0; padding-left:20px; }
+  .steps li { margin-bottom:12px; font-size:13.5px; line-height:1.7; }
+  .steps p { margin:3px 0 0; color:var(--muted); font-size:13px; line-height:1.7; }
+  .plain-list { margin:0; padding-left:19px; }
+  .plain-list li { margin-bottom:9px; font-size:13.5px; line-height:1.75; }
+  .feed-one { font-size:11.5px; color:var(--faint); margin-left:8px; }
+  .feed-one:hover { color:var(--accent); }
+</style>
+<script>
+  (function () {
+    var btn = document.getElementById("feed-copy");
+    var box = document.getElementById("feed-url");
+    if (!btn || !box) return;
+    btn.addEventListener("click", function () {
+      var text = box.textContent.trim();
+      var done = function () {
+        btn.textContent = "已复制";
+        setTimeout(function () { btn.textContent = "复制"; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { legacy(text, done); });
+      } else { legacy(text, done); }
+    });
+    function legacy(text, done) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (err) { /* 复制失败不打扰用户 */ }
+      document.body.removeChild(ta);
+    }
+  })();
+</script>
+{% endblock %}

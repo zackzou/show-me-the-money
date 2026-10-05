@@ -1,0 +1,111 @@
+{#
+  信源列表（可独立渲染的片段）。
+
+  单独抽出来是因为改名/启停/删除都要求「只更新这一块，不刷整页」：
+  前端把整个 #src-list 换成这份 HTML 就行，页面其它部分（滚动位置、
+  正在填的表单、已展开的回收站）都保持原样。没有 JS 时它照样是完整的
+  服务端渲染结果，功能不缺。
+#}
+<div class="srctabs" role="tablist" aria-label="信源状态">
+  {% for t in tabs %}
+    <button type="button" role="tab" class="srctab {{ 'on' if t.key == tab }}"
+            aria-selected="{{ 'true' if t.key == tab else 'false' }}"
+            data-tab="{{ t.key }}">{{ t.label }}<span class="n">{{ t.n }}</span></button>
+  {% endfor %}
+</div>
+
+<div id="src-list">
+<ul class="srclist">
+  {% for s in sources %}
+    <li class="srcrow {{ 'off' if not s.enabled }}" data-src="{{ s.id }}">
+      <div class="src-main">
+        <div class="src-name">
+          {# 名字可点就改：原来的「改名」按钮带着一个输入框提交表单， #}
+          {# 一点整个页面重载 —— 用户抱怨的正是这个。现在就地编辑， #}
+          {# 回车或失焦即存，只换这一块列表。 #}
+          <button type="button" class="nm" data-rename="{{ s.id }}"
+                  title="点一下改名">{{ s.name }}</button>
+          {% if not s.enabled %}<span class="tag-off">已停用</span>{% endif %}
+          <span class="tag-lang {{ 'auto' if s.lang == 'auto' else '' }}"
+                title="{{ lang_labels.get(s.lang, s.lang) }}">
+            {{ '自适应' if s.lang == 'auto' else ('中文' if s.lang == 'zh' else 'EN') }}
+          </span>
+        </div>
+        <a class="src-url" href="{{ s.url }}" target="_blank" rel="noopener noreferrer">{{ s.url }}</a>
+        <div class="src-meta">
+          已产出 {{ s.total }} 篇
+          {%- if s.latest %} · 最近 {{ s.latest }}{% endif %}
+          {%- if s.created %} · 添加于 {{ s.created }}{% endif %}
+        </div>
+      </div>
+      <div class="src-act">
+        <form method="post" action="/sources/{{ s.id }}/probe" class="inline">
+          <input type="hidden" name="tab" value="{{ tab }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <button type="submit" class="mini">试抓</button>
+        </form>
+        <form method="post" action="/sources/{{ s.id }}/toggle" class="inline">
+          <input type="hidden" name="tab" value="{{ tab }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <button type="submit" class="mini">{{ '启用' if not s.enabled else '停用' }}</button>
+        </form>
+        <form method="post" action="/sources/{{ s.id }}/delete" class="inline"
+              data-confirm="删除「{{ s.name }}」？{{ '已入库的 %d 篇文章会保留。' % s.total if s.total else '该源还没有文章。' }}">
+          <input type="hidden" name="tab" value="{{ tab }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <button type="submit" class="mini danger">删除</button>
+        </form>
+      </div>
+    </li>
+  {% else %}
+    <li class="empty">
+      {% if tab == 'off' %}没有已停用的信源。{% else %}还没有启用的信源，先在上面加一个 RSS 地址。{% endif %}
+    </li>
+  {% endfor %}
+</ul>
+
+{% if pages > 1 %}
+<nav class="pager" aria-label="信源分页">
+  <a class="{{ '' if page > 1 else 'dis' }}" href="/sources?tab={{ tab }}&page={{ page - 1 }}"
+     data-page="{{ page - 1 }}" rel="prev">上一页</a>
+  {# 只渲染窗口内的页码。页数会一直涨，全量渲染会让页脚自己先变成瓶颈。 #}
+  {% for entry in page_window %}
+    {% if entry[1] %}<span class="pager-gap">…</span>{% endif %}
+    <a class="{{ 'on' if entry[0] == page }}" href="/sources?tab={{ tab }}&page={{ entry[0] }}"
+       data-page="{{ entry[0] }}">{{ entry[0] }}</a>
+  {% endfor %}
+  <a class="{{ '' if page < pages else 'dis' }}" href="/sources?tab={{ tab }}&page={{ page + 1 }}"
+     data-page="{{ page + 1 }}" rel="next">下一页</a>
+</nav>
+{% endif %}
+</div>
+
+{# 这个 details **永远渲染**，哪怕回收站是空的（空的时候加 hidden）。
+   局部更新靠 replaceWith(#src-trash) 换面板：早先的写法是
+   `{% if deleted_sources %}` —— 回收站为空时整个面板不存在，于是
+   「删除第一个信源」这种从无到有的情况，新面板没有替换目标就被丢掉了，
+   页面上看不到任何提示（列表和通知都更新了，就是回收站不出现）。
+   反过来「撤回最后一个」时旧面板又会留在页面上不消失。
+   面板恒在 + hidden 切换，两个方向都交给同一段 replaceWith。 #}
+<details class="trash" id="src-trash" {% if not deleted_sources %}hidden{% endif %}>
+{% if deleted_sources %}
+  <summary>已删除的信源（{{ deleted_sources|length }}）— 点开可以撤回</summary>
+  <ul class="slist">
+    {% for s in deleted_sources %}
+      <li class="srow dead">
+        <div class="sinfo">
+          <strong>{{ s.name }}</strong>
+          <span class="surl">{{ s.url }}</span>
+          <span class="smeta">{{ s.total }} 篇已入库 · 添加于 {{ s.created or "未知" }}</span>
+        </div>
+        <form method="post" action="/sources/{{ s.id }}/restore" class="sact">
+          <input type="hidden" name="tab" value="{{ tab }}">
+          <input type="hidden" name="page" value="{{ page }}">
+          <button type="submit" class="mini">撤回</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+  <p class="ftip">删除只是把它藏起来，已入库文章的来源不会丢。要恢复就在这里点「撤回」。</p>
+{% endif %}
+</details>

@@ -244,7 +244,7 @@
     /* 窄屏收缩顺序：搜索框 → RSS → 导航 */
     /* 按重要性递减地隐藏，而不是等放不下了一刀切：RSS 最先让位，然后是
        收藏/信源，最后才整条导航。 */
-    @media (max-width:1240px) { .nav a[href="/rss"] { display:none; } }
+    @media (max-width:1240px) { .nav a[href="/rss-guide"] { display:none; } }
     @media (max-width:1100px) { .nav a[href="/saved"] { display:none; } }
     @media (max-width:980px)  { .nav a[href="/sources"] { display:none; } }
     @media (max-width:860px)  { .nav a[href="/archive"] { display:none; } }
@@ -439,17 +439,38 @@
     .prose p { margin:0 0 1.2em; font-size:18px; line-height:1.8; letter-spacing:.012em; color:var(--text); }
     /* 段落小标题：给一条横幅底纹，让读者一眼看出「这里是新的一段」。
        之前只有一个 <h3> 裸着，长文里段落感很弱。渐变+左侧色条，纯 CSS 无图片。 */
-    .prose h3 { position:relative; margin:2.2em 0 .9em; padding:.62em 1em .62em 1.15em;
-               font-size:1.06em; font-weight:650; line-height:1.45; color:var(--text);
-               border-radius:10px;
+    /* 段落横幅：要一眼看出「这是一节的开始」，不能和正文长得像。
+       原来只有 1.06em 字号 + 一条 3px 左侧色条 + 极淡的渐变，和 18px 的正文
+       挨在一起几乎读不出来（图 1 就是这个效果）。现在改成：
+         · 整块实色底（不再渐到透明），左右两侧收进去形成「卡片」感；
+         · 左侧色条加粗到 6px 并通高；
+         · 字号抬到 1.18em、字重 700；
+         · 上下留白加大，与正文段落拉开距离；
+         · 右上角保留一段短横，作为「这是小标题」的视觉锚点。 */
+    /* 字号必须用绝对值，不能用 em —— em 是相对**父元素**字号算的，而
+       .prose 的父元素是 16px，正文段落自己才是 18px。写 1.18em 得到的是
+       18.88px，比正文只大 0.88px，视觉上完全分不开（图 1 的问题）。 */
+    .prose h3 { position:relative; margin:2.6em 0 1em; padding:.8em 1.1em .8em 1.3em;
+               font-size:20px; font-weight:700; line-height:1.4;
+               letter-spacing:-.01em; color:var(--text);
+               border-radius:12px;
                background:linear-gradient(100deg, var(--accent-soft) 0%,
-                           color-mix(in srgb, var(--accent-soft) 35%, transparent) 62%,
-                           transparent 100%);
-               box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 16%, transparent); }
-    .prose h3::before { content:""; position:absolute; left:0; top:18%; bottom:18%; width:3px;
-                        border-radius:3px; background:var(--accent); opacity:.75; }
-    .prose h3::after { content:""; position:absolute; right:.7em; top:50%; width:16px; height:1px;
-                       background:var(--accent); opacity:.3; transform:translateY(-50%); }
+                           color-mix(in srgb, var(--accent-soft) 82%, transparent) 58%,
+                           color-mix(in srgb, var(--accent-soft) 46%, transparent) 100%);
+               box-shadow:inset 0 0 0 1px color-mix(in srgb, var(--accent) 26%, transparent),
+                          0 1px 2px rgba(0,0,0,.04); }
+    .prose h3::before { content:""; position:absolute; left:0; top:0; bottom:0; width:6px;
+                        border-radius:12px 0 0 12px; background:var(--accent); }
+    .prose h3::after { content:""; position:absolute; right:.85em; top:50%; width:18px; height:2px;
+                       border-radius:2px; background:var(--accent); opacity:.35;
+                       transform:translateY(-50%); }
+    /* 第一节的横幅不需要那么大的上间距（它上面就是「正文」那行小标题） */
+    .prose > h3:first-child { margin-top:1.4em; }
+    /* 窄屏：横幅不能反过来把正文挤成一列字，字号与留白同步收一点 */
+    @media (max-width:480px) {
+      .prose h3 { font-size:18.5px; padding:.7em .8em .7em 1em; margin:2.1em 0 .85em; }
+      .prose h3::after { display:none; }
+    }
     /* 目录里的每一条也带同样的标记，读者点之前就知道点下去是什么 */
     .toc a { position:relative; padding:6px 0 6px 16px; border-radius:6px; }
     .toc a::before { content:""; position:absolute; left:0; top:50%; transform:translateY(-50%);
@@ -508,7 +529,7 @@
       <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
       <a href="/sources" class="{{ 'on' if nav == 'sources' else '' }}">信源</a>
       <a href="/settings" class="{{ 'on' if nav == 'settings' else '' }}">设置</a>
-      <a href="/rss" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
+      <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
     </nav>
     <form class="sp" action="/search" method="get" role="search">
       <div class="search">
@@ -522,11 +543,17 @@
         {% endif %}
       </div>
     </form>
+    {# 语言切换只在**页面真的有英文内容**时出现。
+       中文原生文章不做英文翻译（没有译文就没有 EN 可切），挂一个永远切不
+       出内容的按钮比不挂更糟 —— 读者点了发现没反应，以为页面坏了。
+       langs 由各页面给出；没给时默认两种都有（列表页双语混排，需要切换）。 #}
+    {% if langs is not defined or 'en' in langs %}
     <div class="lang" id="lang" role="group" aria-label="语言">
       <button type="button" data-lang="zh" title="只显示中文">中文</button>
       <button type="button" data-lang="en" title="English only">EN</button>
       <button type="button" data-lang="both" title="中文在上，英文在下">双语</button>
     </div>
+    {% endif %}
     <div class="tools">
       <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
       <a class="ico" href="/api/health" title="状态" aria-label="服务状态">⋯</a>
@@ -559,18 +586,23 @@
     var box = document.getElementById("lang");
     function apply(value) {
       document.documentElement.setAttribute("data-lang", value);
-      try { localStorage.setItem("smtm-lang", value); } catch (err) { /* 隐私模式 */ }
       if (!box) return;
+      try { localStorage.setItem("smtm-lang", value); } catch (err) { /* 隐私模式 */ }
       box.querySelectorAll("button[data-lang]").forEach(function (b) {
         b.classList.toggle("on", b.getAttribute("data-lang") === value);
       });
     }
-    if (box) box.addEventListener("click", function (e) {
-      var b = e.target.closest("button[data-lang]");
-      if (b) { e.preventDefault(); apply(b.getAttribute("data-lang")); }
-    });
-    // 控件在就用它回显当前语言，不在也照样切换语言显示
-    apply(document.documentElement.getAttribute("data-lang") || "zh");
+    if (box) {
+      box.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-lang]");
+        if (b) { e.preventDefault(); apply(b.getAttribute("data-lang")); }
+      });
+      // 控件在就用它回显当前语言
+      apply(document.documentElement.getAttribute("data-lang") || "zh");
+    } else {
+      // 没有切换控件 = 这个页面只有中文，强制中文模式而不是沿用上次的选择
+      document.documentElement.setAttribute("data-lang", "zh");
+    }
   })();
   // 图片页内放大（替代「跳原站看图」）
   var lb = document.getElementById("lb"), lbImg = document.getElementById("lb-img"), lbN = document.getElementById("lb-n");

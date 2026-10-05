@@ -7,7 +7,7 @@ from email.utils import format_datetime
 from xml.sax.saxutils import escape
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import Response
+from fastapi.responses import HTMLResponse, Response
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -41,7 +41,7 @@ def _day_items(session: Session, date_str: str) -> list[Article]:
     """按时间倒序取当天进日报的文章（口径与日报一致）。"""
     try:
         start, end = day_window(date_str)
-    except ValueError:
+    except (ValueError, OverflowError):
         return []
     statement = (
         select(Article)
@@ -55,6 +55,41 @@ def _day_items(session: Session, date_str: str) -> list[Article]:
         .order_by(Article.published_at.desc(), Article.id.desc())
     )
     return list(session.execute(statement).scalars())
+
+
+@rss_router.get("/rss-guide", response_class=HTMLResponse)
+def rss_guide(request: Request, session: Session = Depends(get_session)) -> HTMLResponse:
+    """RSS 的站内说明页。
+
+    以前导航里那个「RSS」直接指向 ``/rss`` —— 那是一个 XML 文件，浏览器会
+    用纯文本窗口打开它，读者看到的是一堆 ``<item><title>…``，既不知道这是什么，
+    也不知道怎么订阅。给一个专门页面说明「这是什么、怎么用、订阅了会推什么」。
+    """
+    from app.web.routes import _ctx, templates
+
+    base = str(request.base_url).rstrip("/")
+    latest = session.execute(
+        select(DailyReport).order_by(DailyReport.date.desc()).limit(1)
+    ).scalar_one_or_none()
+    recent = list(
+        session.execute(
+            select(DailyReport).order_by(DailyReport.date.desc()).limit(10)
+        ).scalars()
+    )
+    return templates.TemplateResponse(
+        request,
+        "rss.html",
+        _ctx(
+            request,
+            nav="rss",
+            title="RSS 订阅",
+            base=base,
+            feed_url=f"{base}/rss",
+            latest=latest.date if latest else "",
+            recent=[{"date": row.date, "url": f"/daily/{row.date}",
+                     "n": row.article_count} for row in recent],
+        ),
+    )
 
 
 @rss_router.get("/rss")

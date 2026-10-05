@@ -50,7 +50,9 @@ def main() -> int:
             settings.llm.api_key,
             settings.llm.model,
             timeout=settings.llm.timeout_seconds,
-            max_retries=settings.llm.max_retries,
+            # 参数名是 retries（LLMClient 的构造参数），配置里叫 max_retries ——
+            # 照抄配置名会直接 TypeError，`init_check.py --ping` 根本跑不起来
+            retries=settings.llm.max_retries,
             extra_headers=settings.llm.extra_headers,
         )
         try:

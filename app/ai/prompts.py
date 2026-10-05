@@ -33,11 +33,23 @@ def render_tag_prompt(prompts: PromptsConfig, title: str, summary: str) -> str:
     return _fill(prompts.tag_prompt, {"title": title, "summary": summary})
 
 
-def render_digest_prompt(prompts: PromptsConfig, title: str, summary: str, content: str) -> str:
-    """速览提示词。模板为空（老配置）时返回空串，调用方据此跳过这一步。"""
+def render_digest_prompt(
+    prompts: PromptsConfig,
+    title: str,
+    summary: str,
+    content: str,
+    *,
+    bilingual: bool = True,
+) -> str:
+    """速览提示词。模板为空（老配置）时返回空串，调用方据此跳过这一步。
+
+    ``bilingual=False`` 用于中文原文：模板里那句「再给一行 EN 英文速览」
+    会让模型顺手翻一遍，产出的是**没人会看的英文版**（中文原生文章的页面上
+    不给 EN 按钮）。这里补一句「只输出中文一行」，省掉整段英文输出。
+    """
     if not prompts.digest_prompt.strip():
         return ""
-    return _fill(
+    text = _fill(
         prompts.digest_prompt,
         {
             "title": title,
@@ -45,6 +57,9 @@ def render_digest_prompt(prompts: PromptsConfig, title: str, summary: str, conte
             "content": truncate(content, MAX_ARTICLE_CHARS) or "（无正文）",
         },
     )
+    if not bilingual:
+        text += "\n\n【本次只输出中文速览一行，不要输出 EN 行，不要输出英文。】"
+    return text
 
 
 def render_reason_prompt(prompts: PromptsConfig, topic: str, title: str, summary: str) -> str:
