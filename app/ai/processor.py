@@ -867,8 +867,11 @@ def process_article(
                 zh_sections = section_pair(sections, chinese=True) if sections else None
                 if en_sections is not None:
                     article.body_sections = json.dumps(en_sections, ensure_ascii=False)
-                if zh_sections is not None:
-                    article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+                # ★ 中文侧结构**不能在这里预落库**：section_pair(chinese=True) 的
+                #   t 还是英文原文，半中半英的结构会被页面当「中文译文」渲染
+                #   （实测 29 篇中招：中文标题 + 英文段落，读者看到的就是
+                #   「中文的文章内容是英文」）。t 变成终稿的位置只有两处：
+                #   逐节翻译成功后的覆盖写回，和下面 not foreign 分支的直接落库。
                 if settings.i18n.translate_content and foreign:
                     if en_sections is not None and zh_sections is not None:
                         # 按节翻：节与节之间天然对齐，中英文对照不会错位；
@@ -892,6 +895,11 @@ def process_article(
                         article.content_zh = translate_to_chinese(
                             client, settings.prompts, body_text
                         )
+                elif zh_sections is not None and not foreign:
+                    # 正文不是英文（或没开翻译）才直接落库：此时 t 本来就是中文终稿。
+                    # 英文信源没开翻译时不写 —— 让页面老实显示原文并注明「暂无中文
+                    # 译文」，而不是把英文段落标成「中文译文」。
+                    article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
 
         tags = client.chat(render_tag_prompt(settings.prompts, article.title, summary))
         article.tags = ",".join(split_tags(tags)) or None
