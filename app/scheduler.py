@@ -10,6 +10,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import delete, func, select, update
+from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient
 from app.ai.cluster import merge_duplicates
@@ -265,17 +266,27 @@ def run_backfill_reports(settings: Settings, *, days: int = 7) -> list[str]:
     today = now_local()
     with session_scope() as session:
         since = (today - timedelta(days=days)).strftime("%Y-%m-%d")
-        existing = set(
-            session.execute(select(DailyReport.date).where(DailyReport.date >= since)).scalars()
-        )
-    missing = [
-        (today - timedelta(days=offset)).strftime("%Y-%m-%d")
-        for offset in range(1, days + 1)
-        if (today - timedelta(days=offset)).strftime("%Y-%m-%d") not in existing
-    ]
+        existing = {
+            row[0]: row[1]
+            for row in session.execute(
+                select(DailyReport.date, DailyReport.article_count).where(
+                    DailyReport.date >= since
+                )
+            ).all()
+        }
     filled: list[str] = []
-    for date_str in missing:
-        if not _has_reportable_articles(date_str):
+    for offset in range(1, days + 1):
+        date_str = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        live = _reportable_count(date_str)
+        if live <= 0:
+            # 刚装好的空库不该在历史列表里摆出一串 0 篇的日报
+            continue
+        stored = existing.get(date_str)
+        # 已有的那份只在「条数还对得上」时保留。早先这里对已有的日期一律
+        # 跳过，于是定稿之后再补处理完的文章、或者把重复项合并掉之后，
+        # 存下来的 article_count 与实际能进日报的条数就永久对不上
+        # （实测 8 天里有 2 天不一致，其中一天写着 2 篇、实际能列 12 篇）。
+        if stored is not None and int(stored) == live:
             continue
         try:
             generate_daily_report(date_str, settings=settings)
@@ -284,24 +295,73 @@ def run_backfill_reports(settings: Settings, *, days: int = 7) -> list[str]:
             continue
         filled.append(date_str)
     if filled:
-        log.info("已补齐 %d 天的日报：%s", len(filled), "、".join(filled))
+        log.info("已刷新 %d 天的日报：%s", len(filled), "、".join(filled))
     return filled
 
 
-def _has_reportable_articles(date_str: str) -> bool:
-    """这一天有没有「本该进日报」的文章。"""
-    start, end = day_window(date_str)
+def _rowcount(result: object) -> int:
+    """DML 影响的行数。SQLAlchemy 的类型标注里 Result 没有 rowcount，
+    运行时对 UPDATE/DELETE 是有的，所以只能 getattr（与本文件既有写法一致）。"""
+    return int(getattr(result, "rowcount", 0) or 0)
+
+
+def repair_inconsistent_rows(session: Session) -> dict[str, int]:
+    """修掉历史遗留的自相矛盾行，返回各类修复条数。
+
+    1. **relevance=0 却留着分数。** 模型回 "no 90" 时会写出 relevance=0 却
+       score=90 的行：页面显示「AI 评分 90」，而任何按 score 排序或筛选的下游
+       都会把一篇已经不进日报的文章当成高价值内容。
+    2. **published_at 晚于 created_at。** 逻辑上不可能 —— 发布时间不可能比入库
+       时间还晚。成因是某些源把本地时间当成了 GMT（实测 InfoQ 会让文章凭空
+       提前 7.5 小时），于是它被算进了错误的那一天日报。
+    """
+    stats: dict[str, int] = {}
+    cleared = session.execute(
+        update(Article)
+        .where(Article.relevance == 0, Article.score.isnot(None))
+        .values(score=None)
+    )
+    if _rowcount(cleared):
+        stats["score_cleared"] = _rowcount(cleared)
+
+    # 用 created_at 当上限钳回：它至少是「我们确实在那个时刻拿到了这篇文章」
+    now = now_local()
+    future = session.execute(
+        update(Article)
+        .where(Article.published_at > Article.created_at, Article.created_at.isnot(None))
+        .values(published_at=Article.created_at)
+    )
+    if _rowcount(future):
+        stats["future_dated_clamped"] = _rowcount(future)
+
+    still_future = session.execute(
+        update(Article).where(Article.published_at > now).values(published_at=now)
+    )
+    if _rowcount(still_future):
+        stats["future_dated_to_now"] = _rowcount(still_future)
+
+    if stats:
+        log.info("修好了历史遗留的矛盾行：%s", "、".join(f"{k}={v}" for k, v in stats.items()))
+    return stats
+
+
+def _reportable_count(date_str: str) -> int:
+    """这一天当前有多少篇**能进日报**的文章（与页面列表同一套口径）。"""
+    try:
+        start, end = day_window(date_str)
+    except (ValueError, OverflowError):
+        return 0
     with session_scope() as session:
-        return bool(
+        return int(
             session.execute(
                 select(func.count(Article.id)).where(
                     Article.relevance == 1,
                     Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+                    Article.duplicate_of.is_(None),
                     Article.published_at >= start,
                     Article.published_at < end,
                 )
-            ).scalar()
+            ).scalar_one()
         )
 
 
@@ -332,6 +392,8 @@ def run_cleanup_job(settings: Settings) -> dict[str, int]:
     """删除超过保留期的文章与日报。"""
     cutoff_date = (now_local() - timedelta(days=settings.storage.retention_days)).strftime("%Y-%m-%d")
     with session_scope() as session:
+        # 先把历史遗留的矛盾行修好，再谈删除
+        repair_inconsistent_rows(session)
         # 先断开指向「即将被删掉的文章」的 duplicate_of，再删。
         # 不做这一步的话：主条目先到期被删掉、藏稿还留着，于是藏稿指向一个
         # 虚空 id —— primary_of() 查不到，它就从主页、日报、搜索里彻底消失，
