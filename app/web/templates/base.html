@@ -427,6 +427,13 @@
     .sec { margin-top:40px; }
     .sec-t { font-size:12px; letter-spacing:.1em; color:var(--accent); font-weight:700; margin-bottom:16px; }
     .sec-t.plain { color:var(--faint); }
+    /* 「AI 导读」标题行：左边小标题、右边语言切换（中文原生只有「中文」一个）。
+       语言切换从顶栏挪到了导读行 —— 顶栏是全站导航，语言却是「这一篇」的属性；
+       挪过来之后没有切换控件的页面（列表页、中文原生文章）由 base.html 的 JS
+       强制回中文，不会沿用上次选的英文把内容藏成空白。 */
+    .sec-head { display:flex; align-items:baseline; justify-content:space-between; gap:12px; flex-wrap:wrap; }
+    .sec-head .sec-t { margin-bottom:0; }
+    .sec-head + .lead-p { margin-top:14px; }
     .lead-p { font-size:17.5px; line-height:2.05; color:var(--text); }
     .rule { height:1px; background:var(--line); margin:34px 0; }
     /* 正文字号与行距对齐参考站 aihot.news 的 .prose（18px / 1.8 / 段距 1.2em），
@@ -543,17 +550,6 @@
         {% endif %}
       </div>
     </form>
-    {# 语言切换只在**页面真的有英文内容**时出现。
-       中文原生文章不做英文翻译（没有译文就没有 EN 可切），挂一个永远切不
-       出内容的按钮比不挂更糟 —— 读者点了发现没反应，以为页面坏了。
-       langs 由各页面给出；没给时默认两种都有（列表页双语混排，需要切换）。 #}
-    {% if langs is not defined or 'en' in langs %}
-    <div class="lang" id="lang" role="group" aria-label="语言">
-      <button type="button" data-lang="zh" title="只显示中文">中文</button>
-      <button type="button" data-lang="en" title="English only">EN</button>
-      <button type="button" data-lang="both" title="中文在上，英文在下">双语</button>
-    </div>
-    {% endif %}
     <div class="tools">
       <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
       <a class="ico" href="/api/health" title="状态" aria-label="服务状态">⋯</a>
