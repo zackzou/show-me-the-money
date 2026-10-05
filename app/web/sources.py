@@ -24,6 +24,7 @@ from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
 from app.db import get_session
+from app.fetcher.guard import blocked_reason
 from app.fetcher.pipeline import fetch_feed
 from app.models import Article, Source
 from app.utils.logger import get_logger
@@ -57,6 +58,11 @@ def _clean_url(raw: str) -> str:
         raise HTTPException(
             status_code=400, detail="地址必须以 http:// 或 https:// 开头（只支持 RSS/Atom 订阅源）"
         )
+    # 纵深防御：拒绝云厂商元数据接口一类的本机/链路本地地址（见 guard.py
+    # 的说明 —— 为什么不连内网一起拦）。
+    reason = blocked_reason(url)
+    if reason:
+        raise HTTPException(status_code=400, detail=reason)
     return url
 
 

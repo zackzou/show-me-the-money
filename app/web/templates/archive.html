@@ -4,7 +4,9 @@
 <div class="lead">
   <div class="kicker">ARCHIVE</div>
   <h1>历史日报</h1>
-  <p class="meta">共 <b>{{ total }}</b> 份 · 点日期展开当天标题 · 按日期倒序</p>
+  <p class="meta">共 <b>{{ total }}</b> 份 · 点日期展开当天标题 · 按日期倒序
+    {% if truncated %}<span class="dim">（当前只列出最近 {{ shown }} 份，更早的请用日期直链 /daily/YYYY-MM-DD）</span>{% endif %}
+  </p>
 </div>
 
 {% if reports %}

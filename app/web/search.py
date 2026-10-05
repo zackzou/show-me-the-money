@@ -28,6 +28,11 @@ SCOPE_FULL = "full"
 
 # 界面上显示的中文名
 SCOPE_LABELS = {SCOPE_META: "标题与摘要", SCOPE_FULL: "全文"}
+
+# 一次最多渲染多少条结果。这是渲染预算，不是「命中总数」—— 调用方必须另外
+# 查真实总数并如实显示，否则页面上会出现「找到 200 条」而实际命中 247 条、
+# 且有 47 条永远翻不到的情况。
+SEARCH_RESULT_LIMIT = 200
 # 兼容早期版本传进来的中文值，避免老链接直接掉回默认
 _LEGACY_SCOPES = {"标题与摘要": SCOPE_META, "全文": SCOPE_FULL}
 
@@ -81,7 +86,7 @@ def search_articles(
     scope: str = SCOPE_META,
     category: str | None = None,
     tag: str | None = None,
-    limit: int = 200,
+    limit: int = SEARCH_RESULT_LIMIT,
 ) -> list[Article]:
     """按关键词搜索文章。``scope`` 为 ``全文`` 时连正文一起搜。"""
     keyword = (term or "").strip()

@@ -18,12 +18,14 @@
   <div class="sec-t">添加信源</div>
   <form class="addform" method="post" action="/sources">
     <div class="frow">
-      <input type="url" name="url" id="src-url" required placeholder="RSS 地址，例如 https://news.ycombinator.com/rss"
+      <input type="url" name="url" id="src-url" required aria-label="RSS 地址"
+             placeholder="RSS 地址，例如 https://news.ycombinator.com/rss"
              autocomplete="off" spellcheck="false">
       <button type="submit" class="btn-add">试抓并添加</button>
     </div>
     <div class="frow">
-      <input type="text" name="name" id="src-name" placeholder="显示名（可留空，自动取域名）"
+      <input type="text" name="name" id="src-name" aria-label="显示名"
+             placeholder="显示名（可留空，自动取域名）"
              autocomplete="off" maxlength="200">
       <label class="langsel">
         语言

@@ -29,7 +29,13 @@
     .dark {
       --bg:#0b0d10; --surface:#14171c; --line:#242a33; --line-soft:#1c2027;
       --text:#e8eaed; --muted:#9aa3af; --faint:#7d8794;
-      --accent:#60a5fa; --accent-soft:#16233a; --chip:#1e232b; --chip-text:#c3c9d1;
+      /* 深色下的 --accent 必须够深才能和白字配。原来的 #60a5fa 配 #fff 只有
+         2.54:1（AA 要求 4.5:1），而 .lang button.on / .primary / .btn-add /
+         分页高亮全都是「accent 底 + 白字」，于是这些最显眼的控件在深色模式
+         下全部对比度不足。#3b82f6 配白字是 3.68:1，仍不够；#2563eb 是 5.17:1。
+         亮色模式本来就用 #2563eb，两边统一。 */
+      --accent:#2563eb; --accent-bright:#60a5fa; --accent-soft:#16233a;
+      --chip:#1e232b; --chip-text:#c3c9d1;
       --shadow:none;
     }
     * { box-sizing:border-box; }
@@ -274,6 +280,13 @@
     .empty { text-align:center; color:var(--faint); padding:70px 0; border:1px dashed var(--line); border-radius:14px; }
     .ft { border-top:1px solid var(--line); color:var(--faint); font-size:12px; padding:22px 0 34px; }
 
+    /* 键盘焦点必须看得见。原来全站没有任何 :focus 样式 —— 逐个量过 38 个
+       可聚焦元素，focus() 之后 outline 与 box-shadow 全是初始值，键盘用户
+       根本不知道自己在哪。（.search:focus-within 那圈只包住了搜索框本身。）
+       :focus-visible 只在键盘操作时出现，鼠标点击不会多出一圈描边。 */
+    :focus-visible { outline:2px solid var(--accent-bright, var(--accent));
+                     outline-offset:2px; border-radius:4px; }
+
     /* ── 搜索框 ────────────────────────────────────────────── */
     .search { display:flex; align-items:center; gap:7px; flex:1 1 auto; min-width:0;
               max-width:340px; padding:7px 11px;
@@ -376,9 +389,11 @@
     .tagx:hover { color:var(--accent); }
     .item .why.pending { color:var(--faint); }
     .item .why.pending b { color:var(--faint); }
-    .bm { background:none; border:0; color:var(--faint); cursor:pointer; padding:2px 3px;
-          font-size:14px; line-height:1; }
-    .bm:hover, .bm.on { color:var(--accent); }
+    /* 原来 20x18px（实测），是全站最小的可点区域。视觉上不放大，用 padding
+       把命中区域撑到 32px —— 列表页和详情页每一张卡片上都有它。 */
+    .bm { background:none; border:0; color:var(--faint); cursor:pointer;
+          padding:7px; margin:-5px; font-size:14px; line-height:1; }
+    .bm:hover, .bm.on { color:var(--accent-bright, var(--accent)); }
 
     /* ── 单篇详情：左栏来源信息 + 右栏正文 ─────────────────── */
     .story { display:grid; grid-template-columns:216px minmax(0,1fr) 300px; gap:52px; padding:34px 0 64px; }
@@ -498,7 +513,8 @@
     <form class="sp" action="/search" method="get" role="search">
       <div class="search">
         <span class="s-ico" aria-hidden="true">⌕</span>
-        <input type="search" name="q" id="q" value="{{ q|default('') }}" placeholder="搜索标题、摘要…" autocomplete="off">
+        <input type="search" name="q" id="q" value="{{ q|default('') }}" placeholder="搜索标题、摘要…"
+               aria-label="搜索文章" autocomplete="off">
         {% if q|default('') %}
           <a class="s-clear" href="/search" title="清空">×</a>
         {% else %}

@@ -44,6 +44,8 @@ log = logging.getLogger(__name__)
 page_router = APIRouter()
 
 PAGE_SIZE = 40
+# 历史日报一次渲染多少天（分页另算）
+ARCHIVE_PAGE_SIZE = 120
 WEEKDAYS = "一二三四五六日"
 
 # SQLite 的 INTEGER 是有符号 64 位。路径参数写成裸 ``int`` 时，Pydantic 会照单
@@ -575,6 +577,11 @@ def search_page(
         if keyword
         else []
     )
+    counts = (
+        count_by_category(session, keyword, scope=effective_scope, category=cat, tag=tag)
+        if keyword
+        else {}
+    )
     now = now_local()
     cards = [_card(article, None, None, now) for article in rows]
     # 搜索结果里要显示来源名与域名，所以再查一次 source
@@ -590,14 +597,12 @@ def search_page(
             scope_label=SCOPE_LABELS.get(effective_scope, ""),
             groups=group_cards(cards),
             total=len(cards),
-            found=len(rows),
-            counts=(
-                count_by_category(
-                    session, keyword, scope=effective_scope, category=cat, tag=tag
-                )
-                if keyword
-                else {}
-            ),
+            # found 是**真实命中数**，不是这一页渲染了多少条。两者相等就用同一个
+            # 数字；不等就两个都显示并说清楚还有多少条没渲染 —— 静默截断会让
+            # 「找到 200 条」和 tab 上的 247 并排出现，而那 47 条谁都翻不到。
+            found=counts.get("_all", 0) if counts else 0,
+            shown=len(rows),
+            counts=counts,
             active_cat=cat or "",
             active_tag=tag or "",
             searched_at=now,
@@ -789,7 +794,17 @@ def _related(session: Session, article: Article, now: datetime, *, limit: int = 
 @page_router.get("/archive", response_class=HTMLResponse)
 def archive(request: Request, session: Session = Depends(get_session)) -> HTMLResponse:
     """历史日报：按日期倒序列出，点日期展开当天标题（内容按需再拉，不一次性塞满页面）。"""
-    reports = list(session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(120)).scalars())
+    # ARCHIVE_PAGE_SIZE 只是「先渲染这么多」，真正的总数另外查。
+    # 原来把 120 当成了总数直接印在页面上（「共 120 份」），一旦日报超过 120 份
+    # 就会撒谎：更早的日子既翻不到、也没人知道它们存在。
+    reports = list(
+        session.execute(
+            select(DailyReport).order_by(DailyReport.date.desc()).limit(ARCHIVE_PAGE_SIZE)
+        ).scalars()
+    )
+    total_reports = int(
+        session.execute(select(func.count(DailyReport.id))).scalar_one() or 0
+    )
     now = now_local()
     rows = []
     # 用实时条数（而不是日报快照里的 article_count）画图与标数：点开某一天时
@@ -815,5 +830,10 @@ def archive(request: Request, session: Session = Depends(get_session)) -> HTMLRe
     return templates.TemplateResponse(
         request,
         "archive.html",
-        _ctx(request, nav="archive", reports=rows, total=len(rows), title="历史日报"),
+        _ctx(
+            request, nav="archive", reports=rows, total=total_reports,
+            truncated=total_reports > len(rows),
+            shown=len(rows),
+            title="历史日报",
+        ),
     )

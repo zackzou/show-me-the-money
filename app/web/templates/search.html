@@ -6,7 +6,8 @@
   <div class="kicker">SEARCH</div>
   <h1>{% if q %}搜索"{{ q }}"{% else %}搜索{% endif %}</h1>
   {% if q %}
-    <p class="meta">找到 <b>{{ found }}</b> 条{% if active_cat %} · 分类「{{ active_cat }}」{% endif %}
+    <p class="meta">找到 <b>{{ found }}</b> 条{% if found > shown %}（当前只渲染最近 {{ shown }} 条，
+      其余 {{ found - shown }} 条请缩小关键词范围）{% endif %}{% if active_cat %} · 分类「{{ active_cat }}」{% endif %}
       · 搜索范围：{{ scope_label }} · 更新于 {{ searched_at.strftime('%H:%M') }}</p>
   {% else %}
     <p class="meta">在已入选的报道里搜标题、摘要、速览、推荐理由与正文。按 <kbd style="font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 4px">/</kbd> 快速聚焦搜索框。</p>
