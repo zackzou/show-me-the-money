@@ -22,7 +22,12 @@ from app.ai.processor import (
 )
 from app.config import Settings
 from app.db import session_scope
-from app.fetcher.content import backfill_body_images, backfill_content, strip_shared_openings
+from app.fetcher.content import (
+    backfill_body_images,
+    backfill_content,
+    backfill_tail_boilerplate,
+    strip_shared_openings,
+)
 from app.fetcher.images import backfill_images, localize_missing_covers
 from app.fetcher.media_store import media_dir_for
 from app.fetcher.pipeline import run_fetch_pipeline
@@ -194,6 +199,8 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
         )["localized"]
         # 站点通栏广告（InfoQ 每篇都顶着同一段大会宣传）不算正文，删掉
         strip_shared_openings(session)
+        # 正文末尾的 newsletter 促销/相关链接串：库里 291 篇有 33 篇中招
+        strip_tail = backfill_tail_boilerplate(session, limit=settings.media.batch_size)
         # 正文内联配图：老数据都没有位置，顺手补齐，详情页才能像原站那样把图插进正文
         inline = backfill_body_images(
             session,
@@ -201,7 +208,7 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
             timeout=settings.media.timeout_seconds,
             media_dir=media_dir,
         )
-    return {"cover": stats, "inline": inline}
+    return {"cover": stats, "inline": inline, "tail_stripped": strip_tail}
 
 
 def run_report_job(settings: Settings) -> dict[str, Any]:

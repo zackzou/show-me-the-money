@@ -134,6 +134,72 @@ def _is_junk(text: str) -> bool:
     return any(junk in text or junk.lower() in low for junk in _JUNK_PATTERNS)
 
 
+# Newsletter 订阅页脚 / 会议促销 / 相关链接串。实测 279 篇正文里有 38 篇的
+# **最后一段**是这种东西，例如
+#   "Get 50% off a second pass The Disrupt experience is meant to be shared…"
+#   "Viral AI agent Instinct raises $1B Series C at a $10B valuation Sarah Perez"
+#   "Can't beat em? Buy em."
+# 它们不是文章内容，却会被当成正文：进 RSS 摘要、进中文重写的输入、占用译者的
+# token；而读者看到的是一篇结尾突然开始推销活动的文章。
+#
+# 判定放在抓取这一层，而不是展示层：污染一旦入库，后面每一环都要额外打补丁。
+_TAIL_BOILERPLATE_RE = re.compile(
+    r"get\s+\d+%\s*off"                     # 会议/订阅折扣
+    r"|is meant to be shared"
+    r"|bring a (?:colleague|partner|peer)"
+    r"|cover more ground"
+    r"|building momentum"
+    r"|can'?t beat em"
+    r"|great,\s*just like"
+    r"|originally (?:published|appeared)"
+    r"|all rights reserved"
+    r"|subscribe to our|sign ?up (?:for|to)|unsubscribe"
+    r"|\bviral\b.{0,60}\braises?\s+\$"
+    r"|\bat a \$[\d.]+[BM]\s+valuation\b"
+    r"|^\s*(?:image|photo|credit|source|via)\s*:"
+    r"|\bfollow us (?:on|at)\b"
+    r"|\bshare this\b",
+    re.I,
+)
+# 尾部促销块通常很短；正文段落一般远超这个长度，用它避免误删真正的收尾
+_MAX_TAIL_BOILERPLATE_CHARS = 400
+
+
+def strip_tail_boilerplate(text: str | None) -> str | None:
+    """删掉正文末尾的 newsletter 促销 / 相关链接串（见 _trim_tail 的说明）。"""
+    trimmed, _ = _trim_tail(text or "")
+    return trimmed
+
+
+def _trim_tail(text: str) -> tuple[str, int]:
+    """返回 ``(裁剪后的正文, 被删掉的段数)``。
+
+    只从**末尾**往上删连续的命中段，遇到第一个不像促销的段就停 —— 正文中间
+    提到「订阅」是正常内容，不能删。段数一并返回，调用方要靠它把配图锚点
+    一起裁掉（否则锚点会指到已经不存在的段）。
+    """
+    body = text.strip()
+    if not body:
+        return body, 0
+    blocks = re.split(r"\n\s*\n", body)
+    kept = len(blocks)
+    for block in reversed(blocks):
+        piece = block.strip()
+        if not piece:
+            kept -= 1
+            continue
+        if len(piece) > _MAX_TAIL_BOILERPLATE_CHARS:
+            break
+        if _TAIL_BOILERPLATE_RE.search(piece):
+            kept -= 1
+            continue
+        break
+    if kept == len(blocks):
+        return body, 0
+    trimmed = "\n\n".join(blocks[:kept]).strip()
+    return (trimmed or body), len(blocks) - kept
+
+
 def _paragraph_tags(html_text: str) -> list[str]:
     """抽出文档里所有 ``<p>`` 段落。
 
@@ -227,6 +293,8 @@ def extract_article_text(html_text: str, *, min_chars: int = 200) -> str:
             continue
         deduped.append(text)
     text = "\n\n".join(deduped).strip()
+    # 末尾的订阅促销/相关链接串不是正文，趁还在抓取这一层就切掉
+    text = strip_tail_boilerplate(text) or text
     return text[:MAX_CONTENT_CHARS] if len(text) >= min_chars else ""
 
 
@@ -268,6 +336,9 @@ def extract_article_document(
     if len(text) < min_chars:
         return "", []
 
+    # 末尾的 newsletter 促销不是正文。连同指向这些段的配图锚点一起裁掉 ——
+    # 锚点记的是「前 n 段之后」，段没了锚点必须跟着没，否则图会插到错地方。
+    text, removed_blocks = _trim_tail(text)
     anchors: list[dict[str, Any]] = []
     seen: set[str] = set()
     for position, url in images:
@@ -276,6 +347,9 @@ def extract_article_document(
         seen.add(url)
         # 锚点说的是「前 n 段之后」，去重掉的段要一并扣掉，否则图片会插到后面去
         shifted = position - sum(1 for index in dropped_at if index < position)
+        # 被裁掉的尾部段落之后不再有图（那里的图本身就是促销配图）
+        if shifted > len(re.split(r"\n\s*\n", text)) - 1:
+            continue
         anchors.append({"i": shifted, "url": url})
     return text[:MAX_CONTENT_CHARS], anchors
 
@@ -534,6 +608,31 @@ def strip_shared_openings(
             "删掉站点通栏开头 %d 段（%d 篇、%d 组）", stats["paragraphs"], stats["articles"], stats["groups"]
         )
     return stats
+
+
+def backfill_tail_boilerplate(session: Session, *, limit: int = 500) -> int:
+    """把已入库正文末尾的 newsletter 页脚切掉，返回处理条数。
+
+    新抓的文章在 ``extract_article_text`` 里就切了；库里已有的存量数据要靠
+    这里补。纯本地裁剪，不重新抓取 —— 页脚本来就不是内容，删掉不会丢信息。
+    """
+    rows = list(
+        session.execute(
+            select(Article)
+            .where(Article.content_full.isnot(None), Article.content_full != "")
+            .order_by(Article.published_at.desc(), Article.id.desc())
+            .limit(limit)
+        ).scalars()
+    )
+    changed = 0
+    for article in rows:
+        trimmed = strip_tail_boilerplate(article.content_full)
+        if trimmed and trimmed != article.content_full:
+            article.content_full = trimmed
+            changed += 1
+    if changed:
+        log.info("切掉了 %d 篇正文末尾的订阅页脚", changed)
+    return changed
 
 
 def strip_leading_paragraph(text: str | None) -> str | None:

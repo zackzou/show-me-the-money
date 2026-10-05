@@ -8,6 +8,9 @@ import httpx
 from sqlalchemy import select
 
 from app.fetcher.content import extract_article_text, fetch_article_text
+from app.models import Article
+
+from .conftest import make_article
 
 PAGE = """
 <html><head><title>标题</title><style>.x{color:red}</style><script>var a=1;</script></head>
@@ -390,3 +393,114 @@ def test_strip_shared_openings_keeps_head_image_at_the_top(seeded_db):
         anchors = json.loads(stored.body_images)
 
     assert [a["i"] for a in anchors] == [0]
+
+
+# ── 正文末尾的 newsletter 页脚 ────────────────────────────────────────
+
+def test_tail_boilerplate_patterns():
+    """实测的两种真实页脚都要认出来。
+
+    文章 313 的英文正文最后一段就是 "Get 50% off a second pass The Disrupt
+    experience is meant to be shared…" —— 这一段正是让「尾部是否覆盖」的
+    各种判据全部失效的原因：中文重写正确地丢掉了它，于是任何按「最后一段
+    有没有对应内容」来衡量的检查都在测量一段广告。
+    """
+    from app.fetcher.content import strip_tail_boilerplate
+
+    body = (
+        "The first real paragraph of the article carries actual information "
+        "that a reader would care about, long enough to count as content.\n\n"
+        "Get 50% off a second pass The Disrupt experience is meant to be shared. "
+        "Get your pass and bring a colleague, partner, or peer at 50% off."
+    )
+    out = strip_tail_boilerplate(body)
+    assert out is not None
+    assert "50% off" not in out
+    assert out.startswith("The first real paragraph"), "不能把正文一起删掉"
+    assert "The first real paragraph" in out
+
+    related = (
+        "A real paragraph with enough length to be genuine article content here.\n\n"
+        "Viral AI agent Instinct raises $1B Series C at a $10B valuation Sarah Perez"
+    )
+    assert "Sarah Perez" not in (strip_tail_boilerplate(related) or "")
+
+
+def test_promo_in_the_middle_is_kept():
+    """正文中间提到订阅是正常内容，不能删。"""
+    from app.fetcher.content import strip_tail_boilerplate
+
+    body = (
+        "Intro paragraph with enough length to be treated as real content.\n\n"
+        "Subscribe to our newsletter for weekly updates.\n\n"
+        "The body continues after that line with real content that must survive."
+    )
+    assert strip_tail_boilerplate(body) == body
+
+
+def test_clean_article_is_untouched():
+    from app.fetcher.content import strip_tail_boilerplate
+
+    body = (
+        "First paragraph of a perfectly ordinary article about a real subject.\n\n"
+        "Second paragraph, which is the concluding thought and must stay intact."
+    )
+    assert strip_tail_boilerplate(body) == body
+
+
+def test_long_tail_paragraph_is_never_dropped():
+    """真正的收尾段落可能很长，不能因为长度就当成促销删掉。"""
+    from app.fetcher.content import strip_tail_boilerplate
+
+    tail = "The company said it will publish the full transcript next week. " * 20
+    body = f"Opening paragraph of the article, long enough to be content.\n\n{tail}"
+    out = strip_tail_boilerplate(body)
+    assert out is not None
+    assert out.strip() == body.strip(), "长收尾段被误当成促销删掉了"
+
+
+def test_backfill_tail_boilerplate_trims_stored_bodies(seeded_db):
+    """存量数据要能补：库里 291 篇有 33 篇中招。"""
+    from app.db import session_scope
+    from app.fetcher.content import backfill_tail_boilerplate
+
+    with session_scope() as session:
+        article = make_article(
+            session,
+            content_full=(
+                "Real opening paragraph with substantial length to be kept here.\n\n"
+                "Get 50% off a second pass The Disrupt experience is meant to be shared."
+            ),
+        )
+        article_id = article.id
+
+    with session_scope() as session:
+        assert backfill_tail_boilerplate(session) >= 1
+        stored = session.get(Article, article_id).content_full
+        assert "50% off" not in stored
+        assert "Real opening paragraph" in stored
+
+
+PROMO_HTML = """<html><body><article>
+<p>Real opening paragraph with substantial length so it counts as content here.</p>
+<img src="/a.png"><p>Second real paragraph that carries an image and real information.</p>
+<p>Get 50% off a second pass The Disrupt experience is meant to be shared.</p>
+<img src="/promo.png">
+</article></body></html>"""
+
+
+def test_document_strips_promo_and_its_image_anchor():
+    """裁掉促销段时，指向它的配图锚点必须一起裁掉。
+
+    锚点记的是「前 n 段之后」。段没了锚点还在，图片就会被插到一个不存在的
+    位置 —— 那是「配图位置全错」这种极难排查的问题。
+    """
+    from app.fetcher.content import extract_article_document
+
+    text, anchors = extract_article_document(
+        PROMO_HTML, base_url="https://x.test", min_chars=50)
+    assert "50% off" not in text
+    assert len(anchors) == 1, f"促销配图应当被一起裁掉，实际 {anchors}"
+    assert "promo" not in anchors[0]["url"]
+    # 真正的正文配图位置不变
+    assert anchors[0]["i"] == 1
