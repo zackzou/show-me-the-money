@@ -232,8 +232,16 @@ def brief_digest(text: str | None, *, limit: int = BRIEF_DIGEST_CHARS) -> str:
         first = re.split(f"(?<=[{re.escape(_BRIEF_SENTENCE_END)}])", clean)[0].strip()
         brief = first or clean
     if len(brief) > _BRIEF_HARD_MAX:
-        cut = max(brief.rfind(ch, 0, limit) for ch in _BRIEF_CLAUSE_END) + 1
-        brief = (brief[:cut] if cut > 20 else brief[:limit]).rstrip("，、；：,;: ")
+        # 在整段里找**最后一个子句边界**，而不是只看前 ``limit`` 个字。
+        # 早先的 rfind 上界是 ``limit``，于是「一段没有标点的超长中文」会全部
+        # 返回 -1、cut=0，掉进 ``brief[:limit]`` 这个硬截断分支 —— 正好违反
+        # 本函数「宁可超预算也要完整」的前提，还会在断口后面硬补一个句号，
+        # 把半句话伪装成完整的一句。
+        cut = max(brief.rfind(ch) for ch in _BRIEF_CLAUSE_END) + 1
+        if cut > 20:
+            brief = brief[:cut]
+        # 找不到任何子句边界就整段留着：截断只会造出半句话，补句号只会让它
+        # 看起来像完整的一句 —— 两个都比超长更糟。
     brief = brief.strip()
     if brief and brief[-1] not in _BRIEF_SENTENCE_END:
         brief += "。"

@@ -7,7 +7,7 @@ import re
 from datetime import timedelta
 from typing import Any
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
@@ -49,6 +49,20 @@ STATUS_FAILED = "failed"
 
 _SCORE_RE = re.compile(r"(\d{1,3})")
 
+# 判定词：必须在整段里搜，不能只看开头 8 个字（见 parse_relevance）。
+_RELEVANCE_VERDICT_RE = re.compile(
+    r"\b(?:yes|no|y|n|true|false|relevant|irrelevant)\b|不相关|是|否|相关"
+)
+# 这些词表示「不相关」，注意要在匹配到的那个词上判断，而不是整段
+_NEGATIVE_VERDICTS = frozenset({"no", "n", "false", "irrelevant", "否", "不相关"})
+# 判定词之后的整数候选。要排除三种「长得像评分、其实不是」的数字：
+#   · 千分位（``1,200 words`` 里的 200）
+#   · 小数（``Confidence: 0.9`` 里的 9）
+#   · 四位年份（``2024 coverage`` 里的 2024）
+_SCORE_CANDIDATE_RE = re.compile(r"(?<![\d.,])(\d{1,4})(?![\d.,])")
+# 判定词之前的老式写法：「85 yes」
+_SCORE_LEADING_RE = re.compile(r"\s*(\d{1,3})\s*(?:yes|no|y|n|是|否)\b", re.I)
+
 # 列表页只在分数不低于这个值时强调「值得看」
 SCORE_STRONG = 70
 
@@ -56,19 +70,57 @@ SCORE_STRONG = 70
 def parse_relevance(answer: str) -> tuple[bool, int | None]:
     """解析相关度判断的结果：``yes 85`` → ``(True, 85)``。
 
+    判定词在**整段**里找，不再只看开头 8 个字。原来只看前 8 字，于是模型
+    回一句 ``Sure! Here is my assessment: yes 85`` 就会被判成「不相关」——
+    而它明明说了 yes、还给了 85 分。那篇文章会被永久写进 relevance=0，
+    从此不进日报、不进搜索、不出现在任何列表里（重排队也不会再看它）。
+
+    分数只在**紧跟判定词**时才算数：``yes 85`` 取 85，而
+    ``yes — highly relevant. Confidence: 0.9`` 不该取到那个 0.9（显示成
+    「AI 评分 0」）、``yes 2024 coverage`` 也不该把 2024 截成 20。
+
     容忍各种不规范输出：光一个 ``yes``、中文「是的」、分数在前、分数越界等。
     评分是可选的 —— 模型没给就不给，不能因此把一条好内容判掉。
     """
     text = (answer or "").strip()
-    head = text.casefold()[:8]
-    relevant = head.startswith(("yes", "y")) or head.startswith("是")
-    match = _SCORE_RE.search(text)
-    score = None
-    if match:
+    lowered = text.casefold()
+    match = _RELEVANCE_VERDICT_RE.search(lowered)
+    if match is None:
+        # 整段没有判定词：退回「开头就是 yes」的老行为，保证纯 "yes"/"是" 仍能用
+        return lowered.startswith(("yes", "y", "是", "相关", "true")), _score_leading(text)
+    relevant = match.group(0) not in _NEGATIVE_VERDICTS
+    if not relevant:
+        # 判为不相关就**不要分数**。见函数 docstring：留着 95 分会造出
+        # relevance=0 却 score=95 的矛盾行，页面显示「AI 评分 95」，而任何按
+        # score 排序或筛选的下游都会把一篇不进日报的文章当成高价值内容。
+        return False, None
+    score = _score_after(text, match.end())
+    if score is None:
+        # 判定词后面没有评分，再试老式的「85 yes」（分数写在前面）
+        score = _score_leading(text)
+    return True, score
+
+
+def _score_after(text: str, start: int) -> int | None:
+    """在判定词之后找评分：``yes 85`` → 85，``Yes, it is relevant. 70`` → 70。
+
+    从判定词后面**往后找第一个像评分的整数**，而不是要求它紧挨着判定词 ——
+    模型很爱在 yes 和分数之间插一句解释（``Yes, it is relevant. 70``）。
+    """
+    for match in _SCORE_CANDIDATE_RE.finditer(text, start):
         value = int(match.group(1))
         if 0 <= value <= 100:
-            score = value
-    return relevant, score
+            return value
+    return None
+
+
+def _score_leading(text: str) -> int | None:
+    """分数写在判定词前面的老式输出：「85 yes」。"""
+    match = _SCORE_LEADING_RE.match(text)
+    if not match:
+        return None
+    value = int(match.group(1))
+    return value if 0 <= value <= 100 else None
 
 
 def _is_affirmative(answer: str) -> bool:
@@ -259,7 +311,14 @@ def generate_brief_zh(
     # 也不能夹一大段没翻的英文（读者在手机上看到会以为坏掉了）
     if has_long_latin_run(result):
         return None
-    return truncate(result, 200) or None
+    # 超预算就整条作废，**不要截断**。上面刚确认过它是完整一句，
+    # truncate(result, 200) 会切在半句上再补一个「…」，把「完整」这个
+    # 唯一的保证又弄没了 —— 而且入库后就再也不会重试，读者收到的推送语
+    # 就永远停在这个省略号上。
+    if len(result) > 200:
+        log.info("推送语 %d 字超出 200 字上限，整条不采用（宁可没有也不要半句）", len(result))
+        return None
+    return result
 
 
 # 章节最多分这么多节：再多就不是「排版」，而是把文章切碎了
@@ -463,7 +522,12 @@ def process_article(session: Session, article: Article, client: LLMClient, setti
         relevant, score = parse_relevance(answer)
         if not relevant:
             article.relevance = 0
-            article.score = score
+            # 判为不相关就**不要记分数**。模型回 "no 95" 时，留下 score=95 会
+            # 造出一行 relevance=0 却 score=95 的自相矛盾数据：页面上显示
+            # 「AI 评分 95」，而任何只按 score 排序或筛选的下游都会把一篇已经
+            # 不进日报的文章当成高价值内容。与其指望每个调用方都记得同时看
+            # relevance，不如在写入时就消掉这个矛盾。
+            article.score = None
             article.summary = None
             article.digest = None
             article.reason = None
@@ -627,7 +691,14 @@ def process_pending(
     下一个周期又重来一遍。每处理 ``checkpoint_every`` 篇提交一次，
     避免长任务中途失败把已完成的进度一起回滚。
     """
-    statement = select(Article).where(Article.status == "pending").order_by(Article.published_at.desc())
+    # id 兜底排序：published_at 真的会撞车（同一分钟入的多篇、或者来源没给
+    # 时间的条目共用同一个 now 值到微秒）。没有稳定次序时 limit=60 每次挑中的
+    # 集合都可能不一样，靠后的条目会被反复饿死。
+    statement = (
+        select(Article)
+        .where(Article.status == "pending")
+        .order_by(Article.published_at.desc(), Article.id.desc())
+    )
     if limit is not None:
         statement = statement.limit(limit)
     articles = list(session.execute(statement).scalars())
@@ -904,16 +975,26 @@ def retry_degraded(
     rows = list(
         session.execute(
             select(Article)
-            .where(Article.status == STATUS_FAILED)
+            .where(
+                Article.status == STATUS_FAILED,
+                # 次数上限必须写进 WHERE，不能取回 200 条再在循环里判。
+                # 那样的话，攒够 200 条「已用完次数」的失败行之后，LIMIT 会被
+                # 它们吃光，真正该重试的（次数还没满）永远排在后面挑不上，
+                # requeued 会永久变成 0，而日志上看不出任何异常。
+                Article.process_attempts < max_attempts,
+            )
             .order_by(Article.published_at.desc(), Article.id.desc())
             .limit(limit)
         ).scalars()
     )
     stats["candidates"] = len(rows)
+    exhausted_total = session.execute(
+        select(func.count(Article.id)).where(
+            Article.status == STATUS_FAILED, Article.process_attempts >= max_attempts
+        )
+    ).scalar_one()
+    stats["exhausted"] = int(exhausted_total)
     for article in rows:
-        if (article.process_attempts or 0) >= max_attempts:
-            stats["exhausted"] += 1
-            continue
         # 刚试过就退避：上游限流通常不是一秒就恢复的
         if article.process_last_at and article.process_last_at > deadline:
             continue

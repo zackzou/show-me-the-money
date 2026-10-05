@@ -61,9 +61,13 @@
         {% if current.saved_at %}<i class="tag-ok">已保存 · {{ current.saved_at }}</i>{% endif %}
       </span>
       <span class="keywrap">
+        {# 明文 key **不渲染进 HTML**。type="password" 只挡眼睛，挡不住
+           「查看网页源代码」、反向代理的访问日志和浏览器的表单历史 ——
+           而这个服务默认监听 0.0.0.0，同网段谁都能取到。眼睛按钮改成点一下
+           再向 /settings/key 去取（见下面的 fetch），需要看的时候才拿。 #}
         <input type="password" name="api_key" id="f-key" spellcheck="false"
                placeholder="{{ '留空 = 沿用已保存的密钥' if current.has_key else '粘贴你的密钥（本地模型随便填）' }}"
-               value="{{ stored_key }}">
+               value="" data-has-key="{{ '1' if current.has_key else '' }}">
         <button type="button" class="ikey" id="k-eye" title="显示/隐藏" aria-label="显示或隐藏密钥">
           <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5c-5 0-9 4.5-9 7s4 7 9 7 9-4.5 9-7-4-7-9-7Zm0 11a4 4 0 1 1 0-8 4 4 0 0 1 0 8Z"/></svg>
         </button>
@@ -108,7 +112,7 @@
   </div>
   <p class="ftip">
     「计费口径合计」= 输入 − 缓存命中 + 输出 + 思考超出输出的部分。
-    网关报的 <code>total_tokens</code> 在实测中**不含思考 token**
+    网关报的 <code>total_tokens</code> 在实测中<b>不含思考 token</b>
     （一次改写调用 thought 用了 2045 而 output 只有 19，直接用它会少算一半），
     所以这里按上面的口径自己算；缓存命中是从输入里扣的，不重复加。
   </p>
@@ -161,10 +165,21 @@
     </ul>
     {% if log_pages > 1 %}
       <nav class="pager" aria-label="日志分页">
-        {% for n in range(1, log_pages + 1) %}
-          <a class="{{ 'on' if n == log_page else '' }}"
-             href="/settings?log_page={{ n }}">{{ n }}</a>
+        {% if log_page > 1 %}
+          <a href="/settings?log_page={{ log_page - 1 }}" rel="prev">上一页</a>
+        {% endif %}
+        {# 只渲染窗口内的页码。日志是纯追加的，页数会一直涨；全量渲染时 #}
+        {# 86 页就铺 86 个链接（390px 下同样宽），一年后是几千个 —— #}
+        {# 页面本身成了瓶颈。log_window 里是 [页码, 是否省略号] 的序列。 #}
+        {% for entry in log_window %}
+          {% if entry[1] %}<span class="pager-gap">…</span>{% else %}
+            <a class="{{ 'on' if entry[0] == log_page else '' }}"
+               href="/settings?log_page={{ entry[0] }}">{{ entry[0] }}</a>
+          {% endif %}
         {% endfor %}
+        {% if log_page < log_pages %}
+          <a href="/settings?log_page={{ log_page + 1 }}" rel="next">下一页</a>
+        {% endif %}
       </nav>
     {% endif %}
   {% else %}
@@ -250,8 +265,12 @@
   .kpi.accent { border-color:var(--accent); background:var(--accent-soft); }
   .kpi.accent b, .kpi.accent span { color:var(--accent); }
 
+  /* display:block + overflow-x:auto：这张表有 9 列，最小内容宽度 397px，
+     而 390px 屏的内容框只有 362px。原来没有滚动容器，表格就把**整页**
+     撑宽了 21~91px，连吸顶导航和页脚都跟着横向跑。改成表格自己内部横向滚动。 */
   .utbl { width:100%; border-collapse:collapse; font-size:12.5px;
-          font-variant-numeric:tabular-nums; }
+          font-variant-numeric:tabular-nums; display:block; overflow-x:auto;
+          white-space:nowrap; -webkit-overflow-scrolling:touch; }
   .utbl th { font-size:11px; color:var(--faint); font-weight:600; text-align:right;
              padding:0 8px 8px; border-bottom:1px solid var(--line); }
   .utbl td { text-align:right; padding:8px; border-bottom:1px solid var(--line); color:var(--muted); }
@@ -295,7 +314,9 @@
 
   @media (max-width:720px) {
     .ulog li { grid-template-columns:14px 1fr; gap:5px 9px; }
-    .u-tok, .u-res { grid-column:2; justify-content:flex-start; }
+    /* .u-model 也必须钉到第 2 列：它是第 3 个子元素，自动布局会把它塞进
+       第 1 列那个 14px 的状态点轨道里，模型名被压成 1 个字符加个省略号。 */
+    .u-model, .u-tok, .u-res { grid-column:2; justify-content:flex-start; }
     .sec-t .sec-h { float:none; display:block; margin-top:4px; }
     .utbl { font-size:11px; } .utbl th, .utbl td { padding:6px 4px; }
   }
@@ -321,16 +342,53 @@
   var eye = document.getElementById("k-eye");
   var copy = document.getElementById("k-copy");
 
+  // 明文按需取：页面本身不带 key，所以第一次点「眼睛」要先拉一次。
+  // 拉回来之后才真的切 type，切回去时立刻把 DOM 里的值清掉。
+  function revealKey() {
+    return fetch("/settings/key", {
+      method: "POST",
+      headers: { "X-Requested-With": "settings" },
+      credentials: "same-origin"
+    }).then(function (r) { return r.ok ? r.json() : null; })
+      .then(function (data) { return data && data.api_key ? data.api_key : null; });
+  }
+
   eye.addEventListener("click", function () {
     var shown = key.type === "text";
-    key.type = shown ? "password" : "text";
-    eye.style.color = shown ? "" : "var(--accent)";
-    eye.setAttribute("aria-pressed", shown ? "false" : "true");
+    if (shown) {
+      key.type = "password";
+      key.value = "";                 // 收起来的同时把明文从 DOM 里清掉
+      eye.style.color = "";
+      eye.setAttribute("aria-pressed", "false");
+      return;
+    }
+    if (key.value) { show(); return; }   // 用户刚自己粘过，直接显示
+    revealKey().then(function (value) {
+      if (!value) { key.focus(); return; }
+      key.value = value;
+      show();
+    });
   });
+  function show() {
+    key.type = "text";
+    eye.style.color = "var(--accent)";
+    eye.setAttribute("aria-pressed", "true");
+  }
 
   copy.addEventListener("click", function () {
     var value = key.value;
-    if (!value) { key.focus(); return; }
+    if (!value) {
+      // 没填也没显示过时也允许复制已保存的 key：先按需取一次再复制。
+      revealKey().then(function (saved) {
+        if (!saved) { key.focus(); return; }
+        key.value = saved;
+        doCopy(saved);
+      });
+      return;
+    }
+    doCopy(value);
+  });
+  function doCopy(value) {
     var done = function () {
       var old = copy.title;
       copy.title = "已复制";
@@ -342,7 +400,7 @@
     } else {
       legacy(value, done);
     }
-  });
+  }
   function legacy(text, done) {
     var ta = document.createElement("textarea");
     ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";

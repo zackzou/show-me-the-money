@@ -30,9 +30,21 @@ log = get_logger(__name__)
 _SECRET_RE = re.compile(r"(sk-[A-Za-z0-9_\-]{6,}|Bearer\s+[A-Za-z0-9._\-]{6,})")
 
 
-def redact(text: object, limit: int = 200) -> str:
-    """把可能含密钥的片段打码后再截断，用于写日志。"""
-    return _SECRET_RE.sub("***", str(text))[:limit]
+def redact(text: object, limit: int = 200, secret: str | None = None) -> str:
+    """把可能含密钥的片段打码后再截断，用于写日志。
+
+    正则只能认 ``sk-`` / ``Bearer `` 这两种形状，而网关回显密钥的方式远不止
+    这两种：把 key 放在 ``x-api-key`` 头、查询串里，或者 GLM 那种
+    ``<id>.<secret>`` 形式，都不在覆盖范围内 —— 实测一个不带 ``Bearer ``
+    前缀的密钥被原样写进了日志文件，也渲染进了设置页。
+
+    所以除了形状匹配，还把**本次实际发出去的那个密钥**本身替换掉。这是唯一
+    能保证不漏的办法：不管上游用什么格式回显，它都会原样包含这个字符串。
+    """
+    out = str(text)
+    if secret and len(secret) >= 8:
+        out = out.replace(secret, "***")
+    return _SECRET_RE.sub("***", out)[:limit]
 
 
 class LLMError(RuntimeError):
@@ -119,7 +131,7 @@ def parse_sse(body: str, *, with_usage: bool = False) -> Any:
     """
     deltas: list[str] = []
     finals: list[str] = []
-    usage = {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+    usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0}
     for raw_line in body.splitlines():
         line = raw_line.strip()
         if not line.startswith("data:"):
@@ -197,14 +209,14 @@ def parse_usage(data: Any) -> dict[str, int]:
     有些网关把它算在 output 之外）、``total``。
     """
     if not isinstance(data, dict):
-        return {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+        return {"input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0}
     usage = data.get("usage")
     if not isinstance(usage, dict):
         # 有些网关把 usage 放在 response.completed 事件里
         nested = data.get("response")
         usage = nested.get("usage") if isinstance(nested, dict) else None
     if not isinstance(usage, dict):
-        return {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+        return {"input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0}
     input_tokens = _int_of(
         usage, "prompt_tokens", "input_tokens", "inputTokens", "promptTokenCount"
     )
@@ -213,6 +225,13 @@ def parse_usage(data: Any) -> dict[str, int]:
     )
     cached = _int_of(usage.get("prompt_tokens_details"), "cached_tokens") + _int_of(
         usage, "cached_tokens", "cached_content_token_count", "cachedContentTokenCount"
+    )
+    # 缓存**写入**是另一回事。Anthropic 系的 cache_read / cache_creation 是两个
+    # 字段，而 OpenAI 兼容层普遍只映射了 read：只认 read 的写法在 Anthropic
+    # 形状的返回体上一个都识别不到，命中率显示成 0，write token 还被当成
+    # 普通输入按原价计费（实际 write 比未命中更贵）。
+    cache_write = _int_of(
+        usage, "cache_creation_input_tokens", "cache_creation", "cacheCreationInputTokens"
     )
     reasoning = _int_of(
         usage.get("completion_tokens_details"), "reasoning_tokens"
@@ -225,6 +244,7 @@ def parse_usage(data: Any) -> dict[str, int]:
         "input": input_tokens,
         "output": output_tokens,
         "cached": cached,
+        "cache_write": cache_write,
         "reasoning": reasoning,
         "total": total,
     }
@@ -257,7 +277,7 @@ class LLMClient:
         self.usage_sink = usage_sink
         # 最近一次调用的 token 用量（由 _extract 填），记到账上时带上
         self.last_usage: dict[str, int] = {
-            "input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0,
+            "input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0,
         }
         self.timeout = timeout
         self.retries = retries
@@ -301,13 +321,15 @@ class LLMClient:
             model = self.models[attempt % len(self.models)]
             if model != self.model and attempt > 0:
                 log.info("主模型 %s 不可用，试 %s（第 %d 次）", self.model, model, attempt + 1)
+            started = time.monotonic()
             try:
-                self.last_usage = {"input": 0, "output": 0, "cached": 0, "reasoning": 0, "total": 0}
+                self.last_usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0}
                 reply = self._chat_once(prompt, model)
-                self._record(prompt, model, ok=True, reply=reply, usage=self.last_usage)
+                self._record(prompt, model, ok=True, reply=reply,
+                             usage=self.last_usage, started=started)
                 return reply
             except LLMFormatError as exc:
-                self._record(prompt, model, ok=False, error=str(exc))
+                self._record(prompt, model, ok=False, error=str(exc), started=started)
                 # 单模型时格式错误重试没有意义（同一个错）；有备选才换模型试，
                 # 不同网关路径的格式可能不一样
                 if len(self.models) == 1:
@@ -318,22 +340,28 @@ class LLMClient:
                     time.sleep(min(2.0**attempt, 4.0))
             except (httpx.HTTPError, ValueError, LLMError) as exc:
                 last_error = exc
-                self._record(prompt, model, ok=False, error=str(exc))
+                self._record(prompt, model, ok=False, error=str(exc), started=started)
                 log.warning("LLM 调用失败（%s，第 %d 次）：%s", model, attempt + 1, exc)
                 if attempt < attempts - 1:
                     time.sleep(min(2.0**attempt, 4.0))
         raise LLMError(f"调用大模型失败：{last_error}")
 
     def _record(self, prompt: str, model: str, *, ok: bool,
-                reply: str = "", error: str = "", usage: dict[str, int] | None = None) -> None:
-        """把这次调用报给用量回调。回调自己出错绝不能影响主流程。"""
+                reply: str = "", error: str = "", usage: dict[str, int] | None = None,
+                started: float | None = None) -> None:
+        """把这次调用报给用量回调。回调自己出错绝不能影响主流程。
+
+        ``started`` 是 ``chat()`` 里打的单调时钟。少了它，写进日志的 ms 恒为 0
+        —— 一次跑了 9 秒的抓取在设置页上也显示「0ms」，那一列就成了摆设。
+        """
         if self.usage_sink is None:
             return
+        ms = 0 if started is None else int((time.monotonic() - started) * 1000)
         try:
             self.usage_sink(
                 model=model,
                 ok=ok,
-                ms=0,
+                ms=ms,
                 prompt_chars=len(prompt),
                 reply_chars=len(reply),
                 usage=usage or {},
@@ -352,7 +380,7 @@ class LLMClient:
         }
         response = self._http().post(self.endpoint, json=payload)
         if response.status_code >= 400:
-            raise LLMError(f"HTTP {response.status_code}: {redact(response.text)}")
+            raise LLMError(f"HTTP {response.status_code}: {redact(response.text, secret=self.key)}")
         return self._extract(response)
 
     def _extract(self, response: httpx.Response) -> str:
@@ -365,15 +393,16 @@ class LLMClient:
             if text:
                 self.last_usage = sse_usage
                 return text
-            raise LLMFormatError(f"上游返回了 SSE 但解析不出内容（{self.endpoint}）：{redact(body)}")
+            raise LLMFormatError(f"上游返回了 SSE 但解析不出内容（{self.endpoint}）：{redact(body, secret=self.key)}")
         try:
             data = response.json()
         except ValueError as exc:
             raise LLMFormatError(
-                f"上游返回的不是 JSON（content-type={content_type or '未知'}，{self.endpoint}）：{redact(body)}"
+                f"上游返回的不是 JSON（content-type={content_type or '未知'}，"
+                f"{self.endpoint}）：{redact(body, secret=self.key)}"
             ) from exc
         self.last_usage = parse_usage(data)
         text = _content_from_payload(data)
         if not text:
-            raise LLMFormatError(f"上游返回体里没有模型回复内容：{redact(body)}")
+            raise LLMFormatError(f"上游返回体里没有模型回复内容：{redact(body, secret=self.key)}")
         return text

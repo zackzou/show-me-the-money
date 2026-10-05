@@ -50,6 +50,30 @@ def escape_like(term: str) -> str:
     return term.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
 
 
+def _match_conditions(keyword: str, scope: str) -> list[Any]:
+    """关键词命中的列条件。
+
+    **必须包含中文译文列**（``title_zh`` / ``digest_zh``，全文再加
+    ``content_zh``）。这是一个中文站：读者在页面上看到的就是译文，搜的也是
+    译文里出现的词。以前只搜英文列，于是「防范」搜不到那 5 篇正文里写着
+    「防范 AI Agent 滥用」的��章 —— 而这些词的英文原文用的是 curb /
+    tightening，压根不在库里。译了等于搜不到。
+    """
+    pattern = f"%{escape_like(keyword)}%"
+    columns = [
+        Article.title,
+        Article.title_zh,
+        Article.summary,
+        Article.digest,
+        Article.digest_zh,
+        Article.reason,
+        Article.topics,
+    ]
+    if scope == SCOPE_FULL:
+        columns.extend([Article.content_full, Article.content_zh])
+    return [col.like(pattern, escape="\\") for col in columns]
+
+
 def search_articles(
     session: Session,
     term: str,
@@ -63,17 +87,8 @@ def search_articles(
     keyword = (term or "").strip()
     if not keyword:
         return []
-    pattern = f"%{escape_like(keyword)}%"
 
-    conditions = [
-        Article.title.like(pattern, escape="\\"),
-        Article.summary.like(pattern, escape="\\"),
-        Article.digest.like(pattern, escape="\\"),
-        Article.reason.like(pattern, escape="\\"),
-        Article.topics.like(pattern, escape="\\"),
-    ]
-    if scope == SCOPE_FULL:
-        conditions.append(Article.content_full.like(pattern, escape="\\"))
+    conditions = _match_conditions(keyword, scope)
 
     statement = (
         select(Article)
@@ -101,35 +116,39 @@ def search_articles(
     return rows
 
 
-def count_by_category(session: Session, term: str, *, scope: str = SCOPE_META) -> dict[str, int]:
-    """当前关键词下各分类的命中数，用来给 tab 上的数字。"""
+def count_by_category(session: Session, term: str, *, scope: str = SCOPE_META,
+                      category: str | None = None, tag: str | None = None) -> dict[str, int]:
+    """当前关键词下各分类的命中数，用来给 tab 上的数字。
+
+    ``category`` / ``tag`` 必须传进来，否则 tab 上的数字与「找到 N 条」对不上：
+    早先这里只按关键词统计，于是 ``/search?q=开源&tag=开源`` 头部写「找到 7 条」、
+    「全部」tab 却显示 21。数字必须和列表用**同一套过滤条件**。
+    """
     keyword = (term or "").strip()
     if not keyword:
         return {}
-    pattern = f"%{escape_like(keyword)}%"
-    conditions = [
-        Article.title.like(pattern, escape="\\"),
-        Article.summary.like(pattern, escape="\\"),
-        Article.digest.like(pattern, escape="\\"),
-        Article.reason.like(pattern, escape="\\"),
-        Article.topics.like(pattern, escape="\\"),
-    ]
-    if scope == SCOPE_FULL:
-        conditions.append(Article.content_full.like(pattern, escape="\\"))
+    conditions = _match_conditions(keyword, scope)
     rows = session.execute(
-        select(Article.category).where(
+        select(Article.id, Article.category, Article.tags).where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
             Article.duplicate_of.is_(None),
             or_(*conditions),
         )
-    ).scalars()
+    ).all()
+    needle = tag.strip().casefold() if tag else ""
     counts: dict[str, int] = {}
     total = 0
-    for category in rows:
+    for _id, row_category, row_tags in rows:
+        if category and row_category != category:
+            continue
+        if needle and not any(
+            part.strip().casefold() == needle for part in (row_tags or "").split(",")
+        ):
+            continue
         total += 1
-        if category:
-            counts[category] = counts.get(category, 0) + 1
+        if row_category:
+            counts[row_category] = counts.get(row_category, 0) + 1
     # ``_all`` 是「全部」tab 上的数字；模板里 tabs() 就是按这个键取的
     counts["_all"] = total
     return counts

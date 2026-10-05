@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import Path as PathParam
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -20,17 +22,28 @@ from app.utils.text import brief_digest, chinese_ratio, has_long_latin_run, now_
 
 api_router = APIRouter(prefix="/api")
 
+# SQLite 的 INTEGER 是有符号 64 位。裸 ``int`` 会照单全收 10**30，然后由驱动抛
+# OverflowError 变成 500；不存在的 id 本来就该是 404，所以直接挡在参数声明处。
+IdParam = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
+
 
 # 早报汇总的下限：低于这个字数在手机上只有两行，推送里显得敷衍
 _BRIEF_MIN_CHARS = 70
 
 
 @api_router.get("/articles", response_model=list[ArticleOut])
-def list_articles(date: str | None = None, limit: int = 200, session: Session = Depends(get_session)):
+def list_articles(
+    date: str | None = None,
+    limit: int = Query(200, ge=0, le=1000),
+    session: Session = Depends(get_session),
+):
     """按日期（默认**北京时间**今天）列出进日报的文章。"""
     try:
         start, end = day_window(date or now_local().strftime("%Y-%m-%d"))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # OverflowError 是真实存在的：``?date=9999-12-31`` 能过 datetime.strptime，
+        # 但 day_window 里的 ``start + timedelta(days=1)`` 会溢出。原来这里只接
+        # ValueError，于是这一种输入直接 500。
         raise HTTPException(status_code=400, detail=f"日期格式应为 YYYY-MM-DD：{date!r}") from None
     statement = (
         select(Article)
@@ -42,13 +55,16 @@ def list_articles(date: str | None = None, limit: int = 200, session: Session = 
             Article.published_at < end,
         )
         .order_by(Article.published_at.desc(), Article.id.desc())
-        .limit(max(1, min(limit, 1000)))
     )
+    # limit=0 表示「一条也不要」。早先是 max(1, limit)，于是 ?limit=0 返回 1 条 ——
+    # 问「零条」得到一条，比报错更难排查。
+    if limit:
+        statement = statement.limit(min(limit, 1000))
     return list(session.execute(statement).scalars())
 
 
 @api_router.get("/articles/{article_id}", response_model=ArticleDetailOut)
-def get_article(article_id: int, session: Session = Depends(get_session)):
+def get_article(article_id: IdParam, session: Session = Depends(get_session)):
     """单篇文章详情。
 
     早报片段浮层点开时才来取 —— 顺带让收藏页能按 id 拿历史文章，
@@ -115,10 +131,17 @@ def _digest_with_fallback(article: Article) -> str:
             limit=_BRIEF_DIGEST_CHARS,
         )
         if _is_chinese_usable(extra) and extra not in brief:
-            extra = extra.rstrip("。！？.!? ，,;；")
+            # 只去掉**句中的连接标点**，不能连句末的句号一起去掉。
+            # 去掉之后 joiner 又因为 brief 已以句号结尾而恒为 ""，拼出来的
+            # 段落就永远不以句末标点收尾 —— 正好是用户最反感的那种半句结尾
+            #（「…值得持续观察与评估」，后面本来还有内容）。
+            extra = extra.rstrip("，、；：,;: ")
             if extra:
-                joiner = "" if brief[-1] in "。！？.!?" else "。"
-                merged = f"{brief}{joiner}{extra}"
+                if extra[-1] in "。！？.!?":
+                    merged = f"{brief}{extra}"
+                else:
+                    joiner = "" if brief[-1] in "。！？.!?" else "。"
+                    merged = f"{brief}{joiner}{extra}。"
                 if len(merged) <= _BRIEF_DIGEST_CHARS + 20:
                     return merged
         if brief:

@@ -37,7 +37,9 @@ class Article(Base):
     __tablename__ = "articles"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    source_id: Mapped[int | None] = mapped_column(ForeignKey("sources.id"), nullable=True)
+    source_id: Mapped[int | None] = mapped_column(
+        ForeignKey("sources.id"), index=True, nullable=True
+    )
     title: Mapped[str] = mapped_column(String(500), nullable=False)
     link: Mapped[str] = mapped_column(String(1000), nullable=False, unique=True, index=True)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)

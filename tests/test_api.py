@@ -7,6 +7,7 @@ import re
 from pathlib import Path
 from urllib.parse import quote
 
+import pytest
 from sqlalchemy import select
 
 from app.config import Settings
@@ -1706,12 +1707,36 @@ def test_settings_page_shows_current_config(client, settings: Settings):
     assert "模型设置" in page.text
     assert settings.llm.model in page.text
     assert settings.llm.api_base in page.text
-    # 默认以掩码显示：明文 key 在 value 里，但输入框是 password + 有眼睛按钮
+    # 输入框是 password，眼睛/复制按钮都在
     assert 'type="password" name="api_key"' in page.text
     assert 'id="k-eye"' in page.text
     assert 'id="k-copy"' in page.text
-    assert settings.llm.api_key in page.text  # 供眼睛切换看明文
     assert 'href="/settings"' in page.text
+    # **明文 key 不能出现在页面源码里**。type="password" 只挡眼睛，挡不住
+    # 查看源代码、反代访问日志和浏览器表单历史，而这个服务默认听 0.0.0.0。
+    assert settings.llm.api_key not in page.text
+    # 有 key 时给出提示，眼睛按钮才知道要去 /settings/key 取
+    assert 'data-has-key="1"' in page.text
+
+
+def test_saved_key_is_revealed_on_demand_only(client, settings: Settings):
+    """明文 key 只在用户主动点击时按需返回，且不许缓存。"""
+    settings.llm.api_key = "sk-reveal-me-123456"
+    page = client.get("/settings")
+    assert "sk-reveal-me-123456" not in page.text
+
+    revealed = client.post("/settings/key")
+    assert revealed.status_code == 200
+    assert revealed.json()["api_key"] == "sk-reveal-me-123456"
+    assert "no-store" in revealed.headers.get("cache-control", "")
+
+
+def test_reveal_returns_empty_when_no_key_saved(client, settings: Settings):
+    """没存过 key 时返回空串，不报错（前端据此回到输入框）。"""
+    settings.llm.api_key = ""
+    revealed = client.post("/settings/key")
+    assert revealed.status_code == 200
+    assert revealed.json()["api_key"] == ""
 
 
 def test_settings_presets_cover_major_providers(client):
@@ -1727,7 +1752,7 @@ def test_settings_saves_and_applies_without_restart(client, settings: Settings, 
     """保存后就地生效：不用重启，下一个任务就用新模型。"""
     import app.web.settings as mod
 
-    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 12})
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 12})
     page = client.post(
         "/settings",
         data={"api_base": "https://api.deepseek.com/v1", "api_key": "sk-new",
@@ -1752,7 +1777,7 @@ def test_settings_keeps_existing_key_when_left_blank(client, settings: Settings,
     import app.web.settings as mod
 
     original = settings.llm.api_key
-    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 1})
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 1})
     client.post("/settings", data={"api_base": "https://x/v1", "model": "m", "api_key": ""},
                 follow_redirects=False)
     assert settings.llm.api_key == original
@@ -1763,7 +1788,7 @@ def test_settings_rejects_bad_config_without_saving(client, settings: Settings, 
     import app.web.settings as mod
 
     monkeypatch.setattr(
-        mod, "_probe", lambda s, base, key, model: {"ok": False, "error": "401 unauthorized", "ms": 30}
+        mod, "_probe", lambda s, base, key, model, **kw: {"ok": False, "error": "401 unauthorized", "ms": 30}
     )
     page = client.post(
         "/settings",
@@ -1786,7 +1811,7 @@ def test_settings_test_endpoint_does_not_save(client, settings: Settings, monkey
     """"仅测试连接"不该写入配置。"""
     import app.web.settings as mod
 
-    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 5})
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 5})
     page = client.post("/settings/test", data={"api_base": "https://y/v1", "model": "mm"},
                        follow_redirects=False)
     assert page.status_code == 200
@@ -1798,7 +1823,7 @@ def test_settings_usage_log_is_recorded(client, settings: Settings, monkeypatch,
     """测试请求会写一条用量记录，设置页能看到。"""
     import app.web.settings as mod
 
-    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model: {"ok": True, "reply": "ok", "ms": 7})
+    monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 7})
     settings.storage.db_path = str(Path(tmp_path) / "usage" / "smtm.db")
     mod.record_usage(settings, {"kind": "probe", "model": "m", "ok": True, "ms": 7, "total_tokens": 42})
     page = client.get("/settings")
@@ -1973,3 +1998,189 @@ def _block(html: str, cls: str) -> str:
     assert i >= 0, f"页面里没有 {cls} 块"
     j = html.find('<div class="prose', i + 10)
     return html[i: j if j > 0 else len(html)]
+
+
+# ── 日志分页：第 1 页必须是最新 ───────────────────────────────────────
+
+def test_usage_log_page_one_is_the_newest(client, settings: Settings, tmp_path):
+    """回归：第 1 页之前显示的是**最旧**的记录。
+
+    read_usage 按文件顺序（最旧在前）返回，而分页先切页再倒序，于是第 1 页
+    拿到的是开头那 10 条 —— 用户打开设置页第一眼看到的是昨天，而正上方的 KPI
+    已经统计到今天。
+    """
+    import app.web.settings as mod
+
+    settings.storage.db_path = str(Path(tmp_path) / "log" / "smtm.db")
+    for index in range(25):
+        mod.record_usage(
+            settings,
+            {"kind": "job", "model": f"m{index}", "ok": True, "ms": index,
+             "total_tokens": index},
+        )
+    rows = mod.read_usage(settings)
+    assert len(rows) == 25
+
+    page1 = client.get("/settings")
+    assert page1.status_code == 200
+    # 最新的一条（m24）在第 1 页上
+    assert "m24" in page1.text
+    # 最旧的一条（m0）不在第 1 页上
+    assert ">m0<" not in page1.text
+    assert "m0</" not in page1.text
+
+    # 第 3 页拿到最旧的那批
+    page3 = client.get("/settings?log_page=3")
+    assert "m0" in page3.text
+
+
+def test_page_one_is_newest_regardless_of_write_order(client, settings: Settings, tmp_path):
+    """只要 at 更大就一定排在第 1 页 —— 不依赖写入顺序。"""
+    import app.web.settings as mod
+
+    settings.storage.db_path = str(Path(tmp_path) / "log2" / "smtm.db")
+    mod.record_usage(settings, {"kind": "job", "model": "newest", "ok": True, "ms": 1})
+    for index in range(12):
+        mod.record_usage(
+            settings,
+            {"kind": "job", "model": f"old{index}", "ok": True, "ms": 2, "at": "2026-01-01 00:00:00"},
+        )
+    page1 = client.get("/settings")
+    assert "newest" in page1.text
+
+
+# ── 超界 id 与越界日期：不该是 500 ────────────────────────────────────
+
+@pytest.mark.parametrize("path", [
+    "/story/9223372036854775808",        # 2**63，SQLite INTEGER 的上界
+    "/story/99999999999999999999",
+    "/api/articles/9223372036854775808",
+    "/api/articles/99999999999999999999",
+])
+def test_huge_ids_are_rejected_not_500(client, path):
+    """裸 int 会照单全收 10**30，然后由 SQLite 抛 OverflowError 变成 500。
+
+    不存在的 id 本来就该是 404 / 422，绝不该是 500。
+    """
+    response = client.get(path)
+    assert response.status_code in (404, 422), f"{path} -> {response.status_code}"
+
+
+@pytest.mark.parametrize(("method", "path"), [
+    ("post", "/sources/99999999999999999999/toggle"),
+    ("post", "/sources/99999999999999999999/delete"),
+    ("post", "/sources/99999999999999999999/restore"),
+    ("post", "/sources/99999999999999999999/rename"),
+    ("post", "/sources/99999999999999999999/probe"),
+])
+def test_huge_source_ids_are_rejected_not_500(client, method, path):
+    response = getattr(client, method)(path, data={"name": "x"})
+    assert response.status_code in (404, 422), f"{path} -> {response.status_code}"
+
+
+def test_out_of_range_date_is_400_not_500(client):
+    """``?date=9999-12-31`` 能过 strptime，但 day_window 的 +1 天会溢出。"""
+    api = client.get("/api/articles?date=9999-12-31")
+    assert api.status_code == 400
+    page = client.get("/daily/9999-12-31")
+    assert page.status_code in (200, 404)
+    assert page.status_code != 500
+
+
+def test_api_limit_zero_returns_nothing(client):
+    """问「零条」应该得到零条，而不是 1 条。"""
+    response = client.get("/api/articles?limit=0")
+    assert response.status_code == 200
+    assert response.json() == []
+
+
+def test_image_404_does_not_claim_html(client):
+    """图片 404 不该谎报 content-type=text/html。"""
+    response = client.get("/img/deadbeef.jpg")
+    assert response.status_code == 404
+    assert "text/html" not in response.headers.get("content-type", "")
+
+
+# ── 搜索：必须能搜到中文译文 ──────────────────────────────────────────
+
+def test_search_finds_articles_by_chinese_translation(client, seeded_db):
+    """回归：这是一个中文站，读者搜的就是页面上看到的译文。
+
+    早先搜索只查英文列，于是「防范」搜不到那几篇正文里写着「防范 AI Agent
+    滥用」的稿件 —— 而这些词的英文原文用的是 curb / tightening，压根不在库里。
+    译了等于搜不到。
+    """
+    with session_scope() as session:
+        make_article(
+            session,
+            title="Apple tightens Mac disk access for AI agents",
+            title_zh="苹果收紧全盘访问权限，防范 AI Agent 滥用风险",
+            digest="Apple is curbing access.",
+            digest_zh="苹果开始限制相关访问。",
+            relevance=1,
+            status="processed",
+        )
+    response = client.get("/search", params={"q": "防范"})
+    assert response.status_code == 200
+    assert "找到" in response.text
+    # 命中了：正文里出现了那篇的中文标题
+    assert "防范" in response.text
+
+
+def test_search_full_scope_reaches_chinese_body(client, seeded_db):
+    """全文检索要能命中 content_zh —— 只在正文里出现的词，meta 查不到、full 查得到。"""
+    with session_scope() as session:
+        make_article(
+            session,
+            title="Some long article about models",
+            content_full=("English body text about routing. " * 40),
+            # 这个词只出现在中文正文里，英文全文里没有
+            content_zh=("中文正文里详细讨论了「路由权衡」的取舍。" * 12),
+            relevance=1,
+            status="processed",
+        )
+
+    def found_count(**params):
+        page = client.get("/search", params=params)
+        assert page.status_code == 200
+        match = re.search(r"找到\s*<b>(\d+)</b>", page.text)
+        return int(match.group(1)) if match else 0
+
+    assert found_count(q="路由权衡", scope="meta") == 0
+    assert found_count(q="路由权衡", scope="full") == 1
+
+
+def test_category_tab_count_respects_active_tag(client, seeded_db):
+    """「找到 N 条」与「全部」tab 上的数字必须一致。
+
+    早先 tab 计数只按关键词统计、不带 tag 过滤，于是 /search?q=开源&tag=开源
+    头部写「找到 7 条」而「全部」tab 显示 21。
+    """
+    with session_scope() as session:
+        for index in range(6):
+            make_article(
+                session,
+                title=f"开源项目 {index}",
+                title_zh=f"开源项目 {index}",
+                category="模型",
+                tags="开源",
+                relevance=1,
+                status="processed",
+            )
+        for index in range(4):
+            make_article(
+                session,
+                title=f"闭源发布 {index}",
+                title_zh=f"闭源发布 {index}",
+                category="行业",
+                tags="产品",
+                relevance=1,
+                status="processed",
+            )
+    page = client.get("/search", params={"q": "开源", "tag": "开源"})
+    assert page.status_code == 200
+    found = re.search(r"找到\s*<b>(\d+)</b>", page.text)
+    assert found, "页面上找不到「找到 N 条」"
+    all_tab = re.search(r'class="n">(\d+)</span>', page.text)
+    assert all_tab, "页面上找不到「全部」tab 的计数"
+    assert found.group(1) == all_tab.group(1)

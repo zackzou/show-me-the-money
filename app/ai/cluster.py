@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import or_, select, update
 from sqlalchemy.orm import Session
 
 from app.ai.client import LLMClient, LLMError
@@ -117,9 +117,22 @@ def _overlap(a: set[str], b: set[str]) -> float:
 
 
 def _primary_of(a: Article, b: Article) -> Article:
-    """同一件事里留哪一条当主条目：正文最全的，正文一样长时留更早发布的。"""
-    def rank(article: Article) -> tuple[int, float]:
-        return (len(article.content_full or ""), -(article.published_at.timestamp() if article.published_at else 0.0))
+    """同一件事里留哪一条当主条目。
+
+    排序键依次是：**有中文译文 → 正文更长 → 发布更早**。
+
+    译文排在正文长度前面，是因为读者实际看到的就是主条目：按长度选主时，
+    一篇 5000 字的英文原文会盖过一篇 100 字但已经译好中文的稿子，结果是
+    读者点进来看到整页英文 —— 而被藏起来的那篇本来有译文。这个站的
+    不变量就是「中文模式下不至于整页英文」，不能为了正文长度把它破坏掉。
+    """
+    def rank(article: Article) -> tuple[int, int, float]:
+        translated = int(bool((article.content_zh or "").strip()))
+        return (
+            translated,
+            len(article.content_full or ""),
+            -(article.published_at.timestamp() if article.published_at else 0.0),
+        )
 
     return a if rank(a) >= rank(b) else b
 
@@ -192,6 +205,46 @@ def _candidate_articles(session: Session, *, limit: int, window_days: int = PAIR
     return [a for a in rows if (a.published_at.timestamp() if a.published_at else 0) >= since][:limit]
 
 
+def repair_duplicate_links(session: Session) -> int:
+    """修掉会让整条报道从站上消失的坏 ``duplicate_of`` 指向，返回修复条数。
+
+    两类坏指向，都会在库里真实出现过：
+
+    1. **指向 relevance != 1 的文章。** 主条目被判为不相关之后，它就成了藏稿的
+       黑洞：主页、日报、搜索全都要求 ``relevance == 1``，于是被它藏起来的那条
+       （本身 relevance=1、内容完整）在任何列表里都找不到。实测 172/177 就是
+       这么个状态。原因在处理器：LLM 出错时先写 ``relevance=1`` 占位避免漏掉当天
+       内容，之后重排队真的判成不相关，但 ``duplicate_of`` 从没回头看过。
+    2. **指向已经不存在的 id。** 清理任务按 ``created_at`` 删文章，主条目先到期
+       被删掉、藏稿还留着，于是藏稿指向虚空，同样谁也看不到它。
+
+    修复方式：把藏稿**提升为独立条目**（``duplicate_of=NULL``）。宁可多一条重复，
+    也不能让内容彻底消失 —— 这是 ``parse_same_story``「宁可多留一条」的那条原则
+    在存储层的延续。
+    """
+    existing_ids = select(Article.id)
+    bad = session.execute(
+        select(Article.id).where(
+            Article.duplicate_of.isnot(None),
+            or_(
+                # 指向已经被清理任务删掉的 id
+                Article.duplicate_of.notin_(existing_ids),
+                # 指向一篇自己已经不相关的主条目（藏稿黑洞，见 docstring）
+                Article.duplicate_of.in_(
+                    select(Article.id).where(Article.relevance != 1)
+                ),
+            ),
+        )
+    ).scalars().all()
+    for article_id in bad:
+        session.execute(
+            update(Article).where(Article.id == article_id).values(duplicate_of=None)
+        )
+    if bad:
+        log.info("修复了 %d 条指向失效的重复标记（藏稿已提升为独立条目）", len(bad))
+    return len(bad)
+
+
 def merge_duplicates(
     session: Session,
     client: LLMClient,
@@ -204,6 +257,7 @@ def merge_duplicates(
     ``limit`` 是参与比较的文章数（按发布时间倒序），``MAX_PAIRS_PER_RUN``
     限制每轮实际发起的判定调用数。
     """
+    repair_duplicate_links(session)
     rows = _candidate_articles(session, limit=limit)
     pairs = find_duplicate_pairs(rows)
     stats = {"candidates": len(rows), "pairs": len(pairs), "merged": 0, "kept": 0}
@@ -213,8 +267,11 @@ def merge_duplicates(
             continue
         primary = _primary_of(left, right)
         loser = right if primary is left else left
-        # 主条目自己已经指向别人（这一轮刚判出来的）就跳过，避免串成链
-        if primary.duplicate_of:
+        # **任何一侧**已经挂过别人就跳过。只查 primary 是漏的：实测库里已经
+        # 出现 53 → 35 → 61 这样的链，而 primary_of() 只解析一跳，于是 53 的
+        # 「其他来源也报道了」列表里根本没有自己。链条一旦形成，某一方的
+        # 聚合视图就会静默丢掉一个来源。
+        if primary.duplicate_of or loser.duplicate_of:
             stats["kept"] += 1
             continue
         loser.duplicate_of = primary.id
@@ -238,7 +295,18 @@ def duplicates_of(session: Session, article_id: int) -> list[Article]:
 
 
 def primary_of(session: Session, article: Article) -> Article | None:
-    """重复稿指向的主条目。"""
-    if not article.duplicate_of:
-        return None
-    return session.get(Article, article.duplicate_of)
+    """重复稿指向的主条目；沿着链一路走到末端。
+
+    只解析一跳是不够的：库里出现过 53 → 35 → 61 这样的链，一跳会让 53 指到
+    35（它自己也是藏稿），于是 53 页面上的「另一篇更完整的报道」点进去还是
+    一篇藏稿，而 61 的来源列表里又没有 53。走到末端才是一条扁平的结构。
+    """
+    seen: set[int] = set()
+    current = article
+    while current.duplicate_of and current.duplicate_of not in seen:
+        seen.add(current.duplicate_of)
+        nxt = session.get(Article, current.duplicate_of)
+        if nxt is None:
+            return None
+        current = nxt
+    return current if current.id != article.id else None

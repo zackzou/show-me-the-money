@@ -22,7 +22,8 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
+from starlette.concurrency import run_in_threadpool
 
 from app.ai.client import LLMClient, LLMError
 from app.config import Settings
@@ -46,14 +47,19 @@ PROVIDER_PRESETS: list[dict[str, Any]] = [
         "id": "openai",
         "name": "OpenAI",
         "base": "https://api.openai.com/v1",
-        "models": ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "o4-mini"],
+        # gpt-4o 已于 2026-03-31 退役，o4-mini/gpt-4.1-nano 于 2026-10-23 停用，
+        # 所以默认项换成仍在售的 gpt-5.1 系列 —— 一个点下去就报 404 的预设
+        # 比没有这个预设更糟。
+        "models": ["gpt-5.1", "gpt-5.1-mini", "gpt-5.1-nano"],
         "note": "也兼容所有 OpenAI 兼容的中转/自建网关",
     },
     {
         "id": "deepseek",
         "name": "DeepSeek",
         "base": "https://api.deepseek.com/v1",
-        "models": ["deepseek-chat", "deepseek-reasoner"],
+        # deepseek-chat / deepseek-reasoner 已过官方标注的下线日期（2026-07-24），
+        # 默认项换成新一代的 flash / v4-pro。
+        "models": ["deepseek-v4-pro", "deepseek-flash"],
         "note": "",
     },
     {
@@ -74,7 +80,8 @@ PROVIDER_PRESETS: list[dict[str, Any]] = [
         "id": "moonshot",
         "name": "Moonshot（Kimi）",
         "base": "https://api.moonshot.cn/v1",
-        "models": ["moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"],
+        # moonshot-v1 全系已于 2026-08-31 下线，预设里再列就是「一点就 410」。
+        "models": ["kimi-k3", "kimi-k2.7-code", "kimi-k2.6"],
         "note": "",
     },
     {
@@ -101,9 +108,12 @@ PROVIDER_PRESETS: list[dict[str, Any]] = [
     {
         "id": "ollama",
         "name": "Ollama（本机）",
+        # 容器里 127.0.0.1 指的是容器自己，不是宿主机。用 compose 跑的时候要
+        # 换成 host.docker.internal —— 这一点写进 note，否则用户只会看到连不上。
         "base": "http://127.0.0.1:11434/v1",
         "models": ["qwen2.5:7b", "llama3.1:8b"],
-        "note": "本机模型，key 随便填 ollama",
+        "note": "本机模型，key 随便填 ollama；跑在容器里要把地址换成 "
+                "http://host.docker.internal:11434/v1",
     },
 ]
 
@@ -188,8 +198,13 @@ def record_usage(settings: Settings, event: dict[str, Any]) -> None:
     try:
         path = _usage_path(settings)
         path.parent.mkdir(parents=True, exist_ok=True)
+        # 与 llm_settings.json 同为 0600：这份文件会收进上游错误文本，
+        # 而上游偶尔会把密钥原样回显（见 client.redact 的说明）。
+        created = not path.exists()
         with path.open("a", encoding="utf-8") as handle:
             handle.write(json.dumps(row, ensure_ascii=False) + "\n")
+        if created:
+            path.chmod(0o600)
     except OSError as exc:
         log.debug("用量记录写入失败：%r", exc)
 
@@ -309,8 +324,31 @@ def record_llm_call(settings: Settings, *, model: str, ok: bool,
     record_usage(settings, event)
 
 
-def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any]:
-    """真的发一次请求测连通性，并把用量（含 token 明细）记一条。"""
+def _split_models(raw: str) -> list[str]:
+    """把逗号分隔的备用模型串拆成列表（去空格、去空项、去重保序）。"""
+    seen: set[str] = set()
+    out: list[str] = []
+    for piece in (raw or "").split(","):
+        name = piece.strip()
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    return out
+
+
+def _probe(settings: Settings, base: str, key: str, model: str,
+           *, fallbacks: list[str] | None = None) -> dict[str, Any]:
+    """真的发一次请求测连通性，并把用量（含 token 明细）记一条。
+
+    **必须带上备用模型**：调度器实际用的客户端是带 fallback 的，于是会出现
+    「主模型被限流、备用模型健康」的配置 —— 线上每个任务都能靠 fallback 跑
+    成功，而这里不带 fallback 就会判定失败、连保存都不让存。用户明明配了一
+    条能用的链路，却被一个并不存在的失败挡在门外。
+
+    这个函数是**阻塞**的（同步 httpx），调用方必须放进线程池
+    （``run_in_threadpool``），否则 60 秒超时会卡住整个事件循环 ——
+    实测一次 POST 能让全站所有路由同时无响应。
+    """
     started = time.time()
     prompt = PROBE_PROMPT
     captured: dict[str, Any] = {}
@@ -329,6 +367,7 @@ def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any
         retries=0,
         temperature=0.3,
         extra_headers=settings.llm.extra_headers,
+        fallback_models=list(fallbacks or []),
         usage_sink=sink,
     )
     ok = True
@@ -341,11 +380,14 @@ def _probe(settings: Settings, base: str, key: str, model: str) -> dict[str, Any
         error = str(exc)[:300]
     finally:
         client.close()
+    # 记「实际答话的那个模型」：主模型被限流、由备用模型顶上来时，光看
+    # configured 那个会以为主模型一直在用，而真实消耗全记在备用模型上。
+    answered_by = (captured.get("model") or model)
 
     elapsed = int((time.time() - started) * 1000)
     numbers = dict(captured.get("usage") or {})
     event: dict[str, Any] = {
-        "kind": "probe", "model": model, "base": base, "ok": ok,
+        "kind": "probe", "model": answered_by, "base": base, "ok": ok,
         "error": error, "ms": elapsed,
         "prompt_chars": len(prompt), "reply_chars": len(text),
         "input_tokens": int(numbers.get("input") or 0),
@@ -378,17 +420,60 @@ async def _read_form(request: Request) -> dict[str, str]:
     return {key: values[0] for key, values in parsed.items() if values}
 
 
+def _newest_first(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """把用量记录排成「最新在前」。
+
+    以 ``at`` 为主键倒序，**同秒的按写入顺序的逆序**排（即晚写的在前）。
+    单靠 ``sorted(..., reverse=True)`` 不够：Python 的排序是稳定的，
+    ``reverse=True`` 不会把相等的键再翻转，于是同一秒内的记录仍然保持
+    文件顺序（最旧在前）—— 而日志的时间戳只精确到秒，实测 845 行里就有
+    17 对同秒，第 1 页会出现「同秒里最早写的那条」。
+    """
+    indexed = list(enumerate(rows))
+    indexed.sort(key=lambda pair: (str(pair[1].get("at") or ""), pair[0]), reverse=True)
+    return [row for _, row in indexed]
+
+
+def _page_window(page: int, pages: int, *, edge: int = 1, around: int = 1) -> list[tuple[int, bool]]:
+    """分页条目的窗口：``[(页码, 是否省略号), ...]``。
+
+    日志是纯追加的，页数只增不减。全量渲染每页数字时实测 86 页就铺了 86 个
+    链接（390px 屏同样宽），跑一年就是几千个 —— 页面本身先卡住。
+    """
+    if pages <= 1:
+        return []
+    wanted: list[int] = []
+    for n in range(1, pages + 1):
+        if n <= edge or n > pages - edge or abs(n - page) <= around:
+            wanted.append(n)
+    out: list[tuple[int, bool]] = []
+    previous = 0
+    for n in wanted:
+        if previous and n - previous > 1:
+            out.append((n, True))
+        out.append((n, False))
+        previous = n
+    return out
+
+
 def _page(request: Request, *, notice: dict[str, str] | None = None,
           result: dict[str, Any] | None = None, log_page: int = 1,
           status: int = 200) -> HTMLResponse:
     settings: Settings | None = getattr(request.app.state, "settings", None)
-    rows = read_usage(settings) if settings else []
+    # 最新的必须在最前面。文件是纯追加的，所以「最后写入」就是最新；同秒内的
+    # 多条（实测 845 行里有 17 对同秒）靠稳定排序保持文件顺序，晚写的排前面。
+    # 先整体倒序再按 at 稳定排序：``at`` 乱序时（例如任务完成先后与写入先后
+    # 不一致）以时间为准，完全相同则仍按写入先后。
+    # sorted 是稳定排序，reverse=True 不会把相等的键再倒过来 —— 配合下面先把
+    # 文件顺序整体倒过来，同秒的多条（实测 845 行里有 17 对同秒）就按「晚写的
+    # 在前」排，不需要再包一层 reversed()。
+    rows = _newest_first(read_usage(settings)) if settings else []
     summary = usage_summary(rows)
     # 日志分页：每页 10 条。之前的实现把最近 20 条全铺出来，条目一多就变成一堵墙。
     per_page = LOG_PAGE_SIZE
     total_pages = max(1, -(-len(rows) // per_page))
     log_page = max(1, min(log_page, total_pages))
-    window = rows[(log_page - 1) * per_page : log_page * per_page][::-1]
+    window = rows[(log_page - 1) * per_page : log_page * per_page]
     stored = load_stored(settings) if settings else {}
     return templates.TemplateResponse(
         request,
@@ -404,10 +489,7 @@ def _page(request: Request, *, notice: dict[str, str] | None = None,
             log_page=log_page,
             log_pages=total_pages,
             log_total=len(rows),
-            # 「输入过的 key 自动保存」：页面拿到已存的明文 key（只在这一处出现，
-            # 且只在本机 127.0.0.1 服务里），渲染成 value= 由 JS 填进输入框，
-            # 默认仍是 password 类型 + 掩码显示。
-            stored_key=stored.get("api_key", "") if settings else "",
+            log_window=_page_window(log_page, total_pages),
             current={
                 "api_base": settings.llm.api_base if settings else "",
                 "api_key_masked": _mask(settings.llm.api_key) if settings else "",
@@ -452,7 +534,12 @@ async def settings_save(request: Request) -> HTMLResponse:
         )
 
     key = new_key or settings.llm.api_key
-    probe = _probe(settings, base, key, model)
+    # 服务端兜底：万一有人（某个脚本、某个旧版本页面）把掩码当成 key 提交回来，
+    # 不要拿 "sk-a**3456" 覆盖掉真 key —— 那会立刻把可用配置改坏，而且要等到
+    # 下一次调用大模型才报错。留空与提交掩码都按「不改动原 key」处理。
+    if _mask(key) == key.strip() and key.strip():
+        key = settings.llm.api_key
+    probe = await run_in_threadpool(_probe, settings, base, key, model, fallbacks=_split_models(fallback))
     if not probe["ok"]:
         return _page(
             request,
@@ -476,6 +563,27 @@ async def settings_save(request: Request) -> HTMLResponse:
     )
 
 
+@settings_router.post("/settings/key")
+async def settings_reveal_key(request: Request) -> JSONResponse:
+    """按需返回已保存的明文 key（供设置页的「眼睛」与「复制」按钮用）。
+
+    单独开一个接口，而不是把它渲染进页面：``type="password"`` 只挡眼睛，
+    挡不住「查看网页源代码」、反向代理的访问日志和浏览器的表单历史 ——
+    而这个服务默认监听 0.0.0.0，同网段任何人都能 GET 到设置页。
+    页面本身不带明文，密钥只在用户**主动点击**时才过网。
+
+    响应禁止缓存，并要求同源（``same-origin``），避免被中间层缓存下来。
+    """
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    key = settings.llm.api_key if settings else ""
+    if not key:
+        return JSONResponse({"api_key": ""}, headers={"Cache-Control": "no-store"})
+    return JSONResponse(
+        {"api_key": key},
+        headers={"Cache-Control": "no-store, no-cache, must-revalidate", "Pragma": "no-cache"},
+    )
+
+
 @settings_router.post("/settings/test", response_class=HTMLResponse)
 async def settings_test(request: Request) -> HTMLResponse:
     """只测不存：填完先测连通性，通了再保存。"""
@@ -485,12 +593,13 @@ async def settings_test(request: Request) -> HTMLResponse:
     form = await _read_form(request)
     base = (form.get("api_base") or "").strip().rstrip("/")
     model = (form.get("model") or "").strip()
+    fallback = (form.get("fallback_models") or "").strip()
     key = (form.get("api_key") or "").strip() or settings.llm.api_key
     if not base or not model:
         return _page(
             request, notice={"kind": "error", "text": "请先填写 API Base URL 与模型名"}, status=400
         )
-    probe = _probe(settings, base, key, model)
+    probe = await run_in_threadpool(_probe, settings, base, key, model, fallbacks=_split_models(fallback))
     if probe["ok"]:
         return _page(
             request, notice={"kind": "ok", "text": f"连接正常（{probe['ms']}ms）"}, result=probe

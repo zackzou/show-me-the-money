@@ -6,7 +6,7 @@
   <div class="kicker">DAILY DIGEST</div>
   <h1>日报 · {{ date }}</h1>
   <p class="meta">
-    {% if report %}共 <b>{{ report.article_count }}</b> 篇与调研方向直接相关的报道
+    {% if report %}共 <b>{{ article_count }}</b> 篇与调研方向直接相关的报道
     {% else %}这一天没有生成日报{% endif %}
   </p>
 </div>

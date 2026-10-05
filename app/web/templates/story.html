@@ -268,10 +268,17 @@
     .jump:hover { opacity:1; }
     .jump button { width:26px; height:26px; font-size:13px; }
     .jump-bar { width:3px; height:32px; }
+    /* 给悬浮条**留出一条空槽**，而不是让它盖在正文上。
+       缩小 + 半透明只解决了「挡视线」，没解决「压字」：实测 390px 下正文栏
+       右边缘离屏幕边只有 14px，而悬浮条就在那 14px 里，量到 3 行文字的字形
+       盒被盖住；滚到底时盖住的正是文章最后一行。这里让正文让出 38px，
+       悬浮条落在空槽里，两者不再相交。 */
+    .story .prose { margin-right:38px; }
   }
   /* 极窄屏：靠边贴紧，别压到正文 */
   @media (max-width:420px) {
     .jump { right:2px; opacity:.6; }
+    .story .prose { margin-right:30px; }
   }
 </style>
 <script>

@@ -9,12 +9,13 @@ import json
 import logging
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Query, Request
-from fastapi.responses import FileResponse, HTMLResponse
+from fastapi import Path as PathParam
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.ai.cluster import duplicates_of, primary_of
@@ -45,6 +46,11 @@ page_router = APIRouter()
 PAGE_SIZE = 40
 WEEKDAYS = "一二三四五六日"
 
+# SQLite 的 INTEGER 是有符号 64 位。路径参数写成裸 ``int`` 时，Pydantic 会照单
+# 全收下 10**30 这种值，然后由 SQLite 抛 OverflowError —— 也就是 500。
+# 不存在的 id 本来就该是 404，所以直接在参数声明处挡掉超界值。
+IdParam = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
+
 
 @page_router.get("/img/{name}")
 def local_image(name: str, request: Request):
@@ -55,12 +61,14 @@ def local_image(name: str, request: Request):
     只有 media_map 指过来的才会请求到这里。
     """
     if not is_safe_image_name(name):
-        return HTMLResponse("not found", status_code=404)
+        # 不是页面，别谎报成 text/html：<img> 拿到 HTML 会当成坏图处理
+        return PlainTextResponse("not found", status_code=404)
     settings = _settings(request)
     media_dir = media_dir_for(settings.db_file) if settings else None
     path = (media_dir / name) if media_dir else None
     if path is None or not path.is_file():
-        return HTMLResponse("not found", status_code=404)
+        # 不是页面，别谎报成 text/html：<img> 拿到 HTML 会当成坏图处理
+        return PlainTextResponse("not found", status_code=404)
     return FileResponse(
         path,
         headers={"Cache-Control": "public, max-age=31536000, immutable"},
@@ -276,6 +284,35 @@ def _day_statement(date_str: str):
     )
 
 
+def counts_by_day(session: Session, dates: list[str]) -> dict[str, int]:
+    """一批日期各自有多少篇**当前**可展示的文章。
+
+    日报行上的 ``article_count`` 是 08:00 定稿时的快照，之后补处理完的文章、
+    或者把重复项合并掉，真实条数就变了。页面列表是实时查的，于是头部数字
+    会和下面的列表对不上（实测 /daily/2026-09-30 写着 2 篇、列了 12 篇）。
+    这里用**和列表完全相同的过滤条件**重新数一遍，数字与列表同源。
+    """
+    counts: dict[str, int] = {}
+    for date_str in dates:
+        try:
+            start, end = day_window(date_str)
+        except (ValueError, OverflowError):
+            counts[date_str] = 0
+            continue
+        counts[date_str] = int(
+            session.execute(
+                select(func.count(Article.id)).where(
+                    Article.relevance == 1,
+                    Article.status.in_(STATUS_REPORTABLE),
+                    Article.duplicate_of.is_(None),
+                    Article.published_at >= start,
+                    Article.published_at < end,
+                )
+            ).scalar_one()
+        )
+    return counts
+
+
 def _host(url: str | None) -> str:
     if not url:
         return ""
@@ -362,9 +399,25 @@ def articles_of_day(session: Session, date_str: str, now: datetime | None = None
     now = now or now_local()
     try:
         rows = list(session.execute(_day_statement(date_str)))
-    except ValueError:
+    except (ValueError, OverflowError):
+        # OverflowError 同样要接：/daily/9999-12-31 能过 strptime，但
+        # day_window 里的 start + timedelta(days=1) 会溢出成 500。
         return []
     return [_card(article, name, url, now) for article, name, url in rows]
+
+
+def _day_noon(date_str: str) -> datetime | None:
+    """把 ``YYYY-MM-DD`` 锚到当天正午。
+
+    锚在正午而不是当天 00:00，是因为 ``_relative`` 遇到未来时刻会返回空串：
+    拿 00:00 去比，当天早上（12:00 之前）每一份日报都会显示不出相对时间。
+    日期坏掉就返回 ``None``，调用方跳过 —— ``DailyReport.date`` 只是个
+    ``String(10)``，没有约束，手工改坏一行不该让整个 /archive 500。
+    """
+    try:
+        return datetime.strptime(date_str, "%Y-%m-%d").replace(hour=12)
+    except (ValueError, OverflowError):
+        return None
 
 
 def _date_label(date_str: str) -> tuple[str, str]:
@@ -516,7 +569,13 @@ def search_page(
             groups=group_cards(cards),
             total=len(cards),
             found=len(rows),
-            counts=count_by_category(session, keyword, scope=effective_scope) if keyword else {},
+            counts=(
+                count_by_category(
+                    session, keyword, scope=effective_scope, category=cat, tag=tag
+                )
+                if keyword
+                else {}
+            ),
             active_cat=cat or "",
             active_tag=tag or "",
             searched_at=now,
@@ -573,6 +632,11 @@ def daily(
             articles=cards,
             groups=group_by_date(cards, date),
             date=date,
+            # 头部显示的篇数必须来自**下面那份列表**，不能读日报里冻结的
+            # article_count。日报是 08:00 定稿的快照，之后补处理完的文章、
+            # 或者合并掉重复项，列表就会变 —— 于是同一屏上「共 12 篇」下面
+            # 摆着 14 张卡片（/daily/2026-09-30 更离谱：写着 2 篇、列了 12 篇）。
+            article_count=len(cards),
             title=f"{date} 日报",
         ),
         status_code=200 if report else 404,
@@ -580,7 +644,9 @@ def daily(
 
 
 @page_router.get("/story/{article_id}", response_class=HTMLResponse)
-def story(request: Request, article_id: int, session: Session = Depends(get_session)) -> HTMLResponse:
+def story(
+    request: Request, article_id: IdParam, session: Session = Depends(get_session)
+) -> HTMLResponse:
     """单篇页内预览：左栏来源信息 + 右侧完整正文，读者不用跳原站。"""
     row = session.execute(
         select(Article, Source.name, Source.url)
@@ -704,20 +770,23 @@ def archive(request: Request, session: Session = Depends(get_session)) -> HTMLRe
     reports = list(session.execute(select(DailyReport).order_by(DailyReport.date.desc()).limit(120)).scalars())
     now = now_local()
     rows = []
-    peak = max((row.article_count for row in reports), default=0) or 1
+    # 用实时条数（而不是日报快照里的 article_count）画图与标数：点开某一天时
+    # 拉的是 /api/articles?date=…，那是实时结果。数字得和它一致。
+    live = counts_by_day(session, [row.date for row in reports])
+    peak = max(live.values(), default=0) or 1
     for row in reports:
         label, weekday = _date_label(row.date)
+        count = live.get(row.date, 0)
         rows.append(
             {
                 "date": row.date,
                 "label": label,
                 "weekday": weekday,
-                "count": row.article_count,
+                "count": count,
                 # 用条形长度直观对比哪天抓得多
-                "width": max(6, round(row.article_count / peak * 100)),
-                "relative": _relative(
-                    datetime.strptime(row.date, "%Y-%m-%d").replace(hour=12), now
-                ),
+                "width": max(6, round(count / peak * 100)),
+                # 存了个坏日期行也不该整页 500：strptime 失败就当没有相对时间
+                "relative": _relative(_day_noon(row.date), now),
                 "href": f"/daily/{row.date}",
             }
         )

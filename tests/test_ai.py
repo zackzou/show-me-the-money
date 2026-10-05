@@ -528,7 +528,8 @@ def test_chat_format_error_is_not_retried():
         ("yes", True, None),
         ("是的 92", True, 92),
         ("Yes, it is relevant. 70", True, 70),
-        ("no 5", False, 5),
+        # 判为不相关时分数一律丢弃（见 test_irrelevant_verdict_yields_no_score）
+        ("no 5", False, None),
         ("no", False, None),
         ("", False, None),
         ("yes 999", True, None),   # 越界分数直接丢弃，不能影响判定
@@ -1593,3 +1594,69 @@ def test_whole_article_ratio_gate_rejects_partial_translation(seeded_db, setting
     assert not translation_is_usable(body, "这是一段完整的中文译文，" * 200)
     # 原文太短时不看比例，不误杀
     assert translation_is_usable("Short one.", "短译文。")
+
+
+# ── 判定词与评分：模型爱在 yes 和分数之间插话 ──────────────────────────
+
+@pytest.mark.parametrize(
+    ("answer", "relevant", "score"),
+    [
+        # 模型带了一句寒暄再回答。以前只看开头 8 个字，"Sure! Here is…"
+        # 会被判成「不相关」—— 而它明明说了 yes、还给了 85 分。那篇文章会被
+        # 永久写进 relevance=0，从此不进日报、不进搜索、任何列表里都看不到。
+        ("Sure! Here is my assessment: yes 85", True, 85),
+        ("Based on the title, yes, I would rate it 85", True, 85),
+        ("**yes** 85", True, 85),
+        ("The answer is yes (85)", True, 85),
+        # 判定词后面隔着一整句解释才给分
+        ("Yes, it is relevant. 70", True, 70),
+        # 不该把句子里别的数字当成评分
+        ("yes — highly relevant. Confidence: 0.9", True, None),
+        ("yes 1,200 words", True, None),
+        ("yes 2024 coverage of AI, score 88", True, 88),
+        # 老式写法：分数在前
+        ("85 yes", True, 85),
+    ],
+)
+def test_relevance_verdict_found_anywhere_in_answer(answer, relevant, score):
+    from app.ai.processor import parse_relevance
+
+    assert parse_relevance(answer) == (relevant, score)
+
+
+@pytest.mark.parametrize("answer", ["no 90", "否 95", "不相关 95"])
+def test_irrelevant_verdict_yields_no_score(answer):
+    """判定为不相关时**分数一律丢掉**。
+
+    留着一个 95 分会造出自相矛盾的数据行：页面显示「AI 评分 95」，而任何只按
+    score 排序或筛选的下游都会把一篇已经不进日报的文章当成高价值内容。与其指望
+    每个调用方都记得同时看 relevance，不如在解析这一层就把矛盾消掉。
+    """
+    from app.ai.processor import parse_relevance
+
+    assert parse_relevance(answer) == (False, None)
+
+
+def test_irrelevant_article_stores_no_score(seeded_db, settings: Settings):
+    """模型说「不相关 95」时，库里不能留下 score=95。"""
+    import app.ai.processor as proc
+
+    client = _client(
+        lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "不相关 95"}}]}),
+        retries=0,
+    )
+    with session_scope() as session:
+        article = Article(
+            title="Some unrelated thing", link="https://example.com/unrelated",
+            content="x", relevance=None, status="pending", published_at=now_local(),
+        )
+        session.add(article)
+        session.flush()
+        try:
+            status = proc.process_article(session, article, client, settings)
+        finally:
+            client.close()
+
+    assert status == "processed"
+    assert article.relevance == 0
+    assert article.score is None

@@ -13,13 +13,15 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Annotated, Any
 from urllib.parse import parse_qs
 
 from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import Path as PathParam
 from fastapi.responses import HTMLResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.db import get_session
 from app.fetcher.pipeline import fetch_feed
@@ -38,6 +40,10 @@ ALLOWED_SCHEMES = ("http://", "https://")
 PROBE_ITEMS = 3
 MAX_URL_LEN = 500
 MAX_NAME_LEN = 200
+
+# SQLite 的 INTEGER 是有符号 64 位；超界 id 传进去会由驱动抛 OverflowError
+# 变成 500。不存在的源本来就该是 404，所以在参数声明处就挡掉。
+IdParam = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
 
 
 def _clean_url(raw: str) -> str:
@@ -191,7 +197,7 @@ async def sources_create(
             status=400,
         )
 
-    probe = _probe(url)
+    probe = await run_in_threadpool(_probe, url)
     if not probe["ok"]:
         # 不存：留着只会让调度器每 2 小时失败一次
         return _render(
@@ -211,7 +217,7 @@ async def sources_create(
 
 @sources_router.post("/sources/{source_id}/toggle", response_class=HTMLResponse)
 async def sources_toggle(
-    request: Request, source_id: int, session: Session = Depends(get_session)
+    request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
     """启用/停用。停用只是不再抓新文章，已入库的文章照常可读。"""
     row = session.get(Source, source_id)
@@ -225,7 +231,7 @@ async def sources_toggle(
 
 @sources_router.post("/sources/{source_id}/rename", response_class=HTMLResponse)
 async def sources_rename(
-    request: Request, source_id: int, session: Session = Depends(get_session)
+    request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
     """改显示名。URL 不给改 —— 改地址等于换一个新源，历史文章还挂在旧源上。"""
     row = session.get(Source, source_id)
@@ -248,7 +254,7 @@ async def sources_rename(
 
 @sources_router.post("/sources/{source_id}/delete", response_class=HTMLResponse)  # noqa: E501
 async def sources_delete(
-    request: Request, source_id: int, session: Session = Depends(get_session)
+    request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
     """删除信源：**软删除**。
 
@@ -272,7 +278,7 @@ async def sources_delete(
 
 @sources_router.post("/sources/{source_id}/restore", response_class=HTMLResponse)
 async def sources_restore(
-    request: Request, source_id: int, session: Session = Depends(get_session)
+    request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
     """恢复一个被删掉的源（删错了还能找回来）。"""
     row = session.get(Source, source_id)
@@ -286,13 +292,13 @@ async def sources_restore(
 
 @sources_router.post("/sources/{source_id}/probe", response_class=HTMLResponse)
 async def sources_probe(
-    request: Request, source_id: int, session: Session = Depends(get_session)
+    request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
     """手动试抓一个已存在的源：用于排查「最近没抓到东西」。"""
     row = session.get(Source, source_id)
     if row is None or row.deleted:
         raise HTTPException(status_code=404, detail="信源不存在")
-    probe = _probe(row.url)
+    probe = await run_in_threadpool(_probe, row.url)
     if probe["ok"]:
         text = f"{row.name}：正常，读到 {probe['count']} 条" + (
             f"，例如「{probe['sample']}」" if probe["sample"] else ""

@@ -2,13 +2,14 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+import re
+from datetime import datetime, time, timedelta
 from typing import Any
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 
 from app.ai.client import LLMClient
 from app.ai.cluster import merge_duplicates
@@ -176,6 +177,10 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
     if not settings.media.enabled:
         return {"candidates": 0, "filled": 0, "not_found": 0, "failed": 0}
     media_dir = media_dir_for(settings.db_file)
+    # 全程只用**一个** session。嵌套 session_scope() 会另开一条连接去写同一批
+    # 行，而外层事务只 flush() 过、还没提交，写锁仍被它攥着 —— 于是内层那条
+    # 连接只能干等到 busy_timeout（30 秒）再抛 "database is locked"。
+    # 实测日志里 21 次锁失败有 18 次来自这个任务。
     with session_scope() as session:
         stats = backfill_images(
             session,
@@ -184,13 +189,11 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
             media_dir=media_dir,
         )
         # 老数据的首图也补一份本地（只下还没下过的）
-        with session_scope() as session:
-            stats["localized_covers"] = localize_missing_covers(
-                session, limit=settings.media.batch_size, media_dir=media_dir
-            )["localized"]
+        stats["localized_covers"] = localize_missing_covers(
+            session, limit=settings.media.batch_size, media_dir=media_dir
+        )["localized"]
         # 站点通栏广告（InfoQ 每篇都顶着同一段大会宣传）不算正文，删掉
-        with session_scope() as session:
-            strip_shared_openings(session)
+        strip_shared_openings(session)
         # 正文内联配图：老数据都没有位置，顺手补齐，详情页才能像原站那样把图插进正文
         inline = backfill_body_images(
             session,
@@ -322,17 +325,99 @@ def run_cleanup_job(settings: Settings) -> dict[str, int]:
     """删除超过保留期的文章与日报。"""
     cutoff_date = (now_local() - timedelta(days=settings.storage.retention_days)).strftime("%Y-%m-%d")
     with session_scope() as session:
-        articles_result = session.execute(delete(Article).where(Article.created_at < cutoff_date))
+        # 先断开指向「即将被删掉的文章」的 duplicate_of，再删。
+        # 不做这一步的话：主条目先到期被删掉、藏稿还留着，于是藏稿指向一个
+        # 虚空 id —— primary_of() 查不到，它就从主页、日报、搜索里彻底消失，
+        # 而且没有任何入口能找回。清理是按 created_at 删的，而合并窗口是
+        # 7 天，所以这种跨越保留期边界的主/藏稿组合是必然会出现的。
+        session.execute(
+            update(Article)
+            .where(
+                Article.duplicate_of.isnot(None),
+                Article.duplicate_of.notin_(select(Article.id)),
+            )
+            .values(duplicate_of=None)
+        )
+        # created_at 是 DATETIME，cutoff_date 是 'YYYY-MM-DD' 字符串：直接比
+        # 的话 SQLite 会把 '2026-09-05' 当成 '2026-09-05 00:00:00'，
+        # 于是当天 00:00 整的那篇也被删掉 —— 实际保留期少了一天。
+        # 显式补成当天零点，语义就和「早于这一天」一致了。
+        cutoff_dt = datetime.combine(datetime.strptime(cutoff_date, "%Y-%m-%d").date(), time.min)
+        articles_result = session.execute(
+            delete(Article).where(Article.created_at < cutoff_dt)
+        )
         reports_result = session.execute(delete(DailyReport).where(DailyReport.date < cutoff_date))
         removed_articles = int(getattr(articles_result, "rowcount", 0) or 0)
         removed_reports = int(getattr(reports_result, "rowcount", 0) or 0)
-    log.info("清理完成：文章 %d 条、日报 %d 份（早于 %s）", removed_articles, removed_reports, cutoff_date)
-    return {"articles": removed_articles, "reports": removed_reports}
+        # 图片是按内容哈希落盘、从不清理的：实测一天涨约 11MB，
+        # 保留期一过文章没了图还留着，纯浪费磁盘。清掉没人再引用的。
+        removed_images = _prune_orphan_images(settings)
+    log.info(
+        "清理完成：文章 %d 条、日报 %d 份、配图 %d 个（早于 %s）",
+        removed_articles, removed_reports, removed_images, cutoff_date,
+    )
+    return {"articles": removed_articles, "reports": removed_reports, "images": removed_images}
+
+
+def _prune_orphan_images(settings: Settings) -> int:
+    """删掉没有任何文章引用的本地图片，返回删除数量。
+
+    ``save_image`` 用内容哈希命名、只在文件已存在时跳过写入，所以文件名不会
+    重复；也不会有人去删它们 —— 于是 ``data/img`` 只增不减（实测 17 小时涨到
+    190MB）。这里以数据库里的引用为准做一次对账。
+    """
+    media_dir = media_dir_for(settings.db_file)
+    if not media_dir.is_dir():
+        return 0
+    referenced: set[str] = set()
+    try:
+        with session_scope() as session:
+            for column in (Article.media_map, Article.image_urls, Article.body_images):
+                for raw in session.execute(select(column)).scalars():
+                    referenced.update(_image_names(str(raw or "")))
+    except Exception as exc:  # 对账失败就不要删，宁可留着
+        log.warning("配图对账失败，本次不清理：%s", exc)
+        return 0
+    removed = 0
+    for path in media_dir.iterdir():
+        if not path.is_file() or path.name in referenced:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError:
+            continue
+    return removed
+
+
+def _image_names(raw: str) -> set[str]:
+    """从 media_map / image_urls / body_images 的 JSON 里取出本地文件名。"""
+    names: set[str] = set()
+    for match in re.finditer(r"([0-9a-f]{40}\.(?:jpe?g|png|webp|gif|avif))", raw):
+        names.add(match.group(1))
+    return names
 
 
 def _daily_trigger(hhmm: str) -> CronTrigger:
     hour, _, minute = hhmm.partition(":")
     return CronTrigger(hour=int(hour or 8), minute=int(minute or 0))
+
+
+# 三个写库任务之间的错峰间隔（秒）。抓完等一会儿再补正文、补完再处理，
+# 让每一轮都有时间把事务提交掉，而不是三条连接同时抢 SQLite 的写锁。
+CONTENT_JOB_OFFSET_SECONDS = 120
+PROCESS_JOB_OFFSET_SECONDS = 300
+
+
+def _offset_trigger(
+    trigger: CronTrigger | IntervalTrigger, seconds: int
+) -> CronTrigger | IntervalTrigger:
+    """把一个触发器整体推迟若干秒，让几个任务不要挤在同一时刻。"""
+    try:
+        return trigger + timedelta(seconds=seconds)
+    except TypeError:  # pragma: no cover - APScheduler 换了实现时的兜底
+        log.warning("触发器不支持偏移，任务可能同时启动")
+        return trigger
 
 
 def _fetch_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
@@ -351,12 +436,25 @@ def _process_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     """按配置装配四个任务（不启动）。"""
     scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+    # 三个任务必须**错开**。IntervalTrigger 是一个具体时刻，把同一个对象传给
+    # 多个 add_job 就等于让它们在同一秒起跑（实测日志里三个任务在 15 毫秒内
+    # 一起启动），于是抓取在插文章、正文在读同一批行、处理在写同一批行 ——
+    # 21 次 "database is locked" 里有一批就是这么来的，日报写入的 3 次重试
+    # 也被耗光，当天的滚动日报静默没刷新。
     scheduler.add_job(run_fetch_job, _fetch_trigger(settings), args=[settings], id="fetch_job", replace_existing=True)
     scheduler.add_job(
-        run_content_job, _fetch_trigger(settings), args=[settings], id="content_job", replace_existing=True
+        run_content_job,
+        _offset_trigger(_fetch_trigger(settings), CONTENT_JOB_OFFSET_SECONDS),
+        args=[settings],
+        id="content_job",
+        replace_existing=True,
     )
     scheduler.add_job(
-        run_process_job, _process_trigger(settings), args=[settings], id="process_job", replace_existing=True
+        run_process_job,
+        _offset_trigger(_process_trigger(settings), PROCESS_JOB_OFFSET_SECONDS),
+        args=[settings],
+        id="process_job",
+        replace_existing=True,
     )
     scheduler.add_job(
         run_report_job,

@@ -206,3 +206,121 @@ def test_duplicate_detection_stops_at_the_window(seeded_db):
     with session_scope() as session:
         rows = cluster._candidate_articles(session, limit=50)
         assert len(rows) == 1  # 40 天前那篇不在窗口内
+
+
+# ── 坏掉的 duplicate_of 会让整条报道从站上消失 ────────────────────────
+
+def test_dup_pointing_at_irrelevant_primary_is_repaired(seeded_db):
+    """主条目被判为不相关之后，藏稿就成了黑洞：谁也看不到它。
+
+    主页、日报、搜索全都要求 relevance == 1，于是被 relevance=0 的主条目
+    藏起来的那条（本身 relevant、内容完整）在任何列表里都消失。
+    成因：LLM 出错时先写 relevance=1 占位，之后重排队真的判成不相关，
+    而 duplicate_of 从没回头看过。
+    """
+    with session_scope() as session:
+        primary = make_article(session, title=APPLE_A, link="https://example.com/p")
+        loser = make_article(session, title=APPLE_B, link="https://example.com/l")
+        loser.duplicate_of = primary.id
+        primary.relevance = 0
+        primary.summary = None
+        primary.digest = None
+        primary.category = None
+        primary.topics = None
+        primary.tags = None
+
+    with session_scope() as session:
+        assert cluster.repair_duplicate_links(session) == 1
+
+    with session_scope() as session:
+        healed = session.get(Article, loser.id)
+        assert healed.duplicate_of is None, "藏稿应当被提升为独立条目，而不是继续消失"
+
+
+def test_dup_pointing_at_deleted_article_is_repaired(seeded_db):
+    """清理任务按 created_at 删文章，主条目先到期被删就留下悬空指向。"""
+    with session_scope() as session:
+        loser = make_article(session, title=APPLE_A, link="https://example.com/l")
+        loser.duplicate_of = 999999     # 那个 id 早被清理掉了
+
+    with session_scope() as session:
+        assert cluster.repair_duplicate_links(session) == 1
+        assert session.get(Article, loser.id).duplicate_of is None
+
+
+def test_healthy_links_are_left_alone(seeded_db):
+    """正常的指向不该被动。"""
+    with session_scope() as session:
+        primary = make_article(session, title=APPLE_A, link="https://example.com/p")
+        loser = make_article(session, title=APPLE_B, link="https://example.com/l")
+        loser.duplicate_of = primary.id
+
+    with session_scope() as session:
+        assert cluster.repair_duplicate_links(session) == 0
+        assert session.get(Article, loser.id).duplicate_of == primary.id
+
+
+def test_primary_of_walks_the_whole_chain(seeded_db):
+    """链 53 → 35 → 61 时，primary_of 必须走到**末端**。
+
+    只解析一跳的话，53 指到 35（它自己也是藏稿），于是 53 页面上的
+    「另一篇更完整的报道」点进去还是一篇藏稿，而 61 的来源列表里又没有 53。
+    """
+    with session_scope() as session:
+        a = make_article(session, title=APPLE_A, link="https://example.com/a")
+        b = make_article(session, title=APPLE_B, link="https://example.com/b")
+        c = make_article(session, title="Apple tightens Mac disk access for AI agents",
+                         link="https://example.com/c")
+        b.duplicate_of = a.id
+        c.duplicate_of = b.id
+
+    with session_scope() as session:
+        assert cluster.primary_of(session, session.get(Article, c.id)).id == a.id
+        # a 自己没指向任何人
+        assert cluster.primary_of(session, session.get(Article, a.id)) is None
+
+
+def test_primary_prefers_the_translated_article(seeded_db):
+    """选主条目时**有中文译文优先**于正文更长。
+
+    读者看到的就是主条目：按长度选主，一篇 5000 字的英文原文会盖过一篇
+    100 字但已译好的稿子，读者点进来看到整页英文。这个站的不变量就是
+    「中文模式下不至于整页英文」，不能为了正文长度把它破坏掉。
+    """
+    with session_scope() as session:
+        long_en = make_article(session, title=APPLE_A, link="https://example.com/1")
+        long_en.content_full = "English body. " * 400      # 很长，但没有译文
+        long_en.content_zh = None
+        short_zh = make_article(session, title=APPLE_B, link="https://example.com/2")
+        short_zh.content_full = "Short English."
+        short_zh.content_zh = "苹果收紧全盘访问权限，防范 AI Agent 滥用风险。"
+
+        assert cluster._primary_of(long_en, short_zh) is short_zh
+
+
+def test_merge_refuses_to_extend_an_existing_chain(seeded_db, settings: Settings):
+    """任何一侧已经挂过别人就不再合并 —— 只查主条目会漏掉藏稿那一侧。"""
+    with session_scope() as session:
+        first = make_article(session, title=APPLE_A, link="https://example.com/m")
+        second = make_article(session, title=APPLE_B, link="https://example.com/n")
+        third = make_article(session, title="Apple tightens Mac disk access for AI agents",
+                             link="https://example.com/o")
+        # third 已经挂在 second 下面，而 second 本身也要被合并进 first
+        third.duplicate_of = second.id
+
+    client = _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "yes"}}]}), retries=0)
+    try:
+        with session_scope() as session:
+            stats = merge_duplicates(session, client, settings, limit=50)
+    finally:
+        client.close()
+
+    with session_scope() as session:
+        third_row = session.get(Article, third.id)
+        # 关键断言：third 的指向没被改写。早先的守卫只查主条目，于是这一对
+        # (first, second) 合并时会把 third 的指向从 second 改指到 first ——
+        # 凭空造出一条 second → first 的链，而 second 自己也是藏稿。
+        assert third_row.duplicate_of == second.id
+        # 合并 first/second 本身是合法的（third 已不在候选集里）
+        assert session.get(Article, second.id).duplicate_of == first.id
+    assert stats["merged"] == 1
