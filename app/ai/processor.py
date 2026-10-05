@@ -160,6 +160,33 @@ _TRANSLATE_MIN_RATIO = 0.25
 _TRANSLATE_MAX_RATIO = 1.3
 
 
+def translation_is_usable(source: str, translated: str) -> bool:
+    """译文到底算不算「整篇都译完了」。
+
+    **整篇级**的校验，分块校验代替不了。分块只看「这一块像不像写完」，
+    一篇长文里哪怕只有一小块被翻出来、其余整段丢掉，拼起来的总长仍然可能
+    看着像模像样 —— 实测文章 313：英文正文 1249 字，``content_zh`` 只存了
+    64 字（翻译了开头一段就收工，比例 0.05），页面照样认为「有中文译文」，
+    于是双语模式下正文只剩一个中文段落，英文却是完整六段，看起来像没译完。
+
+    展示层也用这个判断，这样库里已经写坏的老数据同样会被当成「暂无译文」，
+    而不是继续把残篇当译文端上去。
+    """
+    src = (source or "").strip()
+    out = (translated or "").strip()
+    if not out:
+        return False
+    if len(src) < _TRANSLATE_MIN_SRC_CHARS:
+        # 原文太短，比例没意义（一句英文标题也占不到 0.25）
+        return True
+    ratio = len(out) / len(src)
+    return _TRANSLATE_MIN_RATIO <= ratio <= _TRANSLATE_MAX_RATIO
+
+
+# 原文短于这个长度就不做比例校验
+_TRANSLATE_MIN_SRC_CHARS = 400
+
+
 def split_paragraphs(text: str) -> list[str]:
     """按空行切段。抓回来的正文本身就是段落结构，直接切即可。"""
     return [block.strip() for block in re.split(r"\n\s*\n", text or "") if block.strip()]
@@ -397,7 +424,14 @@ def translate_to_chinese(
         log.info("正文重写有 %d/%d 块未成功，整篇不采用（宁可显示原文也不要残篇）",
                  failed, len(chunks))
         return None
-    return "\n\n".join(out)
+    joined = "\n\n".join(out)
+    # 分块都过了还不够：每块各自「像写完了」，拼起来也可能只覆盖了全文一小半
+    # （文章 313 实测 1249 字原文只译出 64 字）。这里再按**整篇**的比例兜一道。
+    if not translation_is_usable(text, joined):
+        log.info("正文重写总长 %d 对原文 %d 比例过低，整篇不采用",
+                 len(joined), len(text))
+        return None
+    return joined
 
 
 def _optional_llm(client: LLMClient, prompt: str, fallback: str) -> str:

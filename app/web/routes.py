@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.ai.cluster import duplicates_of, primary_of
+from app.ai.processor import translation_is_usable
 from app.config import Settings
 from app.db import get_session
 from app.fetcher.content import is_real_body
@@ -36,6 +38,7 @@ from app.web.search import (
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
+log = logging.getLogger(__name__)
 
 page_router = APIRouter()
 
@@ -610,8 +613,16 @@ def story(request: Request, article_id: int, session: Session = Depends(get_sess
     anchors = _body_image_anchors(article.body_images)
     item["shots"] = _image_slots_for_blocks(anchors, marked)
     item["has_body_images"] = bool(anchors)
-    # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文
+    # 英文原文另有中文版：中文/双语模式读译文，英文模式读原文。
+    # 展示前再校验一次「这算不算整篇译完」：库里可能存着早年写坏的数据
+    # （文章 313 正文 1249 字、content_zh 只有 64 字）。不校验的话页面会
+    # 认它有译文，双语模式正文只剩一个中文段、英文却是完整六段，
+    # 读者看着像没译完。宁可显示原文 + 「暂无中文译文」。
     translated = article.content_zh or ""
+    if translated.strip() and not translation_is_usable(original, translated):
+        log.info("文章 %s 的译文比例过低（%d/%d），按无译文处理",
+                 article.id, len(translated.strip()), len(original))
+        translated = ""
     item["has_translation"] = bool(translated.strip())
     marked_zh = (
         (_section_blocks(article.body_sections_zh, prefix="sec-zh")

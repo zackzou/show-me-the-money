@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from urllib.parse import quote
 
@@ -1884,3 +1885,91 @@ def test_usage_summary_exposes_charged_and_cache_rate():
     assert total["calls"] == 2
     assert total["fail"] == 1
     assert total["cache_hit_rate"] == 25.0
+
+
+def test_settings_page_not_covered_by_fullscreen_overlay(client, seeded_db):
+    """回归：设置页不能被整屏黑色遮罩盖住。
+
+    base.html 里 ``.lb`` 是「点图放大」的整屏灯箱（position:fixed;
+    inset:0; background:rgba(0,0,0,.9); z-index:100），而 settings.html 恰好
+    也拿 ``.lb`` 当「字段标签」的 class 名。于是 API Base URL / API Key / 模型 /
+    备用模型 这四个标签各自继承了整套灯箱样式，叠成四片铺满视口的黑层，
+    整个设置页全黑，只剩最后画上去那行标签的字露在外面。
+
+    之前那轮「10 遍排查」只看了状态码和 HTML 标签配平，没看计算样式，
+    所以一直没发现。这里直接查：不允许存在铺满视口的不透明固定层。
+    """
+    import re
+
+    page = client.get("/settings")
+    assert page.status_code == 200
+    html = page.text
+
+    # 灯箱必须只由 id 选中，不能再靠 class 匹配到别的东西
+    assert "#lb { position:fixed;" in html, "灯箱样式应锁到 #lb"
+    assert ".lb { position:fixed;" not in html, "仍有裸 .lb 整屏样式，会误伤同名 class"
+
+    # 字段标签用的是改名后的 .lbl，不再复用灯箱的 .lb
+    assert html.count('class="lbl"') >= 4
+    # 整页只剩灯箱自己那一个 .lb（<div class="lb" id="lb">），字段标签都改成了 .lbl
+    assert html.count('class="lb"') == 1
+
+    # 样式里不应再有「只按 class 选」的裸 .lb 选择器。
+    # 允许的只有 #lb / .lb-x / .lb-n（灯箱自己的零件）。
+    # 先去掉注释，免得说明文字里的「.lb」被当成真选择器。
+    css = re.sub(r"/\*.*?\*/", "", html, flags=re.S)
+    bare = re.findall(r'(?<![#\w.-])\.lb(?![-\w.])', css)
+    assert not bare, f"仍有 {len(bare)} 处裸 .lb class 选择器，会误伤同名 class"
+
+
+def test_bilingual_body_shows_each_image_once(client, seeded_db):
+    """回归：双语模式下每张图只出现一次。
+
+    中英两块各自渲染了同一批配图（.prose.zh 一份、.prose.en 一份），
+    切到双语就是同一张图连着出现两次（实测 story/313：6 张图渲染了 12 次）。
+    双语只该双语**文字**，不该把图片也复制一份。正确做法是双语档下藏掉英文块
+    里的图：单语时各自只显示一块、配图位置不受影响，只有「双语」这一档去重。
+    """
+    with session_scope() as session:
+        from app.models import Article
+
+        row = Article(
+            title="Bilingual body probe",
+            link="https://example.com/bilingual-probe",
+            content="x",
+            # 英文正文要够长，否则整篇比例校验会把这两行中文当成残篇拒掉
+            content_full="\n\n".join(
+                f"English body paragraph {i} with some text in it." for i in range(8)
+            ),
+            content_zh="中文正文第一段，讲清楚了这篇文章在说什么。\n\n中文正文第二段，补上了剩下的背景。",
+            published_at=now_local(),
+        )
+        session.add(row)
+        session.commit()
+        article_id = row.id
+
+    html = client.get(f"/story/{article_id}").text
+    assert html, "详情页应当能打开"
+
+    # 双语去重规则在样式里
+    assert 'html[data-lang="both"] .prose.en .shot { display:none; }' in html
+
+    zh = _block(html, "prose zh")
+    en = _block(html, "prose en")
+    zh_imgs = re.findall(r'<img[^>]*src="([^"]+)"', zh)
+    en_imgs = re.findall(r'<img[^>]*src="([^"]+)"', en)
+    if zh_imgs and en_imgs:
+        # 两块引用的是同一批图：单语各显示一块没问题，双语必须有上面那条规则去重
+        assert zh_imgs == en_imgs
+        assert "prose.en .shot" in html
+    else:
+        # 这一篇没有正文配图，去重规则同样必须存在，防止以后配图进来又重复
+        assert 'html[data-lang="both"] .prose.en .shot { display:none; }' in html
+
+
+def _block(html: str, cls: str) -> str:
+    """取出 ``<div class="...">…</div>`` 里属于该 class 的那一段。"""
+    i = html.find(f'<div class="{cls}">')
+    assert i >= 0, f"页面里没有 {cls} 块"
+    j = html.find('<div class="prose', i + 10)
+    return html[i: j if j > 0 else len(html)]

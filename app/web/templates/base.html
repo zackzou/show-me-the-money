@@ -291,6 +291,12 @@
     /* 双语模式：原文跟在译文下面，加一条竖线区分 */
     html[data-lang="both"] .prose.en { margin-top:14px; padding-left:14px;
                                       border-left:2px solid var(--line); color:var(--muted); font-size:.96em; }
+    /* 双语模式下**只保留一份图片**。
+       中英两块各自渲染了同一批配图（.prose.zh 一份、.prose.en 一份），
+       切到双语就是同一张图连着出现两次，读者以为页面坏了。
+       单语模式不受影响：切中文时只有 .zh 可见、切英文时只有 .en 可见，
+       各自的图都还在原来的段落位置上；只有「双语」这一档需要去重。 */
+    html[data-lang="both"] .prose.en .shot { display:none; }
     /* 正文区的语言标注 */
     .sec-t .t-zh, .sec-t .t-en, .sec-t .t-note {
         margin-left:9px; padding:2px 8px; border-radius:999px; font-weight:400; font-size:11px;
@@ -443,13 +449,18 @@
     .shot-grid img { width:100%; aspect-ratio:16/10; object-fit:cover; border-radius:9px;
                      border:1px solid var(--line); cursor:zoom-in; background:var(--chip); }
 
-    /* 页内放大，不跳原站 */
-    .lb { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none; z-index:100;
+    /* 页内放大，不跳原站。
+       这些选择器必须**锁到 #lb**。早先只按 class 选（.lb），而 settings.html
+       恰好也拿 .lb 当「字段标签」的 class 名，于是那四个标签各自继承了
+       position:fixed;inset:0;background:rgba(0,0,0,.9);z-index:100 ——
+       四片铺满视口的黑层叠起来，整个设置页全黑，只剩最后画上去那行标签的字。
+       带 id 的灯箱就该只用 id 选：别的模板再复用 .lb 也掀不翻页面。 */
+    #lb { position:fixed; inset:0; background:rgba(0,0,0,.9); display:none; z-index:100;
           align-items:center; justify-content:center; padding:26px; }
-    .lb.on { display:flex; }
-    .lb img { max-width:100%; max-height:100%; border-radius:8px; }
-    .lb-x { position:absolute; top:14px; right:18px; color:#fff; font-size:26px; cursor:pointer; line-height:1; }
-    .lb-n { position:absolute; bottom:16px; color:#ddd; font-size:13px; }
+    #lb.on { display:flex; }
+    #lb img { max-width:100%; max-height:100%; border-radius:8px; }
+    #lb .lb-x { position:absolute; top:14px; right:18px; color:#fff; font-size:26px; cursor:pointer; line-height:1; }
+    #lb .lb-n { position:absolute; bottom:16px; color:#ddd; font-size:13px; }
   </style>
 </head>
 <body class="h-full">

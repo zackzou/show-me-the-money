@@ -1554,3 +1554,42 @@ def test_translate_chunk_retries_truncated_output(seeded_db, settings: Settings)
         assert calls["n"] >= 3, "应该至少重试过一次"
     finally:
         client.close()
+
+
+def test_whole_article_ratio_gate_rejects_partial_translation(seeded_db, settings: Settings):
+    """回归：分块各自合格、拼起来却只覆盖全文一小半，也要整篇作废。
+
+    实测文章 313：英文正文 1249 字，content_zh 只存了 64 字（翻了开头一段
+    就收工，比例 0.05），页面照样认为「有中文译文」，双语模式下正文只剩一个
+    中文段、英文却是完整六段。分块校验看不出这种残缺，只能按整篇兜一道。
+    """
+    import httpx
+
+    from app.ai.processor import translation_is_usable
+
+    body = "\n\n".join(
+        f"English paragraph {i} with a fair amount of text in it indeed." for i in range(8)
+    )
+    assert len(body) > 400
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        # 每块都只吐一句话：单看这一块比例很合格（甚至偏高），
+        # 但整篇加起来远不到 0.25
+        return httpx.Response(
+            200, json={"choices": [{"message": {"content": "这是一句话。"}}]}
+        )
+
+    client = _client(handler, retries=0)
+    try:
+        assert translate_to_chinese(client, settings.prompts, body) is None
+    finally:
+        client.close()
+
+    # 判断本身：短译文对长原文 = 不可用
+    assert not translation_is_usable(body, "这是一句话。")
+    # 完整重写 = 可用（0.4 左右，正好落在要求区间内）
+    assert translation_is_usable(body, "这是一段完整的中文译文，" * 17)
+    # 扩写复述 = 不可用
+    assert not translation_is_usable(body, "这是一段完整的中文译文，" * 200)
+    # 原文太短时不看比例，不误杀
+    assert translation_is_usable("Short one.", "短译文。")

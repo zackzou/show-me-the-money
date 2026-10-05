@@ -50,14 +50,14 @@
   <div class="sec-t">API 配置</div>
   <form class="cfg" method="post" action="/settings" id="cfg-form" autocomplete="off">
     <label class="fld">
-      <span class="lb">API Base URL</span>
+      <span class="lbl">API Base URL</span>
       <input type="text" name="api_base" id="f-base" required
              value="{{ current.api_base }}" placeholder="https://api.openai.com/v1" spellcheck="false">
       <em>OpenAI 兼容接口的根地址，填到 <code>/v1</code> 即可，程序自己拼 <code>/chat/completions</code>。</em>
     </label>
 
     <label class="fld">
-      <span class="lb">API Key
+      <span class="lbl">API Key
         {% if current.saved_at %}<i class="tag-ok">已保存 · {{ current.saved_at }}</i>{% endif %}
       </span>
       <span class="keywrap">
@@ -75,7 +75,7 @@
     </label>
 
     <label class="fld">
-      <span class="lb">模型</span>
+      <span class="lbl">模型</span>
       <input type="text" name="model" id="f-model" required list="model-list"
              value="{{ current.model }}" placeholder="gpt-4o" spellcheck="false">
       <datalist id="model-list"></datalist>
@@ -83,7 +83,7 @@
     </label>
 
     <label class="fld">
-      <span class="lb">备用模型 <i class="tag-opt">可选</i></span>
+      <span class="lbl">备用模型 <i class="tag-opt">可选</i></span>
       <input type="text" name="fallback_models" id="f-fallback"
              value="{{ current.fallback_models }}" placeholder="glm-4-flash, deepseek-chat" spellcheck="false">
       <em>英文逗号分隔。主模型限流或不可用时按顺序自动顺延，总尝试次数不变。</em>
@@ -210,10 +210,10 @@
 
   .cfg { display:flex; flex-direction:column; gap:19px; max-width:760px; }
   .fld { display:flex; flex-direction:column; gap:7px; }
-  .fld .lb { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--muted); }
-  .lb .tag-ok { font-style:normal; font-size:10.5px; font-weight:500; color:#1f8a5a;
+  .fld .lbl { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--muted); }
+  .lbl .tag-ok { font-style:normal; font-size:10.5px; font-weight:500; color:#1f8a5a;
                 background:rgba(31,138,90,.1); border-radius:5px; padding:2px 7px; }
-  .lb .tag-opt { font-style:normal; font-size:10.5px; font-weight:400; color:var(--faint);
+  .lbl .tag-opt { font-style:normal; font-size:10.5px; font-weight:400; color:var(--faint);
                  border:1px solid var(--line); border-radius:5px; padding:1px 6px; }
   .fld input { padding:11px 14px; border:1px solid var(--line); border-radius:10px;
                background:var(--surface); color:var(--text); font-size:13.5px;
