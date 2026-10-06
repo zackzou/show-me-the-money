@@ -51,7 +51,12 @@ docker compose up -d
 起起来之后，**这三个网页就是主要配置入口**：`/sources` 加与管理信源、`/settings` 换模型与
 填 Key 并看用量、`/rss-guide` 订阅说明。命令行批量默认值改 `config/default_sources.yaml`。
 
-用远程 API 时可以把 `docker-compose.yml` 里的 `ollama` 服务删掉；用本地模型则保留它，并把 `.env` 指向 `http://ollama:11434/v1`。
+**默认只启动 `app` 一个服务**，不会碰本地模型那套。用远程 API（默认配置）就这样直接跑；
+要用本地模型，再显式开启那个 profile，并把 `.env` 指向 `http://ollama:11434/v1`：
+
+```bash
+docker compose --profile local-llm up -d     # 会额外拉 ollama 镜像（约 7GB）
+```
 
 > 让 AI agent 来部署或维护这个项目的话，让它先读 [`AGENTS.md`](AGENTS.md)。
 
