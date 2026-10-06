@@ -68,9 +68,7 @@
   </nav>
 {% endmacro %}
 
-{# empty_note：首页专用。空的时候说清「是没抓到，还是抓到了没处理完」——
-   新用户第一次部署最容易卡在这，页面空着却不说原因。其它页面不传它。 #}
-{% macro timeline(groups, empty_text='这一天还没有筛选出相关报道。', empty_note='') %}
+{% macro timeline(groups, empty_text='这一天还没有筛选出相关报道。') %}
   {% if groups %}
     <div class="tl">
       {% for g in groups %}
@@ -83,6 +81,6 @@
       {% endfor %}
     </div>
   {% else %}
-    <div class="empty">{{ empty_text }}{% if empty_note %}<span class="empty-note">{{ empty_note }}</span>{% endif %}</div>
+    <div class="empty">{{ empty_text }}</div>
   {% endif %}
 {% endmacro %}

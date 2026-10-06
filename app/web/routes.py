@@ -623,37 +623,6 @@ def _homepage_date(session: Session, now: datetime) -> str:
     return now.strftime("%Y-%m-%d")
 
 
-def _pipeline_note(session: Session, date_str: str) -> str:
-    """首页空空如也时，说明到底是「没抓到」还是「抓到了还没处理完」。
-
-    新用户第一次部署最常卡在这里：抓取正常、页面却是空的，看不出为什么。
-    两种情况要分开说 ——
-
-    - 有 pending：正在抽正文 / 等 AI 处理，过几分钟刷新就有；
-    - 有 failed：AI 处理失败。绝大多数是 ``.env`` 里的 Key 不对或网关不通，
-      直接指向 ``/settings`` 的「仅测试连接」，比让人自己猜快得多。
-
-    两种都为空才说「今天没有报道」。
-    """
-    pending = session.execute(
-        select(func.count(Article.id)).where(Article.status == "pending")
-    ).scalar_one()
-    failed = session.execute(
-        select(func.count(Article.id)).where(Article.status == "failed")
-    ).scalar_one()
-    parts = []
-    if pending:
-        parts.append(f"已抓到 {pending} 篇，正在抽正文与 AI 处理，稍后刷新看看")
-    if failed:
-        parts.append(
-            f"{failed} 篇 AI 处理失败（多半是 .env 里的 LLM Key 不对或网关不通）"
-            f"，去「设置 → 仅测试连接」验一下"
-        )
-    if parts:
-        return "；".join(parts) + "。"
-    return "今天还没有报道。抓取每 2 小时跑一次，也可以先在「信源」页试抓一个源看通不通。"
-
-
 @page_router.get("/", response_class=HTMLResponse)
 def index(
     request: Request,
@@ -687,7 +656,6 @@ def index(
             pages=pages,
             active_cat=cat or "",
             active_tag=tag or "",
-            empty_note="" if total else _pipeline_note(session, date_str),
             title="热点资讯",
         ),
     )

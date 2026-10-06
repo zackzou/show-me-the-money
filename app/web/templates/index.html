@@ -19,7 +19,7 @@
   <p class="hit">正在按标签 <b>#{{ active_tag }}</b> 筛选 · <a href="/" style="color:var(--accent)">清除</a></p>
 {% endif %}
 
-{{ timeline(groups, empty_note=empty_note) }}
+{{ timeline(groups) }}
 
 {% if pages > 1 %}
   <nav class="pager">
