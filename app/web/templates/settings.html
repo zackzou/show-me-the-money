@@ -1,4 +1,8 @@
 {% extends "base.html" %}
+{# 通宽容器：日志改成带表头的 7 列表格后，默认 960px 容器里右栏只有 ~440px，
+   放不下「时间/模型/输入/输出/思考/耗时/结果」——用 base 的 .wrap.wide（1400px），
+   右栏 ~640px，7 列都放得下，不用靠内部横向滚动。 #}
+{% block container_extra %} wide{% endblock %}
 {% block content %}
 
 <div class="lead">
@@ -34,14 +38,22 @@
 {% endif %}
 
 {#
-  两栏布局：左边「选厂商 + 填配置」，右边「用量与日志」。
-  早先是三个大 section 竖着排，用量表和日志在页面最下面，用户要一路拖到底
-  才能看到「今天花了多少 token」—— 而那恰恰是他最常看的东西。现在并排放，
-  1440px 下一屏能看到全部内容。
+  Tab 版式：设置页按「模型配置 / 用量统计 / 调用日志」分成三个标签页。
+  之前的通宽双栏把三块内容挤在一屏里，左栏下方大片留白、右栏被拉得最长；
+  分成 tab 后每个分区都能用上整行宽度 —— 日志表 7 列、KPI 卡、按天表
+  在 1400px 容器里各自舒展。保存/测试的提示（notice/probe）是「操作结果」，
+  放在 tab 之上全局可见；带 ?log_page=N 进来时直接落到「调用日志」页签，
+  分页链接不会把用户踢回第一个标签。
 #}
-<div class="cfg2col">
+<nav class="tabs stabs" aria-label="设置分区">
+  <button type="button" class="tab on" data-stab="cfg" aria-selected="true">模型配置</button>
+  <button type="button" class="tab" data-stab="usage" aria-selected="false">用量统计</button>
+  <button type="button" class="tab" data-stab="log" aria-selected="false">调用日志<span class="n">{{ log_total }}</span></button>
+</nav>
 
-<section class="sec col-a">
+<section class="sec-panel" id="stab-cfg">
+
+<section class="sec">
   <div class="sec-t">厂商预设
     <span class="sec-h">
       {%- if active_preset %}当前：{{ presets|selectattr('id','equalto',active_preset)|map(attribute='name')|first }}
@@ -113,8 +125,9 @@
     </div>
   </form>
 </section>
+</section>{# /stab-cfg #}
 
-<div class="col-b">
+<section class="sec-panel" id="stab-usage" hidden>
 <section class="sec">
   <div class="sec-t">Token 用量<span class="sec-h">抓取与处理任务的真实消耗</span></div>
   <div class="kpis">
@@ -133,6 +146,7 @@
   </p>
 
   {% if usage.days %}
+    <div class="tblwrap">
     <table class="utbl">
       <thead>
         {# 7 列才塞得进右栏：9 列时最后一列被裁掉半截（实测「1,94…」看不全）。
@@ -156,31 +170,44 @@
         {% endfor %}
       </tbody>
     </table>
+    </div>
   {% else %}
     <p class="ftip">还没有记录。点上面的「测试连接」，或等下一次抓取任务。</p>
   {% endif %}
 </section>
+</section>
 
+<section class="sec-panel" id="stab-log" hidden>
 <section class="sec sec-log">
   <div class="sec-t">调用日志<span class="sec-h">共 {{ log_total }} 条 · 第 {{ log_page }}/{{ log_pages }} 页</span></div>
   {% if log_rows %}
-    <ul class="ulog">
-      {% for r in log_rows %}
-        <li class="{{ 'ok' if r.ok else 'bad' }}">
-          <span class="u-state" aria-hidden="true">{{ '●' if r.ok else '▲' }}</span>
-          <span class="u-at">{{ r.at }}</span>
-          <span class="u-model" title="{{ r.model }}">{{ r.model }}</span>
-          <span class="u-tok">
+    {# 带表头的表格替代旧的列表条：7 列对齐后「这批调用谁最贵」一眼扫出来，
+       不用逐条对位置读。缓存在上面的 KPI 卡里有命中率，行里不再占一列。 #}
+    <div class="tblwrap">
+    <table class="ltable">
+      <thead>
+        <tr><th>时间</th><th>模型</th><th>输入</th><th>输出</th><th>思考</th><th>耗时</th><th>结果</th></tr>
+      </thead>
+      <tbody>
+        {% for r in log_rows %}
+          {% set err = r.error or '失败' %}
+          <tr class="{{ 'ok' if r.ok else 'bad' }}">
+            <td class="d">{{ r.at }}</td>
+            <td class="m" title="{{ r.model }}">{{ r.model }}</td>
             {% if r.total_tokens %}
-              <i title="输入">{{ r.input_tokens or 0 }}</i>
-              <i title="输出">{{ r.output_tokens or 0 }}</i>
-              {% if r.cached_tokens %}<i class="c" title="缓存命中">C{{ r.cached_tokens }}</i>{% endif %}
-            {% else %}<i class="dim">—</i>{% endif %}
-          </span>
-          <span class="u-res">{{ (r.ms|string ~ 'ms') if r.ok else ((r.error or '')[:70]) }}</span>
-        </li>
-      {% endfor %}
-    </ul>
+              <td>{{ '{:,}'.format(r.input_tokens or 0) }}</td>
+              <td>{{ '{:,}'.format(r.output_tokens or 0) }}</td>
+              <td class="dim">{{ '{:,}'.format(r.reasoning_tokens or 0) }}</td>
+            {% else %}
+              <td class="dim">—</td><td class="dim">—</td><td class="dim">—</td>
+            {% endif %}
+            <td class="dim">{% if r.ms and r.ms >= 1000 %}{{ (r.ms / 1000)|round(1) }}s{% elif r.ms %}{{ r.ms }}ms{% else %}—{% endif %}</td>
+            <td class="res" {% if not r.ok %}title="{{ err }}"{% endif %}>{{ '成功' if r.ok else (err[:70] ~ '…' if err|length > 70 else err) }}</td>
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+    </div>
     {% if log_pages > 1 %}
       <nav class="pager" aria-label="日志分页">
         {% if log_page > 1 %}
@@ -204,49 +231,32 @@
     <p class="ftip">暂无记录。</p>
   {% endif %}
 </section>
-</div>{# /col-b #}
-
-</div>{# /cfg2col #}
+</section>
 
 {% endblock %}
 
 {% block extra %}
 <style>
-  /* 两栏：左边选厂商+填配置，右边用量+日志。
-     用户要求「所有内容一个页面显示完，不要一路拖到底」—— 用并排 + 内部滚动
-     把页面高度锁在一屏附近；窄屏自动退回单列（各自内部仍然可滚）。 */
-  .cfg2col { display:grid; grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);
-             gap:0 34px; align-items:start; }
-  .cfg2col .col-a { grid-column:1; }
-  .cfg2col .col-b { grid-column:2; min-width:0; }
-  /* 日志与按天表格都用固定高度 + 内部滚动，页面本身不被它们撑长 */
-  /* 日志列表内部滚动，不撑高整页：原来 46vh/420px 在 1000px 高的屏上就把
-     整页顶到 1247px，用户要一路拖到底才看得见下面的分页。 */
-  .col-b .ulog { max-height:min(24vh,212px); overflow-y:auto; }
-
-  /* 宽屏：两栏整体锁在一屏高度内，日志列表吃掉剩下的空间自己滚。
-     这样 1366x900 这种常见笔记本也不用拖到底 —— 之前只能靠写死
-     min(24vh,212px)，换个屏高就得重新试。窄屏（单栏）不适用，媒体查询
-     限定 1080px 以上。 */
-  @media (min-width:1080px) {
-    /* grid-template-rows 必须写 minmax(0,1fr)：只给容器写 height 的话，
-       那唯一一行 auto 轨道仍然按内容（952px）撑开，容器高度形同虚设，
-       页面照样超出一屏。minmax(0,1fr) 才让行可以被压到容器高度。 */
-    /* 还要 align-items:stretch：基线上的 .cfg2col 是 align-items:start，
-       两栏各按内容高度摆放，行高 790px 也压不住 col-b 那 952px 的内容。 */
-    .cfg2col { height:calc(100vh - 254px); grid-template-rows:minmax(0,1fr); align-items:stretch; }
-    .col-a { min-height:0; overflow-y:auto; }
-    .col-b { display:flex; flex-direction:column; min-height:0; }
-    .col-b .sec-log { flex:1 1 auto; min-height:0; display:flex; flex-direction:column; }
-    .col-b .ulog { flex:1 1 auto; min-height:64px; max-height:none; }
+  /* Tab 版式：三个分区面板 + 一排标签。容器仍是 base 的 .wrap.wide（1400px）
+     —— 日志表 7 列、KPI 卡、按天表在整行宽度下最舒展；面板显隐由 JS 切
+     hidden 属性，藏起来的面板不参与布局。标签药丸复用 base.html 的
+     全局 .tabs/.tab 样式，跟首页的分类 tab 视觉一致。
+     注意 .tab 是 <button>：浏览器给按钮的默认白底/黑字必须显式清掉，
+     否则深色模式下标签是白 pill、浅色文字几乎看不见（实测截图翻车）。 */
+  .stabs { margin:16px 0 0; }
+  .stabs .tab { font-family:inherit; cursor:pointer; background:transparent; color:var(--muted); }
+  .stabs .tab.on { color:var(--text); }
+  .sec-panel { padding-top:6px; }
+  .sec-panel[hidden] { display:none; }
+  @media (max-width:640px) {
+    .stabs .tab { padding:7px 12px 9px; font-size:12.5px; }
   }
-  .col-b .utbl { max-height:min(30vh,260px); overflow-y:auto; }
-  .col-b .ftip { margin-top:8px; }
-  @media (max-width:1080px) {
-    .cfg2col { grid-template-columns:minmax(0,1fr); }
-    .cfg2col .col-a, .cfg2col .col-b { grid-column:1; }
-    .col-b .ulog, .col-b .utbl { max-height:320px; }
-  }
+  /* 表格铺满面板：原来 .ltable/.utbl 用 display:block 是为了窄屏自己横滚，
+     但 block 化的表格在宽面板里只按内容宽收缩（实测 ~470px）。
+     改回原生表格 + 外层 .tblwrap 滚动容器：桌面 width:100% 铺满整行，
+     窄屏由 wrap 出横向滚动条，行为不变、观感正常。 */
+  .tblwrap { width:100%; overflow-x:auto; -webkit-overflow-scrolling:touch; }
+  .utbl, .ltable { display:table; }
 
   .notice { margin:18px 0 0; padding:13px 16px; border-radius:10px; font-size:13.5px; line-height:1.7;
             border:1px solid var(--line); display:flex; gap:10px; align-items:flex-start; }
@@ -288,8 +298,8 @@
                font-family:ui-monospace,Menlo,monospace; }
 
   .cfg { display:flex; flex-direction:column; gap:19px; max-width:760px; }
-  /* 宽屏两列：4 个字段并排放两行，按钮独占一行。col-a 本来就空着右边，
-     单列排 4 个字段要 479px，两列只要 ~270px —— 这是「设置一页放下」的关键。 */
+  /* 宽屏两列：4 个字段并排放两行，按钮独占一行。单列排 4 个字段要 479px，
+     两列只要 ~270px，是「模型配置」一屏放下的关键。 */
   @media (min-width:1240px) {
     .cfg { display:grid; grid-template-columns:1fr 1fr; gap:15px 18px; max-width:none; align-items:start; }
     .cfg .btns { grid-column:1 / -1; }
@@ -328,8 +338,10 @@
   .ghost:hover { color:var(--accent); border-color:var(--accent); }
 
   /* 别为了塞成一行而把最小宽度调到 100px：实测那样「缓存命中 22%」会折行，
-     两行指标反而比原来高 36px。112px 是试出来的下限。 */
-  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(112px,1fr)); gap:9px; margin-bottom:18px; }
+     两行指标反而比原来高 36px。通宽后按 112px 会排出每行 5 张、卡只有 122px，
+     「17,260,867」这种 10 位数（实测 106px）溢出卡片压线 —— 136px 起通宽每行
+     4 张（卡 155px）、1200 视口右栏 ~550px 时退到每行 3 张，数字都有余量。 */
+  .kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(136px,1fr)); gap:9px; margin-bottom:18px; }
   .kpi { padding:13px 15px; border:1px solid var(--line); border-radius:11px; background:var(--surface); }
   .kpi b { display:block; font-size:19px; font-weight:700; color:var(--text);
            font-variant-numeric:tabular-nums; letter-spacing:-.02em; }
@@ -337,12 +349,12 @@
   .kpi.accent { border-color:var(--accent); background:var(--accent-soft); }
   .kpi.accent b, .kpi.accent span { color:var(--accent); }
 
-  /* display:block + overflow-x:auto：这张表有 9 列，最小内容宽度 397px，
-     而 390px 屏的内容框只有 362px。原来没有滚动容器，表格就把**整页**
-     撑宽了 21~91px，连吸顶导航和页脚都跟着横向跑。改成表格自己内部横向滚动。 */
+  /* display:block + overflow-x:auto：按天表在窄屏自己内部横向滚动，别把**整页**
+     撑宽 —— 历史上 9 列时实测把整页撑宽 21~91px，连吸顶导航和页脚都跟着横向跑。
+     现在 7 列 + 窄屏 11px 字号，390px 屏实测 362px 恰好放得下、不出滚动条；
+     滚动容器留着当安全网，将来加列或字号回退时页面不会再被撑破。 */
   .utbl { width:100%; border-collapse:collapse; font-size:12.5px;
-          font-variant-numeric:tabular-nums; display:block; overflow-x:auto;
-          white-space:nowrap; -webkit-overflow-scrolling:touch; }
+          font-variant-numeric:tabular-nums; white-space:nowrap; }
   .utbl th { font-size:11px; color:var(--faint); font-weight:600; text-align:right;
              padding:0 8px 8px; border-bottom:1px solid var(--line); }
   .utbl td { text-align:right; padding:8px; border-bottom:1px solid var(--line); color:var(--muted); }
@@ -354,25 +366,29 @@
   .utbl td.tot { color:var(--text); font-weight:600; }
   .utbl tbody tr:hover td { background:var(--chip); }
 
-  .ulog { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px; }
-  .ulog li { display:grid; grid-template-columns:16px 128px minmax(0,150px) 96px minmax(0,1fr);
-             gap:10px; align-items:center; font-size:12px; padding:9px 12px;
-             border:1px solid var(--line); border-radius:9px; background:var(--surface); }
-  .ulog li:hover { border-color:var(--accent); }
-  .u-state { color:#1f8a5a; font-size:9px; text-align:center; }
-  .ulog li.bad .u-state { color:#c0392b; }
-  .ulog li.bad { border-left:3px solid #c0392b; }
-  .ulog li.ok { border-left:3px solid rgba(31,138,90,.55); }
-  .u-at { color:var(--faint); font-variant-numeric:tabular-nums; }
-  .u-model { color:var(--text); font-family:ui-monospace,Menlo,monospace;
-             overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .u-tok { display:flex; gap:5px; justify-content:flex-end; }
-  .u-tok i { font-style:normal; font-size:10.5px; padding:2px 6px; border-radius:5px;
-             background:var(--chip); color:var(--muted); font-variant-numeric:tabular-nums; }
-  .u-tok i.c { background:var(--accent-soft); color:var(--accent); }
-  .u-tok i.dim { color:var(--faint); }
-  .u-res { color:var(--muted); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-  .ulog li.bad .u-res { color:#c0392b; }
+  /* 调用日志表：基底与按天表一致（窄屏横向滚），列语义不同所以单独一个类。
+     成功/失败行用行左侧的 inset 阴影标记（表格行画不了 border-left），
+     「结果」列文字本身也按成功/失败着色。
+     水平 padding 6px 而非 8px：通宽右栏 647px 时 7 列自然宽 654px，会多出一条
+     7px 的无意义横向滚动条；每列左右各省 2px（共 28px）后满宽稳稳放下。 */
+  .ltable { width:100%; border-collapse:collapse; font-size:12px;
+            font-variant-numeric:tabular-nums;
+            white-space:nowrap; }
+  .ltable th { font-size:11px; color:var(--faint); font-weight:600; text-align:left;
+               padding:0 6px 8px; border-bottom:1px solid var(--line); }
+  .ltable td { text-align:left; padding:8px 6px; border-bottom:1px solid var(--line); color:var(--muted); }
+  /* 中间四列（输入/输出/思考/耗时）右对齐，数字才能按位比大小 */
+  .ltable th:nth-child(n+3):nth-child(-n+6),
+  .ltable td:nth-child(n+3):nth-child(-n+6) { text-align:right; }
+  .ltable td.d { color:var(--text); font-weight:600; }
+  .ltable td.m { color:var(--text); font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+                 max-width:170px; overflow:hidden; text-overflow:ellipsis; }
+  .ltable td.dim { color:var(--faint); }
+  .ltable td.res { max-width:240px; overflow:hidden; text-overflow:ellipsis; color:#1f8a5a; }
+  .ltable tr.bad td.res { color:#c0392b; }
+  .ltable tr.ok td:first-child { box-shadow:inset 3px 0 0 rgba(31,138,90,.55); }
+  .ltable tr.bad td:first-child { box-shadow:inset 3px 0 0 #c0392b; }
+  .ltable tbody tr:hover td { background:var(--chip); }
 
   .pager { display:flex; gap:5px; flex-wrap:wrap; margin-top:14px; justify-content:center; }
   .pager a { min-width:30px; height:30px; display:grid; place-items:center; padding:0 8px;
@@ -385,10 +401,7 @@
   .ftip code { background:var(--chip); padding:1px 5px; border-radius:4px; }
 
   @media (max-width:720px) {
-    .ulog li { grid-template-columns:14px 1fr; gap:5px 9px; }
-    /* .u-model 也必须钉到第 2 列：它是第 3 个子元素，自动布局会把它塞进
-       第 1 列那个 14px 的状态点轨道里，模型名被压成 1 个字符加个省略号。 */
-    .u-model, .u-tok, .u-res { grid-column:2; justify-content:flex-start; }
+    .ltable { font-size:11px; } .ltable th, .ltable td { padding:6px 4px; }
     .sec-t .sec-h { float:none; display:block; margin-top:4px; }
     .utbl { font-size:11px; } .utbl th, .utbl td { padding:6px 4px; }
   }
@@ -496,5 +509,24 @@
     var tag = document.querySelector(".tag-ok");
     if (tag) { tag.textContent = "有修改，点保存后生效"; tag.style.color = "var(--accent)"; }
   });
+
+  // 设置页标签：三个分区面板切换。带 ?log_page=N 进来（分页链接、刷新后）
+  // 直接落到「调用日志」—— 否则点下一页会被踢回第一个标签。
+  var stabs = document.querySelectorAll(".stabs .tab");
+  var stabOpen = function (name) {
+    stabs.forEach(function (t) {
+      var on = t.getAttribute("data-stab") === name;
+      t.classList.toggle("on", on);
+      t.setAttribute("aria-selected", on ? "true" : "false");
+    });
+    ["cfg", "usage", "log"].forEach(function (n) {
+      var panel = document.getElementById("stab-" + n);
+      if (panel) panel.hidden = n !== name;
+    });
+  };
+  stabs.forEach(function (t) {
+    t.addEventListener("click", function () { stabOpen(t.getAttribute("data-stab")); });
+  });
+  if (new URLSearchParams(location.search).get("log_page") !== null) stabOpen("log");
 </script>
 {% endblock %}

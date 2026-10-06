@@ -3,17 +3,22 @@
 from __future__ import annotations
 
 import json
-from typing import Annotated
+import threading
+import time
+from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, Query, Request
 from fastapi import Path as PathParam
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app import __version__
-from app.db import get_session
-from app.fetcher.content import count_with_full_text
+from app.ai.processor import LANG_AUTO, STATUS_PROCESSED, process_article
+from app.config import Settings
+from app.db import get_session, session_scope
+from app.fetcher.content import _store_body_anchors, count_with_full_text, fetch_article_document
 from app.fetcher.images import count_with_images
+from app.fetcher.media_store import media_dir_for
 from app.models import Article, DailyReport, Source
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleDetailOut, ArticleOut, HealthOut, ReportDetail, ReportOut
@@ -152,6 +157,128 @@ def _digest_with_fallback(article: Article) -> str:
     if chinese_ratio(title) >= 0.4:
         return brief_digest(title)
     return f"（{title}）中文译文还在整理中。" if title else ""
+
+
+# ── 重新获取：重抓原文 + 按当前配置重跑 AI 处理 ──────────────────────
+# 进程内任务表：article_id → {"state": running|ok|failed, "reason": str|None}
+# 本应用是单进程 uvicorn，进程内存即可。若改成多 worker 部署，轮询请求可能
+# 落在没有这个任务的 worker 上拿到 idle —— 那时要把状态挪到库表或 Redis。
+_refetch_jobs: dict[int, dict[str, Any]] = {}
+_refetch_lock = threading.Lock()
+
+# 原文换了，这些派生字段就全部作废：旧摘要/译文/章节结构对新正文可能已经
+# 错位，宁可空着让 AI 重写，也不能让「新正文配旧导读」留在页面上。
+# （summary/digest/reason/score/category/topics 不在列：process_article 会
+# 无条件重算并覆盖它们；这里列的是它「有旧值就沿用/跳过」的字段。）
+_REFETCH_DERIVED_FIELDS = (
+    "title_zh", "title_en", "digest_zh", "digest_en", "content_zh",
+    "body_sections", "body_sections_zh", "brief_zh", "tags",
+)
+
+
+def _refetch_set(article_id: int, state: str, reason: str | None = None) -> None:
+    with _refetch_lock:
+        _refetch_jobs[article_id] = {"state": state, "reason": reason, "done_at": time.time()}
+
+
+def _run_refetch(article_id: int, settings: Settings | None) -> None:
+    """后台任务：重抓原文 → 作废派生字段 → 按当前配置重新跑一遍 AI 处理。
+
+    每一步都收口到 ``_refetch_set``，任何失败都要让轮询端看到原因 ——
+    后台任务里没人接异常，吞掉的话前端会永远转圈。
+    """
+    from app.scheduler import _llm_client  # 延迟导入：scheduler 也会延迟导入 web 层
+
+    if settings is None:
+        _refetch_set(article_id, "failed", "设置未加载，无法重建 AI 客户端")
+        return
+    try:
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            if article is None:
+                _refetch_set(article_id, "failed", "文章不存在")
+                return
+            link = article.link
+
+        # 1. 重抓原文（正文 + 配图锚点一次拿全；抓不到时返回空串/空表）
+        text, images = fetch_article_document(link)
+        if not text:
+            _refetch_set(article_id, "failed", "原文抓取失败：站点不可达，或页面里提取不出正文")
+            return
+
+        # 2. 写回原文并作废派生字段（同一事务，避免出现半新半旧的状态）
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            if article is None:
+                _refetch_set(article_id, "failed", "文章不存在")
+                return
+            article.content_full = text
+            # 旧锚点指的是旧正文的段落位置，正文一换就全部失效 —— 先清成
+            # NULL（下轮补图任务还会来），再让 _store_body_anchors 按新正文重算。
+            article.body_images = None
+            _store_body_anchors(
+                article, images, referer=link or "", media_dir=media_dir_for(settings.db_file)
+            )
+            for field in _REFETCH_DERIVED_FIELDS:
+                setattr(article, field, None)
+
+        # 3. 按当前设置页配置现建 LLM 客户端重新处理。source_lang 用 auto：
+        # 重抓后的正文语种可能与原来不同，按信源写死的语言走会翻错方向。
+        client = _llm_client(settings)
+        try:
+            with session_scope() as session:
+                article = session.get(Article, article_id)
+                if article is None:
+                    _refetch_set(article_id, "failed", "文章不存在")
+                    return
+                status = process_article(session, article, client, settings, source_lang=LANG_AUTO)
+        finally:
+            client.close()
+
+        if status == STATUS_PROCESSED:
+            _refetch_set(article_id, "ok")
+            return
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            reason = (article.degraded_reason if article else None) or "AI 处理失败"
+        # 处理失败只是这一轮没成：文章已标 failed，调度器会把降级文章放回
+        # pending 自动重试；这里如实报告即可。
+        _refetch_set(article_id, "failed", reason)
+    except Exception as exc:  # 后台任务兜底：状态必须落地，前端才不会永远转圈
+        _refetch_set(article_id, "failed", f"重新获取失败：{exc}"[:300])
+
+
+@api_router.post("/articles/{article_id}/refetch")
+def refetch_article(
+    article_id: IdParam, background_tasks: BackgroundTasks, request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    """重新抓取这篇文章的原文并按当前配置重跑 AI 处理（后台执行）。"""
+    article = session.get(Article, article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    with _refetch_lock:
+        running = _refetch_jobs.get(article_id, {}).get("state") == "running"
+        if not running:
+            _refetch_jobs[article_id] = {"state": "running", "reason": None, "done_at": time.time()}
+    if running:
+        # 已经有一份在跑：不重复起任务，让前端接着轮询即可
+        return {"state": "running"}
+    # 设置用 app.state 里**运行中的那一份**（设置页改完就地生效），不传快照
+    background_tasks.add_task(
+        _run_refetch, article_id, getattr(request.app.state, "settings", None)
+    )
+    return {"state": "running"}
+
+
+@api_router.get("/articles/{article_id}/refetch-status")
+def refetch_status(article_id: IdParam) -> dict[str, Any]:
+    """重新获取任务的当前状态：idle（没跑过）/ running / ok / failed（带原因）。"""
+    with _refetch_lock:
+        job = _refetch_jobs.get(article_id)
+        if job is None:
+            return {"state": "idle", "reason": None}
+        return {"state": job["state"], "reason": job.get("reason")}
 
 
 @api_router.get("/reports", response_model=list[ReportOut])

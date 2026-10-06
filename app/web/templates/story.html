@@ -59,19 +59,31 @@
     <section class="sec">
       <div class="sec-head">
         <div class="sec-t">AI 导读{% if item.digest_missing_zh %}<span class="t-note">原文为英文，中文导读还在翻译队列里</span>{% endif %}</div>
-        {% if 'en' in langs %}
-          {# 英文信源：中文 / 英文 / 双语三选一；译文没到齐时也能切，缺的一版由 bi() 用原文顶上 #}
-          <div class="lang" id="lang" role="group" aria-label="语言">
-            <button type="button" data-lang="zh" title="只显示中文">中文</button>
-            <button type="button" data-lang="en" title="English only">EN</button>
-            <button type="button" data-lang="both" title="中文在上，英文在下">双语</button>
-          </div>
-        {% else %}
-          {# 中文信源：本来就不翻译，语言切换只摆「中文」一个（纯状态，不可点） #}
-          <span class="lang" aria-label="语言"><button type="button" class="on" aria-pressed="true" tabindex="-1">中文</button></span>
-        {% endif %}
+        <div class="sec-ops">
+          {# 重新获取：重抓原文 + 按当前 AI 配置重跑处理。导读没更新、译文缺了
+             或者上次处理时 LLM 恰好限流，都可以在这里手动救回来，不用等调度轮。 #}
+          <span class="refetch" id="refetch"
+                data-article-id="{{ item.id }}"
+                data-idle-label="重新获取">
+            <button type="button" class="rf-btn" id="refetch-btn" title="重新抓取原文，并按当前 AI 配置重新生成导读、译文与标签">
+              <span class="rf-ico" aria-hidden="true">⟳</span><span class="rf-txt">重新获取</span>
+            </button>
+            <span class="rf-note" id="refetch-note" hidden></span>
+          </span>
+          {% if 'en' in langs %}
+            {# 英文信源：中文 / 英文 / 双语三选一；译文没到齐时也能切，缺的一版由 bi() 用原文顶上 #}
+            <div class="lang" id="lang" role="group" aria-label="语言">
+              <button type="button" data-lang="zh" title="只显示中文">中文</button>
+              <button type="button" data-lang="en" title="English only">EN</button>
+              <button type="button" data-lang="both" title="中文在上，英文在下">双语</button>
+            </div>
+          {% else %}
+            {# 中文信源：本来就不翻译，语言切换只摆「中文」一个（纯状态，不可点） #}
+            <span class="lang" aria-label="语言"><button type="button" class="on" aria-pressed="true" tabindex="-1">中文</button></span>
+          {% endif %}
+        </div>
       </div>
-      <p class="lead-p">{{ bi(item.digest or item.reason or '（没有生成导读）', item.digest_en) }}</p>
+      <p class="lead-p">{% if item.digest or item.reason %}{{ bi(item.digest or item.reason, item.digest_en) }}{% else %}（没有生成导读）{% endif %}</p>
       {# 阅读提示：先说清楚要读多久，读者才能决定现在读还是先收藏（图 7） #}
       {% if item.reading and item.reading.minutes %}
         <p class="read-hint" data-reading-minutes="{{ item.reading.minutes }}">
@@ -95,34 +107,32 @@
     {% endmacro %}
 
     {#
-      双语模式的排版原则（这张图暴露的问题）：
-      **两个语言版本必须是结构对称的两块**，而不是看起来像一篇文章里
-      「有些段落有双语、有些没有」。
+      双语正文的排版原则（用户图 1 / 图 2 的诉求）：
+      按**节**交错 —— 中文一节读完，紧跟这一节的英文原文（引用样式，图 1
+      的样子），而不是「整篇中文 → 整篇英文」两大块：后者读者要滚过全部
+      中文才能对到第一段英文，滚着滚着就以为双语没了（图 2 报的问题）。
 
-      以前只给中文译文存了章节结构（body_sections_zh），英文原文那一份
-      body_sections 大面积缺失 —— 于是中文那一半有小标题横幅、英文那一半
-      没有，读者眼里就是「有些段落有、有些没有」。现在两套结构由同一次
-      排版派生，节数与顺序一一对应。
+      为什么按「节」而不是按「段」配对：译文是重新写成的一篇中文，段数与
+      原文本来就不对应（实测 45 段压成 15 段），段级交替必然错位；节级配对
+      由路由里的 _pair_sections 完成 —— 两套结构的节边界先经过
+      _structure_matches 校验（对称，或已双双退回平铺），配图槽按同样的
+      下标切给各节，图在节内的相对位置不变。
 
-      另外每一块都要有自己的语言标签和分隔线。译文是「重新写成一篇中文
-      文章」，段数与原文本来就不对应（实测 45 段压成 15 段），所以不能按
-      段落交替排列 —— 那才是真的会错位。正确做法是：完整中文在前、完整
-      英文在后，各自完整，用一条明确的分隔线告诉读者「到此切换语言」。
+      单语模式不换 DOM：html[data-lang] 对 .zh/.en 的显隐照常工作 ——
+      切「中文」只剩中文节连读，切「EN」只剩英文节连读（base.html 的
+      引用样式只挂在双语档上，单语时一并退场，读起来就是正常正文）。
     #}
     {% if item.body_blocks_zh %}
       <div class="rule"></div>
       <section class="sec">
         <div class="sec-t plain">正文</div>
-        <div class="lang-block" data-lang-block="zh">
-          <div class="lang-cap"><span class="lc-zh">中文译文</span></div>
-          <div class="prose zh">{{ prose(item.body_blocks_zh, item.shots_zh) }}</div>
-        </div>
-        {% if item.body_blocks %}
-          <div class="lang-block" data-lang-block="en">
-            <div class="lang-cap"><span class="lc-en">英文原文</span></div>
-            <div class="prose en">{{ prose(item.body_blocks, item.shots) }}</div>
-          </div>
-        {% endif %}
+        {% for pair in item.body_pairs %}
+          <div class="lang-block"><div class="prose zh">{{ prose(pair.zh_blocks, pair.zh_slots) }}</div></div>
+          <div class="lang-block en-pair"><div class="prose en">{{ prose(pair.en_blocks, pair.en_slots) }}</div></div>
+        {% else %}
+          {# 没有英文栈可配对（极少）：退回只渲染中文一块 #}
+          <div class="lang-block"><div class="prose zh">{{ prose(item.body_blocks_zh, item.shots_zh) }}</div></div>
+        {% endfor %}
       </section>
     {% elif item.body_blocks %}
       <div class="rule"></div>
@@ -282,6 +292,30 @@
 
 {% block extra %}
 <style>
+  /* 导读行右侧的操作组：重新获取 + 语言切换并排。
+     语言切换的 .lang 有自己的边框药丸造型，重新获取按钮做成同高的次级按钮。 */
+  .sec-ops { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .refetch { display:inline-flex; align-items:center; gap:8px; }
+  .rf-btn { display:inline-flex; align-items:center; gap:5px; padding:5px 11px;
+            border:1px solid var(--line); border-radius:999px; background:var(--surface);
+            color:var(--muted); font-size:12px; font-family:inherit; line-height:1.5;
+            cursor:pointer; white-space:nowrap; transition:color .15s, border-color .15s; }
+  .rf-btn:hover { color:var(--accent); border-color:var(--accent); }
+  .rf-btn:disabled { cursor:default; opacity:.75; }
+  .rf-ico { display:inline-block; font-size:13px; line-height:1; }
+  /* 获取中：图标转圈。转的是 .rf-ico 而不是整个按钮 —— 按钮里还有文字，
+     文字跟着转就读不了。prefers-reduced-motion 下保持静止（见下）。 */
+  .refetch.running .rf-ico { animation:rf-spin 1s linear infinite; }
+  .refetch.running .rf-btn { color:var(--accent); border-color:var(--accent); }
+  .refetch.ok .rf-btn { color:#1f8a5a; border-color:#1f8a5a; }
+  .refetch.failed .rf-btn { color:#b4443c; border-color:#b4443c; }
+  .rf-note { max-width:52vw; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;
+             font-size:12px; line-height:1.5; color:var(--faint); }
+  .refetch.ok .rf-note { color:#1f8a5a; }
+  .refetch.failed .rf-note { color:#b4443c; }
+  @keyframes rf-spin { to { transform:rotate(360deg); } }
+  @media (prefers-reduced-motion:reduce) { .refetch.running .rf-ico { animation:none; } }
+
   /* 正文里的悬浮跳转条：贴视口右侧中部，避开正文列。
      用 position:fixed + JS 控制显隐，不占文档流。 */
   .jump { position:fixed; right:clamp(10px,1.6vw,22px); top:50%; transform:translateY(-50%);
@@ -304,18 +338,14 @@
              font-variant-numeric:tabular-nums; min-width:30px; text-align:center;
              line-height:1; }
 
-  /* ── 双语正文的两块（见 story.html 的注释）─────────────────
-     每块有自己的语言标签，两块之间一条明确的分隔线。单语模式下只显示一块，
-     标签自动隐藏 —— 单语时再挂一个「中文译文」是多余的字。 */
-  .lang-block .lang-cap { display:none; margin:0 0 10px; }
-  .lang-cap .lc-zh, .lang-cap .lc-en {
-    display:inline-block; padding:2px 9px; border-radius:999px;
-    font-size:11px; font-weight:600; letter-spacing:.02em;
-    background:var(--chip); color:var(--muted); }
-  .lang-cap .lc-en { background:transparent; border:1px solid var(--line); }
-  html[data-lang="both"] .lang-block .lang-cap { display:block; }
-  html[data-lang="both"] .lang-block + .lang-block {
-    margin-top:26px; padding-top:22px;
+  /* ── 双语正文按节交错（story.html 正文注释）────────────────
+     每一节：中文块在前，紧跟 .en-pair 的英文原文 —— base.html 已在
+     [data-lang=both] 档给 .prose.en 配好引用样式（左线 + 降级字号），
+     这里只管节与节的边界：虚线只画在「英文块 → 下一节中文块」之间，
+     中文块和它自己的英文引用保持贴紧。单语模式靠 .zh/.en 显隐工作，
+     DOM 不变；被藏起来的块连同它的边界线一起消失，连读不受影响。 */
+  html[data-lang="both"] .lang-block.en-pair + .lang-block {
+    margin-top:30px; padding-top:24px;
     border-top:1px dashed var(--line); }
 
   /* 阅读提示（AI 导读下方） */
@@ -344,6 +374,18 @@
   @media (max-width:420px) {
     .jump { right:2px; opacity:.6; }
     .story > article { margin-right:30px; }
+  }
+  /* 手机正文尺寸：34px 大标题在 390px 屏要折 2~3 行且占掉小半屏，
+     收到 24px；头部留白与导读字号同步收紧。正文段落维持 18px/1.8 不动
+     （那是刻意对齐参考站的阅读字号，手机上并不大）。 */
+  @media (max-width:480px) {
+    .story { padding:18px 0 44px; gap:20px; }
+    .body-title { font-size:24px; line-height:1.38; letter-spacing:-.4px; }
+    html[data-lang="both"] .body-title .en { font-size:17px; }
+    .sub { margin-top:10px; font-size:13.5px; }
+    .sec { margin-top:26px; }
+    .lead-p { font-size:16px; line-height:1.9; }
+    .rail { padding:14px; }
   }
 </style>
 <script>
@@ -526,6 +568,95 @@
       try { document.execCommand("copy"); done(); } catch (err) { /* 复制失败就不提示了 */ }
       document.body.removeChild(ta);
     }
+  })();
+</script>
+<script>
+  // 重新获取：POST 后每 2 秒轮询一次状态，四态 —— 待机 / 获取中（转圈）/
+  // 成功（✓ 后刷新页面，让新导读、新译文直接可见）/ 失败（✕ + 原因）。
+  (function () {
+    var box = document.getElementById("refetch");
+    var btn = document.getElementById("refetch-btn");
+    var note = document.getElementById("refetch-note");
+    if (!box || !btn || !note) return;
+    var id = box.getAttribute("data-article-id");
+    var idleLabel = box.getAttribute("data-idle-label") || "重新获取";
+    var timer = null;
+    var polls = 0;
+    // 上限 10 分钟：正常一两分钟内结束；超时基本是后台任务没了（进程重启）
+    var MAX_POLLS = 300;
+
+    function setUI(state, reason) {
+      box.className = "refetch" + (state === "idle" ? "" : " " + state);
+      btn.disabled = state === "running";
+      if (state === "idle") {
+        btn.querySelector(".rf-txt").textContent = idleLabel;
+        note.hidden = true;
+      } else if (state === "running") {
+        btn.querySelector(".rf-txt").textContent = "获取中…";
+        note.hidden = false;
+        note.textContent = "正在重新抓取原文并重新生成导读、译文…";
+        note.title = "";
+      } else if (state === "ok") {
+        btn.querySelector(".rf-txt").textContent = "✓ 已重新获取";
+        note.hidden = false;
+        note.textContent = "完成，正在刷新页面…";
+        note.title = "";
+      } else {
+        btn.querySelector(".rf-txt").textContent = "✕ 获取失败";
+        note.hidden = false;
+        // 原因可能很长（LLM 报错带堆栈摘要）：行内截断显示，悬停看全文
+        note.textContent = reason || "未知原因";
+        note.title = reason || "";
+      }
+    }
+
+    function stopPolling() {
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    function poll() {
+      polls += 1;
+      if (polls > MAX_POLLS) {
+        stopPolling();
+        setUI("failed", "等待超时：后台任务可能已中断，请稍后重试");
+        return;
+      }
+      fetch("/api/articles/" + id + "/refetch-status")
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("bad status")); })
+        .then(function (s) {
+          if (s.state === "running") return;
+          stopPolling();
+          if (s.state === "ok") {
+            setUI("ok");
+            // 新内容已经落库，刷新才能看到；稍等一下让「✓」被看见
+            setTimeout(function () { location.reload(); }, 900);
+          } else if (s.state === "failed") {
+            setUI("failed", s.reason);
+          } else {
+            // POST 明明已受理，这里却是 idle —— 中途服务重启把任务表丢了
+            setUI("failed", "任务状态丢失（服务可能已重启），请重试");
+          }
+        })
+        .catch(function () { /* 单次轮询失败不结束：网络抖动很常见，下一轮再看 */ });
+    }
+
+    btn.addEventListener("click", function () {
+      if (btn.disabled) return;
+      setUI("running");
+      polls = 0;
+      fetch("/api/articles/" + id + "/refetch", { method: "POST" })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (b) {
+            throw new Error(b.detail || ("HTTP " + r.status));
+          }, function () { throw new Error("HTTP " + r.status); });
+          return r.json();
+        })
+        .then(function (s) {
+          if (s.state === "running") { timer = setInterval(poll, 2000); return; }
+          setUI("idle");
+        })
+        .catch(function (err) { setUI("failed", String(err.message || err)); });
+    });
   })();
 </script>
 {% endblock %}

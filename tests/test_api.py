@@ -12,7 +12,7 @@ from sqlalchemy import select
 
 from app.config import Settings
 from app.db import session_scope
-from app.models import Source
+from app.models import Article, Source
 from app.report.generator import generate_daily_report
 from app.utils.text import now_local
 from app.web.routes import PAGE_SIZE
@@ -611,15 +611,29 @@ def test_language_switcher_present(client):
     不会沿用上次选的英文把内容藏成空白。
     """
     text = client.get("/").text
-    # 列表页不再渲染切换控件本体
+    # 列表页不渲染切换控件本体
     assert '<div class="lang" id="lang"' not in text
-    assert 'localStorage.getItem("smtm-lang") || "zh"' in text   # 默认中文
+    # 每次打开都默认中文：不再恢复上次的 smtm-lang 选择
+    assert 'localStorage.getItem("smtm-lang")' not in text
+    assert 'document.documentElement.setAttribute("data-lang", "zh")' in text
     # 没有控件 = 强制中文，而不是沿用上次的选择
     assert 'document.documentElement.setAttribute("data-lang", "zh")' in text
     # 纯 CSS 控制显隐，不来回请求服务器（样式仍是全局的）
     assert 'html[data-lang="zh"] .en { display:none; }' in text
     assert 'html[data-lang="en"] .zh { display:none; }' in text
     assert 'html[data-lang="both"] .en' in text
+
+
+def test_language_switch_does_not_persist(client, seeded_db):
+    """切换语言只影响当前页，不写 localStorage。
+
+    语言是「这一篇」的属性：切过一次 EN 之后，每篇文章都默认非中文是反的。
+    之前 apply() 里那句 localStorage.setItem 正是这个问题的来源。
+    """
+    text = client.get("/").text
+    assert 'localStorage.setItem("smtm-lang"' not in text, "语言选择不应被持久化"
+    # 但主题仍然要记住，别把深浅色一起改掉
+    assert 'localStorage.setItem("smtm-theme"' in text
 
 
 def test_card_shows_english_below_chinese(client, settings: Settings, seeded_db):
@@ -1402,6 +1416,256 @@ def test_story_page_flattens_when_bilingual_structures_differ(client, seeded_db)
     assert ">背景</h3>" not in page.text, "结构不对称时不应只给中文显示横幅"
     assert "第二段译文" in page.text, "正文内容不能因为退回平铺而丢失"
 
+
+
+# ── 重新获取（重抓原文 + 重跑 AI 处理）────────────────────────────────
+
+def test_refetch_status_idle_for_unknown_article(client):
+    """没跑过的文章：idle，且带 reason 字段（前端按固定结构读）。"""
+    body = client.get("/api/articles/1/refetch-status").json()
+    assert body["state"] == "idle"
+    assert body["reason"] is None
+
+
+def test_refetch_unknown_article_is_404(client):
+    assert client.post("/api/articles/424242/refetch").status_code == 404
+    # 非数字 id 由 FastAPI 的路径校验挡下（422），不是 404
+    assert client.post("/api/articles/abc/refetch").status_code == 422
+
+
+def test_refetch_accepts_and_reports_running(client, settings: Settings, seeded_db):
+    """POST 受理后立刻返回 running，状态端点能看到同一份状态。"""
+    from app.web import api as api_mod
+
+    api_mod._refetch_jobs.clear()
+    with session_scope() as session:
+        aid = make_article(session, title="可重抓", link="https://example.com/re").id
+
+    client.app.state.settings = settings
+    original = api_mod._run_refetch
+
+    def boom(article_id: int, s: object) -> None:
+        api_mod._refetch_set(article_id, "failed", "测试里不真跑")
+
+    api_mod._run_refetch = boom  # type: ignore[assignment]
+    try:
+        assert client.post(f"/api/articles/{aid}/refetch").json() == {"state": "running"}
+        # TestClient 会把 BackgroundTasks 跑完，所以此时状态已是 failed
+        assert client.get(f"/api/articles/{aid}/refetch-status").json() == {
+            "state": "failed", "reason": "测试里不真跑"}
+    finally:
+        api_mod._run_refetch = original  # type: ignore[assignment]
+        api_mod._refetch_jobs.clear()
+
+
+def test_refetch_second_call_does_not_start_duplicate(client, settings: Settings, seeded_db):
+    """已经在跑时再点一次：不重复起任务，仍返回 running。"""
+    from app.web import api as api_mod
+
+    calls: list[int] = []
+    api_mod._refetch_jobs.clear()
+    with session_scope() as session:
+        aid = make_article(session, title="可重抓", link="https://example.com/re2").id
+    api_mod._refetch_set(aid, "running")
+    original = api_mod._run_refetch
+    api_mod._run_refetch = lambda article_id, _s: calls.append(article_id)  # type: ignore[assignment]
+    try:
+        assert client.post(f"/api/articles/{aid}/refetch").json() == {"state": "running"}
+        assert calls == [], "已在跑时不应该再起一个后台任务"
+    finally:
+        api_mod._run_refetch = original  # type: ignore[assignment]
+        api_mod._refetch_jobs.clear()
+
+
+def test_refetch_unreachable_source_reports_reason(monkeypatch, client, settings: Settings, seeded_db):
+    """抓不到原文时必须落到 failed 并带原因，不能让前端永远转圈。"""
+    from app.web import api as api_mod
+
+    monkeypatch.setattr(api_mod, "fetch_article_document", lambda *a, **k: ("", []))
+    api_mod._refetch_jobs.clear()
+    with session_scope() as session:
+        aid = make_article(session, title="抓不到", link="https://example.com/dead").id
+    api_mod._run_refetch(aid, settings)
+    body = client.get(f"/api/articles/{aid}/refetch-status").json()
+    assert body["state"] == "failed"
+    assert "原文抓取失败" in body["reason"]
+    api_mod._refetch_jobs.clear()
+
+
+def test_refetch_clears_derived_fields_before_reprocessing(monkeypatch, settings: Settings, seeded_db):
+    """原文换了，旧的摘要/译文/章节/标签必须先作废。
+
+    不作废就会出现「正文是新的、导读是旧的」这种错位 —— 而这正是这个功能的
+    调用场景（上次处理失败或模型升级后想重来）。
+    """
+    from app.web import api as api_mod
+
+    new_text = "这是重抓之后的新正文。" * 30
+    monkeypatch.setattr(api_mod, "fetch_article_document", lambda *a, **k: (new_text, []))
+
+    seen: dict[str, object] = {}
+
+    class FakeClient:
+        def close(self) -> None:
+            pass
+
+    def fake_process(session, article, client, st, *, source_lang="auto"):
+        seen["content_full_len"] = len(article.content_full or "")
+        seen["title_zh"] = article.title_zh
+        seen["digest_en"] = article.digest_en
+        seen["body_sections"] = article.body_sections
+        seen["body_images"] = article.body_images
+        seen["source_lang"] = source_lang
+        article.title_zh = "重写的中文标题"
+        return "processed"
+
+    monkeypatch.setattr(api_mod, "_llm_client", lambda st: FakeClient(), raising=False)
+    monkeypatch.setattr(api_mod, "process_article", fake_process)
+    api_mod._refetch_jobs.clear()
+
+    import app.scheduler as scheduler_mod
+
+    monkeypatch.setattr(scheduler_mod, "_llm_client", lambda st: FakeClient())
+
+    with session_scope() as session:
+        aid = make_article(
+            session,
+            title="旧标题",
+            link="https://example.com/refresh",
+            content_full="旧正文" * 50,
+            content_zh="旧译文",
+            title_zh="旧中文标题",
+            title_en="Old EN",
+            digest_en="Old digest",
+            body_sections='[{"h":"A","t":"x"}]',
+            body_sections_zh='[{"h":"甲","t":"y"}]',
+            body_images='[{"after":1}]',
+            tags="旧标签",
+        ).id
+
+    api_mod._run_refetch(aid, settings)
+
+    assert seen["content_full_len"] == len(new_text), "正文应换成新抓到的"
+    assert seen["title_zh"] is None, "旧中文标题必须先作废"
+    assert seen["digest_en"] is None
+    assert seen["body_sections"] is None
+    # 旧锚点指向旧段落下标，正文一换就全部失效（清成空表或 NULL 都算）
+    assert seen["body_images"] in (None, "[]"), "旧锚点必须被清掉"
+    # 重抓后语种可能变了，按 auto 判而不是照抄信源上写死的语言
+    assert seen["source_lang"] == "auto"
+
+    with session_scope() as session:
+        row = session.get(Article, aid)
+        assert row.title_zh == "重写的中文标题", "处理函数写的新值要落库"
+        assert row.content_full == new_text
+        assert row.title_en is None
+    assert api_mod._refetch_jobs[aid]["state"] == "ok"
+    api_mod._refetch_jobs.clear()
+
+
+def test_refetch_survives_unexpected_error(monkeypatch, settings: Settings, seeded_db):
+    """后台任务里任何意外都要落成 failed（带原因），前端才不会永远转圈。"""
+
+    def boom(*_a: object, **_k: object) -> tuple[str, list]:
+        raise RuntimeError("网络炸了")
+
+    from app.web import api as api_mod
+
+    monkeypatch.setattr(api_mod, "fetch_article_document", boom)
+    api_mod._refetch_jobs.clear()
+    with session_scope() as session:
+        aid = make_article(session, title="会炸", link="https://example.com/boom").id
+    api_mod._run_refetch(aid, settings)
+    assert api_mod._refetch_jobs[aid]["state"] == "failed"
+    assert "网络炸了" in api_mod._refetch_jobs[aid]["reason"]
+    api_mod._refetch_jobs.clear()
+
+
+# ── 双语正文按节配对 ───────────────────────────────────────────────────
+
+def test_pair_sections_matches_by_heading():
+    """按小标题把两套块切成一一对应的节。"""
+    from app.web.routes import _pair_sections
+
+    en = [
+        {"heading": "Intro", "text": "a"},
+        {"text": "a2"},
+        {"heading": "Body", "text": "b"},
+        {"text": "b2"},
+    ]
+    zh = [
+        {"heading": "引子", "text": "甲"},
+        {"text": "甲2"},
+        {"heading": "正文", "text": "乙"},
+        {"text": "乙2"},
+    ]
+    pairs = _pair_sections(en, [[], [], [], []], zh, [[], [], [], []])
+    assert len(pairs) == 2
+    assert [p["zh_blocks"][0]["heading"] for p in pairs] == ["引子", "正文"]
+    assert [p["en_blocks"][0]["heading"] for p in pairs] == ["Intro", "Body"]
+    # 第一节两块，第二节两块 —— 逐节对应，不串位
+    assert len(pairs[0]["zh_blocks"]) == 2
+    assert len(pairs[0]["en_blocks"]) == 2
+
+
+def test_pair_sections_slices_image_slots_by_section():
+    """配图槽要按同样的下标切给各节，图在节内的相对位置不变。"""
+    from app.web.routes import _pair_sections
+
+    en = [{"heading": "H1", "text": "x"}, {"text": "y"}, {"heading": "H2", "text": "z"}]
+    zh = [{"heading": "甲", "text": "x"}, {"text": "y"}, {"heading": "乙", "text": "z"}]
+    slots = [["img-in-h1"], [], ["img-in-h2"]]
+    pairs = _pair_sections(en, slots, zh, slots)
+    assert len(pairs) == 2
+    # 节 = 标题块 + 它后面的段落块，所以第一节吃 slots[0:2]（含正文段那个空槽），
+    # 第二节吃 slots[2:]。图跟着它所在的那一节走。
+    assert pairs[0]["en_slots"] == [["img-in-h1"], []]
+    assert pairs[1]["en_slots"] == [["img-in-h2"]]
+    assert pairs[1]["zh_slots"] == [["img-in-h2"]]
+
+
+def test_pair_sections_falls_back_to_single_pair():
+    """节边界对不上时整篇配成一对，绝不让英文凭空消失。"""
+    from app.web.routes import _pair_sections
+
+    en = [{"heading": "A", "text": "1"}, {"heading": "B", "text": "2"}]
+    zh = [{"heading": "甲", "text": "1"}, {"text": "续"}, {"heading": "乙", "text": "2"}]
+    pairs = _pair_sections(en, [], zh, [])
+    assert len(pairs) == 1, "对不齐就退回整篇一对"
+    assert pairs[0]["en_blocks"] == en
+    assert pairs[0]["zh_blocks"] == zh
+
+
+def test_pair_sections_without_english_returns_empty():
+    from app.web.routes import _pair_sections
+
+    assert _pair_sections([], [], [{"heading": "甲", "text": "1"}], []) == []
+    assert _pair_sections([{"heading": "A", "text": "1"}], [], [], []) == []
+
+
+def test_story_page_renders_pairs_when_translation_exists(client, settings: Settings, seeded_db):
+    """有中英两套正文时，故事页按节交错渲染（中文块与英文引用块成对）。"""
+    import json as _json
+
+    with session_scope() as session:
+        make_article(
+            session,
+            title="双语交错", link="https://example.com/pairs",
+            relevance=1, status="processed",
+            content="中文正文" * 60,
+            content_zh="中文译文" * 60,
+            body_sections=_json.dumps(
+                [{"h": "Intro", "t": "english one " * 40},
+                 {"h": "Body", "t": "english two " * 40}], ensure_ascii=False),
+            body_sections_zh=_json.dumps(
+                [{"h": "引子", "t": "中文第一段。" * 20},
+                 {"h": "正文", "t": "中文第二段。" * 20}], ensure_ascii=False),
+        )
+    with session_scope() as session:
+        aid = session.query(Article).filter(Article.link == "https://example.com/pairs").one().id
+    html = client.get(f"/story/{aid}").text
+    assert html.count('class="lang-block"') == 2, "两节 → 两个中文块"
+    assert html.count("lang-block en-pair") == 2, "每节紧跟一块英文原文"
 
 # ── 信源管理页 ────────────────────────────────────────────────────────────
 

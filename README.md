@@ -24,6 +24,7 @@
 - [快速开始（Docker，推荐）](#快速开始docker推荐)
 - [本地运行（不用 Docker）](#本地运行不用-docker)
 - [配置](#配置)
+- [页面与语言策略](#页面与语言策略)
 - [它是怎么跑的](#它是怎么跑的)
 - [接口一览](#接口一览)
 - [预览产出长什么样](#预览产出长什么样)
@@ -129,6 +130,52 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 ---
 
+## 页面与语言策略
+
+### 三个管理页面
+
+- **`/sources` 信源管理**：填地址 → 试抓 → 添加（当场看到抓到几条、语言判定结果）；列表里
+  **就地改名、启停、删除**（软删除，可在页面底部撤回，已入库文章的来源不会丢），全部走
+  `fetch` 局部刷新，不整页重载。语言默认「**自适应**」，也可以对某个源固定中文 / 英文。
+- **`/settings` 模型设置**：先点厂商预设自动填 base 与模型，再粘 Key。Key 不进 HTML，
+  点眼睛才向 `/settings/key` 取明文。保存前会真发一次请求测连通性，不通不存。下方是
+  Token 用量（按天）与调用日志，都带分页。宽屏下两栏并排 + 日志区随视口伸缩，一屏放得下。
+- **`/rss-guide` RSS 说明**：订阅地址、复制按钮、订阅步骤与最近日报；顶栏的 `RSS` 指向它，
+  `/rss` 仍提供原始 XML。
+
+### 语言策略：按内容判断，默认自适应
+
+信源语言有 `auto`（默认）/ `zh` / `en` 三档。`auto` 时**按每篇文章自己的正文判定**
+（同一个源里中英文混排很常见）：
+
+- **中文原文** → 不产出英文版。中文译中文既浪费调用，又把「AI 重写」的损耗套到原文上；
+  页面上也不给 EN / 双语按钮，只有一个「中文」状态钮。
+- **英文原文** → 必须产出中文版（中文标题 / 中文导读 / 中文正文），页面给 中文 / EN / 双语 三键。
+- 显式指定 `zh` / `en` 的信源按你的指定走，覆盖内容判断。
+
+语言切换是**「这一篇」的属性**：只影响当前页，不写 `localStorage`，刷新即回到中文。
+
+### 单篇页的中英双语：按节交错
+
+双语不是「整篇中文 → 整篇英文」两大块，而是**按小标题一节一节交错**：读完一节中文，
+紧跟这一节的英文原文（引用样式：小一号、灰、加左边线，图片只保留中文那一份）。
+否则读者要滚过全部中文才对到第一段英文，滚着滚着以为双语没了。
+
+配对按**节**而不是按段：译文是重新写成的一篇中文，段数与原文本来就不对应
+（实测 45 段压成 15 段），段级交替必然错位。两套结构的节边界会先做对称校验，
+对不齐就整篇退回「中文在上、英文在下」，**绝不让英文凭空消失**。
+
+### 单篇页的其他交互
+
+- **重新获取**（AI 导读行右侧）：重抓原文 + 按当前 AI 配置重跑处理。导读没更新、译文缺了、
+  或上次处理时 LLM 恰好限流，用它手动救回来。原文换了以后旧的摘要/译文/章节/标签会先作废，
+  不会留下「新正文配旧导读」。过程有转圈与完成/失败提示，失败会给出原因。
+- **阅读百分比与预计时长**：右侧悬浮条按**正文**位置算进度（不是整页），滚到底锁定 100%，
+  免得懒加载图片加载完把百分比拽回去 92%。正文不足 1.4 屏时不显示这根条。
+- **段落横幅**：小标题做成 20px / 字重 700 / 实色底 / 6px 色条，明显大于 18px 的正文。
+
+---
+
 ## 它是怎么跑的
 
 ```
@@ -200,7 +247,12 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `/api/articles?date=YYYY-MM-DD` | 当天文章 JSON（默认北京时间今天） |
 | `/api/reports` `/api/reports/{date}` | 日报列表 / 指定日报（Markdown + HTML 全文） |
 | `/health` `/api/health` | 健康检查（含信源数、文章数、日报数、调研方向） |
+| `/sources` | 信源管理：试抓并添加、就地改名、启停、软删除与撤回；启用中/已停用分 tab，每页 10 条 |
+| `/settings` | 模型设置：厂商预设一键填、API Key 眼睛/复制、连通性测试、用量与调用日志分页 |
 | `/rss` | 最新日报的 RSS，每篇文章一个条目；`?date=` 可指定某一天 |
+| `/rss-guide` | 站内 RSS 订阅说明（订阅地址、复制按钮、内容说明与最近日报） |
+| `/api/articles/{id}/refetch` | POST：重抓这篇原文并按当前配置重跑 AI 处理（后台任务，立刻返回 running） |
+| `/api/articles/{id}/refetch-status` | GET：上面那个任务的状态 `idle` / `running` / `ok` / `failed`（带原因） |
 | `/docs` | 自动生成的 OpenAPI 文档 |
 
 ---
@@ -299,7 +351,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 28 个文件零告警、121 个测试全绿、覆盖率 89%。
+当前状态：`ruff` 无告警、`mypy` 36 个文件零告警、388 个测试全绿。
 
 ---
 
@@ -330,6 +382,22 @@ ruff check . && mypy && pytest --cov=app
 **日报里某天文章特别少 / 某一类文章不见了**
 多半是相关度判断把它判成不相关（`RESEARCH_TOPIC` 写窄了），或者前一天那批文章在定稿时还没处理完（会打 WARNING，提示调大 `ai.batch_size`）。
 
+**信源页点「停用/改名/删除」没反应、或者页面自己刷了一下**
+后台 AI 任务在跑的时候会占着 SQLite 的写锁，而网页写操作是「先读后写」：只要这期间有
+后台提交，SQLite 会直接判定快照过期并返回 `database is locked`（这种升级失败**不遵守**
+`busy_timeout`，所以不是等几秒就能过）。现在前端会明确提示「操作失败」而不是静默刷新。
+根治要动事务模式或给长任务加检查点提交，属于已知未修项。
+
+**中文文章下面出现了英文段落 / 中文标题配英文正文**
+两个历史成因，都已修掉写入路径：章节的中文结构曾经在逐节翻译之前就落库（翻译一失败就留下
+半截译文）；中文原生文章曾经也被翻成英文。库里若还有旧数据，用这两个脚本体检与修复
+（都先只报告，加 `--apply` 才写）：
+
+```bash
+python scripts/repair_half_translated.py          # 中文侧小节里其实是英文原文
+python scripts/cleanup_native_zh.py               # 中文原文却存了 title_en/digest_en
+```
+
 **想控制 API 花费**
 把 `ai.batch_size` 调小、调大 `fetch_interval_hours`、删掉 `config/default_sources.yaml` 里用不到的源。相关度判断是每篇 1 次调用，摘要 + 标签各 1 次。
 
@@ -339,8 +407,8 @@ ruff check . && mypy && pytest --cov=app
 
 | 想做的事 | 改哪里 |
 | --- | --- |
-| 新增/停用信源 | `config/default_sources.yaml` |
-| 换模型 | `.env` 的 `LLM_MODEL` |
+| 新增/停用信源 | 网页 `/sources`（推荐，改完即时生效）；批量默认值改 `config/default_sources.yaml` |
+| 换模型 | 网页 `/settings`（保存即生效，不用重启）；容器默认值仍看 `.env` 的 `LLM_MODEL` |
 | 改调度 | `config/settings.yaml` |
 | 改提示词（含速览写法） | `config/default_prompts.yaml` |
 | 邮件推送 | 新增 `app/notify/email.py`，在 `app/scheduler.py` 挂任务 |
@@ -362,13 +430,18 @@ app/
                     content.py 正文全文抽取 · images.py og:image 补图
   ai/              client.py 纯 HTTP 客户端 · prompts.py · processor.py 处理与降级
   report/          generator.py 日报生成与时间窗口
-  web/             routes.py 页面（热点流/单篇速览/归档）· api.py JSON · rss.py 订阅
+  web/             routes.py 页面（热点流/单篇速览/归档）· sources.py 信源管理
+                    settings.py 模型设置与用量 · api.py JSON（含重新获取任务）· rss.py 订阅
   utils/           logger.py · text.py
+  fetcher/lang.py  正文的语种判定（自适应语言用）
 config/            默认信源 / 分类 / 提示词 / 调度
 tests/             test_config · test_fetcher · test_ai · test_report · test_api
                     test_media（配图抽取）· test_content（正文抽取）
-                    test_search（搜索与分类过滤）· test_migration（老库补列）
-scripts/           init_check.py 启动自检
+                    test_search（搜索与分类过滤）· test_migration（老库补列与自愈）
+                    test_cluster（同题合并）· test_config · test_media_store
+scripts/           init_check.py 启动自检（--ping 测 LLM、--fetch 跑一次抓取）
+                    cleanup_native_zh.py 中文原文的英译残留清理
+                    repair_half_translated.py 半截译文的中文章节清理
 docs/              样例日报（Markdown / HTML）
 ```
 

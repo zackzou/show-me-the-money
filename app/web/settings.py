@@ -37,8 +37,9 @@ settings_router = APIRouter()
 
 SETTINGS_FILENAME = "llm_settings.json"
 USAGE_FILENAME = "llm_usage.jsonl"
-# 日志分页：每页条数
-LOG_PAGE_SIZE = 10
+# 日志分页：每页条数。带表头的日志表一页 15 条 —— 太少翻页翻得烦，
+# 太多右栏被拉得过长（15 行 ≈ 480px，和上面按天表的体量相当）。
+LOG_PAGE_SIZE = 15
 
 # 主流厂商预设：选一个就把 base/model 填好，key 自己粘。
 # 只列「OpenAI 兼容」或已知路径的；base 都能在页面上再改。
@@ -525,7 +526,7 @@ def _page(request: Request, *, notice: dict[str, str] | None = None,
     # 在前」排，不需要再包一层 reversed()。
     rows = _newest_first(read_usage(settings)) if settings else []
     summary = usage_summary(rows)
-    # 日志分页：每页 10 条。之前的实现把最近 20 条全铺出来，条目一多就变成一堵墙。
+    # 日志分页：条数见 LOG_PAGE_SIZE。之前的实现把最近 20 条全铺出来，条目一多就变成一堵墙。
     per_page = LOG_PAGE_SIZE
     total_pages = max(1, -(-len(rows) // per_page))
     log_page = max(1, min(log_page, total_pages))

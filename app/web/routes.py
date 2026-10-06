@@ -511,6 +511,58 @@ def _structure_matches(left: list[dict[str, Any]], right: list[dict[str, Any]]) 
     return all(bool(a.get("heading")) == bool(b.get("heading")) for a, b in zip(left, right, strict=True))
 
 
+def _split_sections(blocks: list[dict[str, Any]]) -> list[tuple[int, list[dict[str, Any]]]]:
+    """按小标题把块列表切成节，返回 ``[(节的起始块下标, [块, …])]``。
+
+    节 = 一个小标题块 + 它后面的段落块；开头没有标题的块自己算一节。
+    """
+    sections: list[tuple[int, list[dict[str, Any]]]] = []
+    for index, block in enumerate(blocks):
+        if block.get("heading") or not sections:
+            sections.append((index, []))
+        sections[-1][1].append(block)
+    return sections
+
+
+def _pair_sections(
+    en_blocks: list[dict[str, Any]],
+    en_slots: list[list[dict[str, Any]]],
+    zh_blocks: list[dict[str, Any]],
+    zh_slots: list[list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    """把中英两套块按**节**配对，供模板做「中文一节 + 英文原文引用」的交错排版。
+
+    走到这里时两套块的分节结构已由 ``_structure_matches`` 保证一致（或已双双
+    退回平铺），所以按标题切开后节数相同、起始下标也对齐；配图槽按同样的
+    下标切给各节，图片在节内的相对位置不变。
+
+    脏数据兜底：万一节切不齐，整篇配成一对（视觉退回「中文在上、英文在下」），
+    绝不让英文凭空消失 —— 模板拿到空列表会只渲染中文，那比错位更糟。
+    """
+    if not en_blocks or not zh_blocks:
+        return []
+    en_sections = _split_sections(en_blocks)
+    zh_sections = _split_sections(zh_blocks)
+    en_starts = [start for start, _ in en_sections]
+    zh_starts = [start for start, _ in zh_sections]
+    if len(en_sections) != len(zh_sections) or en_starts != zh_starts:
+        return [{
+            "zh_blocks": zh_blocks, "zh_slots": list(zh_slots),
+            "en_blocks": en_blocks, "en_slots": list(en_slots),
+        }]
+    en_bounds = en_starts + [len(en_blocks) + 1]
+    zh_bounds = zh_starts + [len(zh_blocks) + 1]
+    pairs: list[dict[str, Any]] = []
+    for index, ((_, en_sec), (_, zh_sec)) in enumerate(zip(en_sections, zh_sections, strict=True)):
+        pairs.append({
+            "zh_blocks": zh_sec,
+            "zh_slots": zh_slots[zh_bounds[index]:zh_bounds[index + 1]],
+            "en_blocks": en_sec,
+            "en_slots": en_slots[en_bounds[index]:en_bounds[index + 1]],
+        })
+    return pairs
+
+
 def reading_stats(text: str) -> dict[str, Any]:
     """正文规模与预计阅读时长。
 
@@ -798,6 +850,13 @@ def story(
     plain_en = sum(1 for b in marked if not b.get("heading"))
     plain_zh = sum(1 for b in marked_zh if not b.get("heading"))
     item["shots_zh"] = _image_slots_for_blocks(_shift_anchors(anchors, plain_en, plain_zh), marked_zh)
+    # 双语正文按**节**交错（用户图 1 的诉求）：中文一节读完，紧跟这一节的英文
+    # 原文（引用样式），而不是「整篇中文 → 整篇英文」两大块 —— 后者读者要滚过
+    # 全部中文才能对到第一段英文，滚着滚着就以为双语没了。
+    # 按「节」而不是按「段」配对：译文是重新写成的中文，段数与原文本来就不对应
+    # （实测 45 段压成 15 段），段级交替必然错位；节级配对由上面的结构对称
+    # 校验兜底 —— 走到这里两边的节边界一定一致（对称，或已双双退回平铺一节）。
+    item["body_pairs"] = _pair_sections(marked, item["shots"], marked_zh, item["shots_zh"])
     # 本文目录指向**读者当前看到的那一版**：有译文就指译文的小标题。
     # 译文的段落数可能与原文不同（翻译失败的那几段会被丢掉），
     # 拿原文的下标去点译文的标题会跳错位置甚至跳到不存在的锚点。

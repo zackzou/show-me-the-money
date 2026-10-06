@@ -205,11 +205,32 @@
           "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
         }
       }).then(function (r) {
+        // 5xx 往往是后台 AI 任务占着 SQLite 写锁（SQLITE_BUSY_SNAPSHOT），
+        // 服务端已经重试过几次了还是没拿到。这时**必须把失败说出来** ——
+        // 早先统一 location.reload()，用户看到的是「列表变了一下、什么提示都
+        // 没有」，只能以为按钮没生效，然后反复点。
+        if (!r.ok) {
+          return r.json().catch(function () { return null; }).then(function (b) {
+            var why = (b && (b.detail || b.reason)) || ("HTTP " + r.status);
+            fail(url, why);
+          });
+        }
         return r.json().catch(function () { return null; }).then(function (d) {
-          if (!d) { location.reload(); return; }
+          if (!d) { fail(url, "服务返回了空响应"); return; }
           apply(d);
         });
-      }).catch(function () { location.reload(); });
+      }).catch(function (err) {
+        fail(url, (err && err.message) || "网络中断");
+      });
+    }
+
+    // 失败：撤掉行上的忙碌态、给一条明确提示、恢复按钮可用。
+    // 不刷新页面 —— 刷了也看不到失败，等于把问题藏起来。
+    function fail(url, why) {
+      document.querySelectorAll(".srcrow.busy, .srow.busy").forEach(function (r) {
+        r.classList.remove("busy");
+      });
+      showNotice({ kind: "error", text: "操作失败：" + why + "（后台正在跑 AI 任务，稍后再试）" });
     }
 
     // 表单提交（试抓 / 停用启用 / 删除 / 撤回）
