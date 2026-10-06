@@ -1915,3 +1915,140 @@ def test_irrelevant_article_stores_no_score(seeded_db, settings: Settings):
     assert status == "processed"
     assert article.relevance == 0
     assert article.score is None
+
+
+# ── _build_bilingual_sections：中文侧必须是译文，不能是英文原文 ────────
+# 这条路径此前**完全没有测试**，于是同一个 bug 活了下来：1267881 只修了
+# process_article，而 backfill_translations / backfill_sections 走的都是
+# _build_bilingual_sections，它把 section_pair(chinese=True) 的英文原文直接写进
+# body_sections_zh。实测清完 0 篇半截译文，调度器补一轮排版又回到 33 篇。
+
+# structure_sections 有两道闸，fixture 必须同时满足：
+#   1. 段落数 > 3（3 段以内不值得分）
+#   2. 结构化后保留的文字 ≥ 原文的八成（超两成就整篇放弃）
+# 所以「原文」与「模型返回的小节」用同一批句子拼，保留率才是 100%。
+_EN_PARAS = [
+    "OpenAI shipped a new agent framework aimed at production deployments.",
+    "The framework bundles tool calling, state management and tracing together.",
+    "Early adopters report fewer integration bugs than with their own stacks.",
+    "The team says pricing stays flat through the end of the year.",
+    "Documentation and sample projects are available on GitHub today.",
+]
+_ZH_PARAS = [
+    "这家公司发布了面向生产部署的新一代智能体框架。",
+    "这套框架把工具调用、状态管理与链路追踪打包在一起。",
+    "早期用户反馈集成阶段的缺陷比自己搭要少。",
+    "官方表示年底前价格保持不变。",
+    "文档与示例项目今天已在 GitHub 上公开。",
+]
+
+
+def _english_body() -> str:
+    return "\n\n".join(_EN_PARAS)
+
+
+def _chinese_body() -> str:
+    return "\n\n".join(_ZH_PARAS)
+
+
+def _sections_json(paras: list[str], heads: tuple[str, str] = ("引子", "Intro")) -> str:
+    """把同一批句子分成两节返回，保留率 100%，骗得过丢字校验。"""
+    cut = max(1, len(paras) // 2)
+    groups = [paras[:cut], paras[cut:]]
+    return json.dumps([
+        {"h_zh": heads[0], "h_en": heads[1], "paras": groups[0]},
+        {"h_zh": "正文", "h_en": "Body", "paras": groups[1]},
+    ], ensure_ascii=False)
+
+
+def _sections_client(fail_from: int | None = None) -> LLMClient:
+    """排版提示词回双语 JSON；英译中提示词回中文译文（fail_from 起返回空串）。"""
+    state = {"n": 0}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if "责任编辑" in prompt:
+            # 排版结果必须是**英文**原文：translate_to_chinese 开头就
+            # `if not looks_english(text): return None`，拿中文去喂它会直接被拒。
+            return httpx.Response(200, json={"choices": [
+                {"message": {"content": _sections_json(_EN_PARAS)}}]})
+        if "用中文重新写成" in prompt:
+            state["n"] += 1
+            if fail_from is not None and state["n"] >= fail_from:
+                return httpx.Response(200, json={"choices": [{"message": {"content": ""}}]})
+            out = "\n\n".join(_ZH_PARAS)
+            return httpx.Response(200, json={"choices": [{"message": {"content": out}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "内容"}}]})
+
+    return _client(handler, retries=0)
+
+
+def test_build_sections_translates_the_chinese_side(seeded_db, settings: Settings):
+    """英文原文：中文侧小节里必须是中文译文，不是英文原文。"""
+    from app.ai.processor import _build_bilingual_sections
+
+    client = _sections_client()
+    try:
+        with session_scope() as session:
+            article = make_article(session, title="English title", status="processed", relevance=1)
+            article.content_full = _english_body()
+            article.content_zh = "整篇中文译文"
+            ok = _build_bilingual_sections(client, settings.prompts, article, article.content_full)
+        assert ok, "英文原文应能排版并翻出中文侧"
+        zh = json.loads(article.body_sections_zh)
+        en = json.loads(article.body_sections)
+        assert len(zh) == len(en) == 2
+        for sec in zh:
+            assert any("\u4e00" <= ch <= "\u9fff" for ch in sec["t"]), \
+                f"中文侧小节里应该是译文，实际是：{sec['t'][:40]}"
+        for sec in en:
+            assert sec["t"], "英文侧不该为空"
+        assert zh[0]["h"] == "引子"
+        assert en[0]["h"] == "Intro"
+    finally:
+        client.close()
+
+
+def test_build_sections_writes_nothing_when_a_translation_fails(seeded_db, settings: Settings):
+    """缺一节译文就整篇不写，绝不留「中文小标题 + 英文段落」的半截结构。"""
+    from app.ai.processor import _build_bilingual_sections
+
+    client = _sections_client(fail_from=2)   # 第二节翻不出来
+    try:
+        with session_scope() as session:
+            article = make_article(session, title="English title", status="processed", relevance=1)
+            article.content_full = _english_body()
+            article.content_zh = "整篇中文译文"
+            ok = _build_bilingual_sections(client, settings.prompts, article, article.content_full)
+        assert ok is False, "有一节翻不出来就不该算成功"
+        assert article.body_sections_zh is None, "半截译文不能落库"
+        assert article.body_sections is None, "英文侧也不该先写（否则就成了单侧）"
+    finally:
+        client.close()
+
+
+def test_build_sections_chinese_source_writes_zh_side_directly(seeded_db, settings: Settings):
+    """中文原文：t 本来就是中文终稿，直接落库并把 content_zh 标成已译完。"""
+    from app.ai.processor import _build_bilingual_sections
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        prompt = request.content.decode("utf-8", "ignore")
+        if "责任编辑" in prompt:
+            body = "\n\n".join(_ZH_PARAS)
+            return httpx.Response(200, json={"choices": [
+                {"message": {"content": _sections_json(body.split("\n\n"))}}]})
+        return httpx.Response(200, json={"choices": [{"message": {"content": "内容"}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        with session_scope() as session:
+            article = make_article(session, title="中文标题", status="processed", relevance=1)
+            article.content_full = _chinese_body()
+            ok = _build_bilingual_sections(client, settings.prompts, article, article.content_full)
+        assert ok
+        zh = json.loads(article.body_sections_zh)
+        assert zh[0]["h"] == "引子"
+        assert article.content_zh == "", "中文原文没有译文，content_zh 应为空串"
+        assert article.body_sections is None, "中文原文不该有英文侧章节"
+    finally:
+        client.close()
