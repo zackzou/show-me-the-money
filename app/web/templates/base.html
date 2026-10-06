@@ -679,6 +679,25 @@
       document.documentElement.setAttribute("data-lang", "zh");
     }
   })();
+  // 内部链接一律本页跳转：某些内嵌浏览器外壳（ZCode 内置浏览器等）会把普通
+  // <a> 点击开成新标签页，用户点标题/分类就攒一堆 tab。页面侧用
+  // preventDefault + location.assign 接管 —— JS 导航发生在当前文档上，
+  // 外壳无法把它劫持成新标签；普通浏览器里结果与默认行为完全一致。
+  // 带修饰键（明确的新标签意图）或本身带 target（外链「打开原文」）的不拦。
+  document.addEventListener("click", function (e) {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
+    var a = e.target.closest("a");
+    if (!a || a.target) return;
+    var raw = a.getAttribute("href") || "";
+    if (!raw || raw.charAt(0) === "#" ||
+        raw.indexOf("mailto:") === 0 || raw.indexOf("javascript:") === 0) return;
+    var url;
+    try { url = new URL(raw, location.href); } catch (err) { return; }
+    if (url.origin !== location.origin) return;   // 外链不拦，交给 target=_blank
+    if (url.href === location.href) return;       // 同一地址，保留默认行为（置顶等）
+    e.preventDefault();
+    location.assign(url.href);
+  });
   // 图片页内放大（替代「跳原站看图」）
   var lb = document.getElementById("lb"), lbImg = document.getElementById("lb-img"), lbN = document.getElementById("lb-n");
   function show(src, n, total) { lbImg.src = src; lbN.textContent = total > 1 ? (n + 1) + " / " + total : ""; lb.classList.add("on"); }

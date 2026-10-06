@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Annotated, Any
 from urllib.parse import parse_qs
 
@@ -231,6 +232,9 @@ def _row(row: Source, stats: dict[int, dict[str, Any]]) -> dict[str, Any]:
         "lang": row.lang,
         "enabled": bool(row.enabled),
         "created": row.created_at.strftime("%Y-%m-%d") if row.created_at else "",
+        # 停用原因展示：存量旧行没有记录，如实说「历史停用」而不是编一个。
+        "disabled_reason": row.disabled_reason or ("历史停用（原因未记录）" if not row.enabled else ""),
+        "disabled_at": row.disabled_at.strftime("%Y-%m-%d %H:%M") if row.disabled_at else "",
         **stats.get(row.id, {"total": 0, "latest": None}),
     }
 
@@ -427,7 +431,12 @@ async def sources_create(
             status=400,
         )
 
-    session.add(Source(name=name, url=url, type="rss", lang=lang, enabled=enabled, created_at=now_local()))
+    session.add(Source(
+        name=name, url=url, type="rss", lang=lang, enabled=enabled, created_at=now_local(),
+        # 添加时就没勾「启用」的，同样记录原因，别让「已停用」列表里出现来历不明的行
+        disabled_reason="添加时未启用" if not enabled else None,
+        disabled_at=now_local() if not enabled else None,
+    ))
     session.commit()
     detail = f"，读到 {probe['count']} 条" + (f"，例如「{probe['sample']}」" if probe["sample"] else "")
     if enabled:
@@ -451,6 +460,13 @@ async def sources_toggle(
     tab = _clean_tab(form.get("tab"))
     page = _clean_page(form.get("page"))
     row.enabled = 0 if row.enabled else 1
+    # 停用要留痕：什么时候、为什么。启用时一并清掉，不留过期信息。
+    if not row.enabled:
+        row.disabled_reason = "手动停用"
+        row.disabled_at = now_local()
+    else:
+        row.disabled_reason = None
+        row.disabled_at = None
     session.commit()
     verb = "已启用" if row.enabled else "已停用"
     # 启停会改变它属于哪个 tab：停用之后它从「启用中」消失。停在当前页，
@@ -549,14 +565,33 @@ async def sources_restore(
 async def sources_probe(
     request: Request, source_id: IdParam, session: Session = Depends(get_session)
 ) -> HTMLResponse:
-    """手动试抓一个已存在的源：用于排查「最近没抓到东西」。"""
+    """手动试抓一个已存在的源：用于排查「最近没抓到东西」。
+
+    JSON 路径带一份结构化的 ``probe`` 详情（耗时/条数/样例/识别语言/错误），
+    前端拿它渲染进度条与结果面板；无 JS 的表单路径仍走整页 notice。
+    """
     row = session.get(Source, source_id)
     if row is None or row.deleted:
         raise HTTPException(status_code=404, detail="信源不存在")
     form = await _form(request)
     tab = _clean_tab(form.get("tab"))
     page = _clean_page(form.get("page"))
+    started = time.time()
     probe = await run_in_threadpool(_probe, row.url)
+    probe["ms"] = int((time.time() - started) * 1000)
+    if _wants_json(request):
+        if probe["ok"]:
+            text = f"{row.name}：正常，读到 {probe['count']} 条"
+        else:
+            text = f"{row.name}：{probe['error']}"
+        return JSONResponse(
+            {
+                "ok": probe["ok"],
+                "notice": {"kind": "ok" if probe["ok"] else "error", "text": text},
+                "probe": probe,
+            },
+            status_code=200 if probe["ok"] else 400,
+        )
     if probe["ok"]:
         text = f"{row.name}：正常，读到 {probe['count']} 条" + (
             f"，例如「{probe['sample']}」" if probe["sample"] else ""

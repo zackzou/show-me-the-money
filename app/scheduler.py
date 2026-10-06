@@ -120,17 +120,9 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
         run_merge_job(settings)
     except Exception as exc:
         log.warning("合并重复内容失败：%s", exc)
-    # 补译正文：正文翻译是可选步骤，限流或抖动失败的文章到这里再试一次
-    try:
-        if settings.i18n.enabled and settings.i18n.translate_content:
-            translator = _llm_client(settings)
-            try:
-                with session_scope() as session:
-                    log.info("补译中文正文：%s", backfill_translations(session, translator, settings))
-            finally:
-                translator.close()
-    except Exception as exc:
-        log.warning("补译中文正文失败：%s", exc)
+    # 补译正文已拆成独立的 30 分钟任务（run_translate_backfill_job）：
+    # 原来挂在这里尾部，而处理批次最多 60 篇、慢网关下一轮要一个多小时，
+    # 补译永远排不到 —— 翻译失败的文章实际重试间隔变成「处理总时长 + 2 小时」。
     # 早报推送语：有中文导读的顺手写一段，手机端直接读（不依赖正文翻译开关）
     try:
         if settings.i18n.enabled:
@@ -158,6 +150,28 @@ def run_process_job(settings: Settings) -> dict[str, Any]:
     except Exception as exc:  # 日报失败不该把处理统计一起丢掉
         log.warning("今日日报刷新失败：%s", exc)
     return stats
+
+
+def run_translate_backfill_job(settings: Settings) -> dict[str, Any]:
+    """独立补译任务：把缺中文版（标题/导读/正文）的文章轮转着补齐。
+
+    为什么从 run_process_job 尾部拆出来独立跑：处理批次最多 60 篇，
+    英文长文的正文翻译是内联的（慢网关下一篇几分钟），整轮处理动辄
+    一个多小时 —— 补译排在轮末就永远轮不到，翻译失败的文章实际重试
+    间隔变成「处理总时长 + 2 小时」。独立成 30 分钟一跳的任务后，
+    失败半小时内必有一次自动重试；没有候选时零 LLM 调用，纯空转查询。
+    """
+    if not (settings.i18n.enabled and settings.i18n.translate_content):
+        return {"candidates": 0, "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
+    translator = _llm_client(settings)
+    try:
+        with session_scope() as session:
+            stats = backfill_translations(session, translator, settings)
+            if stats.get("candidates"):
+                log.info("补译中文正文（独立任务）：%s", stats)
+            return stats
+    finally:
+        translator.close()
 
 
 def run_content_job(settings: Settings) -> dict[str, Any]:
@@ -523,6 +537,17 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         _offset_trigger(_process_trigger(settings), PROCESS_JOB_OFFSET_SECONDS),
         args=[settings],
         id="process_job",
+        replace_existing=True,
+    )
+    # 补译独立高频任务：不等整轮处理（见 run_translate_backfill_job 的说明）。
+    # 与 process_job 并发是安全的：两边各自短事务写库，SQLite 写锁最多让
+    # 其中一方重试；同一篇文章被两边同时翻的最坏结果是多花一次调用，
+    # 落库时后写覆盖先写，内容一致性不受影响。
+    scheduler.add_job(
+        run_translate_backfill_job,
+        IntervalTrigger(seconds=1800),
+        args=[settings],
+        id="translate_backfill_job",
         replace_existing=True,
     )
     scheduler.add_job(

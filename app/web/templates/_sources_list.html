@@ -25,7 +25,10 @@
           {# 回车或失焦即存，只换这一块列表。 #}
           <button type="button" class="nm" data-rename="{{ s.id }}"
                   title="点一下改名">{{ s.name }}</button>
-          {% if not s.enabled %}<span class="tag-off">已停用</span>{% endif %}
+          {% if not s.enabled %}
+            <span class="tag-off" title="{{ s.disabled_reason }}{% if s.disabled_at %} · {{ s.disabled_at }}{% endif %}">已停用</span>
+            <span class="off-why">{{ s.disabled_reason }}{% if s.disabled_at %} · {{ s.disabled_at }}{% endif %}</span>
+          {% endif %}
           <span class="tag-lang {{ 'auto' if s.lang == 'auto' else '' }}"
                 title="{{ lang_labels.get(s.lang, s.lang) }}">
             {{ '自适应' if s.lang == 'auto' else ('中文' if s.lang == 'zh' else 'EN') }}
@@ -37,6 +40,8 @@
           {%- if s.latest %} · 最近 {{ s.latest }}{% endif %}
           {%- if s.created %} · 添加于 {{ s.created }}{% endif %}
         </div>
+        {# 试抓结果面板：JS 填充（进行中进度条 / 成功 / 失败详情），无 JS 时保持隐藏 #}
+        <div class="probe-out" id="probe-out-{{ s.id }}" hidden></div>
       </div>
       <div class="src-act">
         <form method="post" action="/sources/{{ s.id }}/probe" class="inline">

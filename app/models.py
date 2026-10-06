@@ -29,6 +29,11 @@ class Source(Base):
     # 被悄悄抹掉了。软删除保留归属，列表与抓取都不再包含它。
     deleted: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
+    # 停用原因与时间：列表里一排「已停用」时，用户最想知道的就是「什么时候、
+    # 为什么停的」。手动停用与「添加时未启用」都记录在案；升级前停用的存量行
+    # 没有记录（NULL），页面显示「历史停用，时间未记录」而不是装作知道。
+    disabled_reason: Mapped[str | None] = mapped_column(String(300))
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime)
 
     articles: Mapped[list[Article]] = relationship(back_populates="source")
 

@@ -119,6 +119,19 @@
                        font:inherit; font-size:14px; font-weight:600; }
   .tag-off { font-size:11px; font-weight:500; color:var(--faint); background:var(--chip);
              border-radius:5px; padding:2px 7px; }
+  /* 停用原因：跟在「已停用」标签后面，小一号灰一档，但读得清 */
+  .off-why { font-size:11.5px; color:var(--faint); }
+  /* 试抓结果面板：进行中（进度条+计时）/ 成功（绿）/ 失败（红+原因）三态 */
+  .probe-out { margin-top:8px; padding:9px 12px; border:1px solid var(--line); border-radius:8px;
+               background:var(--bg); font-size:12.5px; line-height:1.7; color:var(--muted); }
+  .probe-out.ok { border-color:rgba(31,138,90,.4); background:rgba(31,138,90,.06); color:#1f8a5a; }
+  .probe-out.failed { border-color:rgba(200,60,50,.4); background:rgba(200,60,50,.06); color:#c0392b; }
+  .probe-bar { position:relative; height:4px; margin-top:8px; border-radius:999px;
+               background:var(--chip); overflow:hidden; }
+  .probe-bar i { position:absolute; top:0; bottom:0; width:32%; border-radius:999px;
+                 background:var(--accent); animation:pb-slide 1.1s ease-in-out infinite; }
+  @keyframes pb-slide { 0% { left:-32%; } 100% { left:100%; } }
+  @media (prefers-reduced-motion:reduce) { .probe-bar i { animation:none; left:34%; } }
   .tag-lang { font-size:11px; font-weight:600; color:var(--accent); background:var(--accent-soft);
               border-radius:5px; padding:2px 7px; }
   .tag-lang.auto { color:var(--muted); background:var(--chip); font-weight:500; }
@@ -241,8 +254,71 @@
       if (confirmText && !window.confirm(confirmText)) { e.preventDefault(); return; }
       e.preventDefault();
       var row = form.closest(".srcrow, .srow");
+      if (form.getAttribute("action", "").indexOf("/probe") >= 0) {
+        probeFlow(form, row);
+        return;
+      }
       if (row) row.classList.add("busy");
       send(form.getAttribute("action"), urlencoded(form));
+    }
+
+    // 试抓走自己的流程：结果落在这一行的面板里（进度条 → 成功/失败详情），
+    // 不替换整个列表 —— 替换会把刚渲染出来的结果面板一起冲掉。
+    // 试抓要真的去拉一次远端 feed（最长 ~12s），必须让用户看到「正在抓」。
+    function probeFlow(form, row) {
+      var m = form.getAttribute("action", "").match(/\/sources\/(\d+)\/probe/);
+      var out = m ? document.getElementById("probe-out-" + m[1]) : null;
+      var btn = form.querySelector("button");
+      if (btn) { btn.disabled = true; btn.textContent = "抓取中…"; }
+      if (row) row.classList.add("busy");
+      var started = Date.now();
+      if (out) {
+        out.hidden = false;
+        out.className = "probe-out";
+        out.innerHTML = "正在抓取并解析…" +
+          '<span class="pb-sec"></span>' +
+          '<div class="probe-bar"><i></i></div>';
+      }
+      var secEl = out ? out.querySelector(".pb-sec") : null;
+      var tick = window.setInterval(function () {
+        if (secEl) secEl.textContent = " " + Math.round((Date.now() - started) / 1000) + "s";
+      }, 500);
+      fetch(form.getAttribute("action"), {
+        method: "POST",
+        body: urlencoded(form),
+        credentials: "same-origin",
+        headers: {
+          "X-Smtt-Partial": "1",
+          "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8"
+        }
+      }).then(function (r) {
+        return r.json().then(function (d) { return { ok: r.ok, d: d }; });
+      }).then(function (res) {
+        window.clearInterval(tick);
+        if (row) row.classList.remove("busy");
+        if (btn) { btn.disabled = false; btn.textContent = "试抓"; }
+        var p = (res.d && res.d.probe) || {};
+        if (!out) { showNotice(res.d && res.d.notice); return; }
+        if (res.ok) {
+          var langNote = p.lang === "zh" ? " · 识别为中文站（直接用原文）"
+            : p.lang === "en" ? " · 识别为英文站（自动翻译中文版）" : "";
+          out.className = "probe-out ok";
+          out.innerHTML = "<b>✓ 成功</b> · 读到 " + esc(p.count) + " 条 · 耗时 " +
+            esc(p.ms) + "ms" + langNote +
+            (p.sample ? "<br>最新一条：「" + esc(p.sample) + "」" : "");
+        } else {
+          out.className = "probe-out failed";
+          out.innerHTML = "<b>✕ 失败</b> · " + esc(p.error || (res.d && res.d.notice && res.d.notice.text) || "未知原因");
+        }
+      }).catch(function (err) {
+        window.clearInterval(tick);
+        if (row) row.classList.remove("busy");
+        if (btn) { btn.disabled = false; btn.textContent = "试抓"; }
+        if (out) {
+          out.className = "probe-out failed";
+          out.innerHTML = "<b>✕ 失败</b> · " + esc((err && err.message) || "网络中断");
+        }
+      });
     }
 
     // 名字就地编辑：回车或失焦即存

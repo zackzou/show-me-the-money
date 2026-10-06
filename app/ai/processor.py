@@ -206,9 +206,12 @@ TRANSLATE_CHUNK_MIN_CHARS = 400
 # 单块最多试几次。网关偶尔会把输出截断在半句上（实测停在「…在7」），
 # 长度校验会拒掉，先重试一次（多数截断是随机的）。
 TRANSLATE_CHUNK_ATTEMPTS = 2
-# 写不出来的块最多再对半拆几层（见 _rewrite_chunk）。拆到 3 层 ≈ 8 段原文，
-# 再深就说明这段本身有问题，不该无限拆下去。
-MAX_REWRITE_SPLIT_DEPTH = 3
+# 写不出来的块最多再对半拆几层（见 _rewrite_chunk）。
+# 实测 ag/gemini 网关对部分内容的输出会被截断在几百字：拆到 3 层
+# （≈325 字符/块）仍然不够小，长文（文章 520：14.7k 字符）6 块里 5 块
+# 全废、整篇判失败。放宽到 6 层（≈40 字符/块），网关的上限再低也压得进去；
+# 拆得越深块越小、单次调用越快，总成本反而更低。
+MAX_REWRITE_SPLIT_DEPTH = 6
 # 参与翻译的正文长度上限（与抓取时的上限对齐）
 MAX_CONTENT_CHARS = 40_000
 # 重写后的中文长度下限（占原文的比例）。
@@ -543,6 +546,29 @@ def chunk_for_rewrite(paragraphs: list[str], *, budget: int = TRANSLATE_CHUNK_CH
     return chunks
 
 
+def _halve_by_sentence(text: str) -> list[str]:
+    """没有空行的整段也能对半拆：按句子边界切成大致等长的两半。
+
+    为什么要它：``_rewrite_chunk`` 的自适应拆块原来只按 ``\\n\\n`` 分段，
+    遇到单个长段落就 ``len(parts) < 2`` 直接放弃 —— 这一块永远翻不出来，
+    整篇跟着判废。按句子对半，递归总能把块压到网关输出上限之内。
+    """
+    sentences = re.findall(r"[^.!?。！？]+[.!?。！？]+[\"')]?\s*|[^.!?。！？]+$", text)
+    if len(sentences) < 2:
+        return [text]
+    mid = len(text) // 2
+    acc = 0
+    cut = 1
+    for i, piece in enumerate(sentences[:-1]):
+        acc += len(piece)
+        if acc >= mid:
+            cut = i + 1
+            break
+    left = "".join(sentences[:cut]).strip()
+    right = "".join(sentences[cut:]).strip()
+    return [left, right] if left and right else [text]
+
+
 def _rewrite_chunk(
     client: LLMClient, prompts: PromptsConfig, chunk: str, *, depth: int = 0
 ) -> tuple[str, bool]:
@@ -567,8 +593,13 @@ def _rewrite_chunk(
         translated = ""
 
     parts = chunk.split("\n\n")
-    if depth >= MAX_REWRITE_SPLIT_DEPTH or len(parts) < 2:
+    if depth >= MAX_REWRITE_SPLIT_DEPTH:
         return "", False
+    if len(parts) < 2:
+        # 整段没有空行（散文/说明文常见）：按句子对半，别在这里卡死
+        parts = _halve_by_sentence(chunk)
+        if len(parts) < 2:
+            return "", False
     middle = len(parts) // 2
     pieces = ["\n\n".join(parts[:middle]), "\n\n".join(parts[middle:])]
     done: list[str] = []
@@ -679,13 +710,12 @@ def resolves_native_zh(article: Article, source_lang: str = LANG_AUTO) -> bool:
 
     auto（默认）：按**这篇自己的正文**判定。同一个源里中英文混排很常见，
     按站点一刀切会把中文文章也翻一遍。
-    显式 zh/en：信源上的设置是用户的明确指定，压过内容判断 —— 否则信源选了
-    「中文」，只因为抓到的正文里混了两句英文就被翻成双语；选了「英文」却因为
-    正文全是中文而不产出中文版，正是用户不想要的。
+    显式 zh：只代表「这个源以中文为主」，**不代表里面每一篇都是中文** ——
+    中文站转载英文原文并不少见。按用户的明确要求（英文文章必须出中文版），
+    内容实际是英文的仍要走翻译；zh 的语义收窄为「不产出英文版那套字段」。
+    显式 en：永远当英文处理。
     """
     forced = resolve_lang(source_lang)
-    if forced == LANG_ZH:
-        return True
     if forced == LANG_EN:
         return False
     return not article_is_foreign(article.title or "", body_for_lang(article))

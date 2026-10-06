@@ -204,6 +204,8 @@ def test_scheduler_defaults_to_interval_triggers(settings: Settings):
         "fetch_job": "IntervalTrigger",
         "content_job": "IntervalTrigger",
         "process_job": "IntervalTrigger",
+        # 补译独立成 30 分钟一跳的任务，不再排队等整轮处理
+        "translate_backfill_job": "IntervalTrigger",
         "report_job": "CronTrigger",
         "cleanup_job": "CronTrigger",
     }

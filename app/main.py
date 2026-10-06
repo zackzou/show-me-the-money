@@ -26,6 +26,7 @@ from app.scheduler import (
     run_content_job,
     run_fetch_job,
     run_process_job,
+    run_translate_backfill_job,
     shutdown_scheduler,
     start_scheduler,
 )
@@ -120,6 +121,12 @@ def _safe_startup_run(settings: Settings) -> None:
         run_process_job(settings)
     except Exception as exc:
         log.warning("启动处理失败：%s", exc)
+    try:
+        # 启动时先补一轮译（缺中文版的文章每次重启都立即被捞起）；
+        # 之后由独立的 30 分钟任务持续轮转（见 run_translate_backfill_job）。
+        run_translate_backfill_job(settings)
+    except Exception as exc:
+        log.warning("启动补译失败：%s", exc)
 
 
 def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> FastAPI:

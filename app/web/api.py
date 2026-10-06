@@ -281,6 +281,97 @@ def refetch_status(article_id: IdParam) -> dict[str, Any]:
         return {"state": job["state"], "reason": job.get("reason")}
 
 
+# ── 立即翻译：把英文正文手工补译成中文（后台执行 + 轮询） ──────────────
+# 为什么需要它：正文翻译是「全有或全无」（任何一块失败整篇不采用，宁缺毋滥，
+# 见 translate_to_chinese），自动补译每 2 小时才轮一次；用户点开一篇英文文章
+# 想读中文时，不该等下一轮调度 —— 给一个确定性的手动出口。
+_translate_jobs: dict[int, dict[str, Any]] = {}
+_translate_lock = threading.Lock()
+
+
+def _translate_set(article_id: int, state: str, reason: str | None = None) -> None:
+    with _translate_lock:
+        _translate_jobs[article_id] = {"state": state, "reason": reason, "done_at": time.time()}
+
+
+def _run_translate(article_id: int, settings: Settings | None) -> None:
+    """后台任务：用当前配置的 LLM 把这篇的英文正文整篇译成中文并落库。"""
+    from app.ai.processor import translate_to_chinese
+    from app.scheduler import _llm_client
+
+    if settings is None:
+        _translate_set(article_id, "failed", "设置未加载，无法创建 AI 客户端")
+        return
+    try:
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            if article is None:
+                _translate_set(article_id, "failed", "文章不存在")
+                return
+            text = (article.content_full or article.content or "").strip()
+        if not text:
+            _translate_set(article_id, "failed", "这篇没有可翻译的正文")
+            return
+        client = _llm_client(settings)
+        try:
+            translated = translate_to_chinese(client, settings.prompts, text)
+        finally:
+            client.close()
+        if not translated:
+            # 多数是模型输出没过完整性校验（长文偶尔要试两次），如实说明可重试
+            _translate_set(
+                article_id, "failed",
+                "翻译未通过完整性校验（长文偶尔需要再试一次），请重试",
+            )
+            return
+        with session_scope() as session:
+            article = session.get(Article, article_id)
+            if article is None:
+                _translate_set(article_id, "failed", "文章不存在")
+                return
+            article.content_zh = translated
+            # 中文侧章节结构留着 NULL：展示层会按译文段落启发式排小标题；
+            # 下一轮补章节任务（backfill_sections）会给出对齐的正式结构。
+            article.body_sections_zh = None
+        _translate_set(article_id, "ok")
+    except Exception as exc:  # 后台任务必须落地状态，否则前端永远轮询
+        _translate_set(article_id, "failed", f"翻译失败：{exc}"[:300])
+
+
+@api_router.post("/articles/{article_id}/translate")
+def translate_article(
+    article_id: IdParam, background_tasks: BackgroundTasks, request: Request,
+    session: Session = Depends(get_session),
+) -> dict[str, str]:
+    """把这篇的英文正文立即翻译成中文（后台执行，轮询 translate-status）。"""
+    article = session.get(Article, article_id)
+    if article is None:
+        raise HTTPException(status_code=404, detail="文章不存在")
+    if (article.content_zh or "").strip():
+        # 已经有译文就不用再花一次长文翻译的钱
+        return {"state": "ok", "reason": "已有中文译文"}
+    with _translate_lock:
+        running = _translate_jobs.get(article_id, {}).get("state") == "running"
+        if not running:
+            _translate_jobs[article_id] = {"state": "running", "reason": None, "done_at": time.time()}
+    if running:
+        return {"state": "running"}
+    background_tasks.add_task(
+        _run_translate, article_id, getattr(request.app.state, "settings", None)
+    )
+    return {"state": "running"}
+
+
+@api_router.get("/articles/{article_id}/translate-status")
+def translate_status(article_id: IdParam) -> dict[str, Any]:
+    """翻译任务当前状态：idle / running / ok / failed（带原因）。"""
+    with _translate_lock:
+        job = _translate_jobs.get(article_id)
+        if job is None:
+            return {"state": "idle", "reason": None}
+        return {"state": job["state"], "reason": job.get("reason")}
+
+
 @api_router.get("/reports", response_model=list[ReportOut])
 def list_reports(limit: int = 100, session: Session = Depends(get_session)):
     statement = select(DailyReport).order_by(DailyReport.date.desc()).limit(max(1, min(limit, 500)))

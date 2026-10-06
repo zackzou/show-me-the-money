@@ -48,6 +48,10 @@
   </aside>
 
   <article>
+    {# 返回上一页：优先真的「回上一页」（保住来源页的分类/搜索/分页状态），
+       直接打开本页（无站内来源）时退回首页。移动端侧栏被排到页底，这个
+       按钮是文章页唯一一眼可见的返回入口。 #}
+    <a href="/" class="backtop" id="backtop">← 返回</a>
     <h1 class="body-title">{{ bi(item.title, item.title_en) }}</h1>
     {% if item.category or item.topics %}
       <p class="sub">
@@ -137,7 +141,12 @@
     {% elif item.body_blocks %}
       <div class="rule"></div>
       <section class="sec">
-        <div class="sec-t plain">正文{% if item.body_is_foreign %}<span class="t-note">原文为英文，暂无中文译文</span>{% endif %}</div>
+        <div class="sec-t plain">正文{% if item.body_is_foreign %}
+          <span class="t-note">中文版自动生成中 · 后台每半小时重试</span>
+          <button type="button" class="tr-btn" id="translate-btn"
+                  data-article-id="{{ item.id }}"
+                  title="系统会自动重试翻译；等不及可以点这里立刻用当前配置的模型翻译（后台执行，长文需要几分钟）">立即重试翻译</button>
+        {% endif %}</div>
         <div class="prose orig">{{ prose(item.body_blocks, item.shots) }}</div>
       </section>
     {% elif item.content_preview %}
@@ -387,6 +396,30 @@
     .lead-p { font-size:16px; line-height:1.9; }
     .rail { padding:14px; }
   }
+  /* 文章页顶部返回按钮：原来唯一的「← 返回」在左栏侧栏里，移动端被排到
+     页面最底（order:3），基本没人看得见。这个药丸按钮放在大标题上方，
+     桌面/手机都是进文章后的第一眼。 */
+  .backtop { display:inline-flex; align-items:center; gap:7px; margin-bottom:16px;
+             padding:9px 18px 9px 14px; border:1px solid var(--line); border-radius:999px;
+             background:var(--surface); color:var(--muted); font-size:13px; font-weight:600;
+             transition:color .15s, border-color .15s, transform .12s; }
+  .backtop:hover { color:var(--accent); border-color:var(--accent); transform:translateX(-2px); }
+  .backtop:active { transform:translateX(-2px) scale(.98); }
+
+  /* 立即翻译按钮：出现在「原文为英文，暂无中文译文」旁边。
+     样式对齐 .rf-btn（重新获取），但主色描边更醒目 —— 这是读者此刻最想要的动作。 */
+  .tr-btn { display:inline-flex; align-items:center; gap:5px; padding:5px 13px;
+            border:1px solid var(--accent); border-radius:999px; background:var(--accent-soft);
+            color:var(--accent); font-size:12px; font-weight:600; font-family:inherit;
+            line-height:1.5; cursor:pointer; white-space:nowrap; vertical-align:middle;
+            transition:filter .15s, border-color .15s; }
+  .tr-btn:hover { filter:brightness(.97); }
+  .tr-btn:disabled { cursor:default; opacity:.75; }
+  .tr-btn.running { border-color:var(--accent); animation:tr-pulse 1.2s ease-in-out infinite; }
+  @keyframes tr-pulse { 0%,100% { background:var(--accent-soft); } 50% { background:color-mix(in srgb, var(--accent-soft) 55%, transparent); } }
+  @media (prefers-reduced-motion:reduce) { .tr-btn.running { animation:none; } }
+  .tr-btn.ok { border-color:#1f8a5a; color:#1f8a5a; background:transparent; }
+  .tr-btn.failed { border-color:#b4443c; color:#b4443c; background:transparent; }
 </style>
 <script>
   // 悬浮跳转：只在正文足够长时出现，滚动位置同步成一条进度线
@@ -473,6 +506,71 @@
     if (window.ResizeObserver) { new ResizeObserver(sync).observe(document.body); }
     window.addEventListener("load", sync);
     sync();
+  })();
+
+  // 返回按钮：站内进来时走 history.back()（保住来源页的分类/搜索/分页状态），
+  // 直接打开本页时没有可回的站内历史，交给 href="/" 回首页。
+  // 注意与 base.html 的「内部链接本页跳转」拦截器配合：这里 preventDefault 之后，
+  // 拦截器会因 defaultPrevented 直接让路，不会抢走这次点击。
+  (function () {
+    var b = document.getElementById("backtop");
+    if (!b) return;
+    b.addEventListener("click", function (e) {
+      var sameSite = document.referrer.indexOf(location.origin) === 0;
+      if (sameSite && history.length > 1) { e.preventDefault(); history.back(); }
+    });
+  })();
+
+  // 立即翻译：POST 后每 3 秒轮询，四态 —— 待机 / 翻译中（呼吸动画）/
+  // 成功（✓ 后刷新页面，译文直接可见）/ 失败（✕ + 原因，可重试）。
+  // 长文（上万字符）要翻好几段，几分钟是正常的；上限 10 分钟。
+  (function () {
+    var btn = document.getElementById("translate-btn");
+    if (!btn) return;
+    var id = btn.getAttribute("data-article-id");
+    var timer = null;
+    var polls = 0;
+    var MAX_POLLS = 200;
+    function setUI(state, reason) {
+      btn.className = "tr-btn" + (state === "idle" ? "" : " " + state);
+      btn.disabled = state === "running";
+      if (state === "idle") { btn.textContent = "立即翻译成中文"; btn.title = ""; }
+      else if (state === "running") { btn.textContent = "翻译中…（长文需要几分钟）"; }
+      else if (state === "ok") { btn.textContent = "✓ 翻译完成"; btn.title = ""; }
+      else { btn.textContent = "✕ 翻译失败，点此重试"; btn.title = reason || ""; }
+    }
+    function stop() { if (timer) { clearInterval(timer); timer = null; } }
+    function poll() {
+      polls += 1;
+      if (polls > MAX_POLLS) { stop(); setUI("failed", "等待超时：后台任务可能已中断"); return; }
+      fetch("/api/articles/" + id + "/translate-status")
+        .then(function (r) { return r.ok ? r.json() : Promise.reject(new Error("bad status")); })
+        .then(function (s) {
+          if (s.state === "running") return;
+          stop();
+          if (s.state === "ok") { setUI("ok"); setTimeout(function () { location.reload(); }, 900); }
+          else if (s.state === "failed") { setUI("failed", s.reason); }
+          else { setUI("failed", "任务状态丢失（服务可能已重启），请重试"); }
+        })
+        .catch(function () { /* 单次轮询失败不打断，下一轮再看 */ });
+    }
+    btn.addEventListener("click", function () {
+      if (btn.disabled) return;
+      setUI("running");
+      polls = 0;
+      fetch("/api/articles/" + id + "/translate", { method: "POST" })
+        .then(function (r) {
+          if (!r.ok) return r.json().then(function (b) {
+            throw new Error(b.detail || ("HTTP " + r.status));
+          }, function () { throw new Error("HTTP " + r.status); });
+          return r.json();
+        })
+        .then(function (s) {
+          if (s.state === "ok") { setUI("ok"); setTimeout(function () { location.reload(); }, 900); return; }
+          if (!timer) timer = setInterval(poll, 3000);
+        })
+        .catch(function (err) { setUI("failed", (err && err.message) || "网络中断"); });
+    });
   })();
 </script>
 <script>

@@ -393,11 +393,23 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         "images": _images(article.image_urls, article.media_map),
         # 「降级」按读者看到的样子判定：有英文原文、却还没中文版。
         # 不按 status 判 —— 重排队期间 status 是 pending，读者看到的还是英文，
-        # 这时候把提示收掉等于假装没问题。
-        "degraded": bool(article.status != "processed" and is_english(article.digest or article.summary or "")),
+        # 这时候把提示收掉等于假装问题不存在。
+        # 第三种同样算：已处理但**正文**翻译失败（处理时翻挂了、还在等自动补译）。
+        # 没有这条时这类文章在列表里装作成品英文卡，读者点进去才发现整页英文。
+        "degraded": bool(
+            (article.status != "processed"
+             and is_english(article.digest or article.summary or ""))
+            or (
+                article.status == "processed"
+                and not str(article.content_zh or "").strip()
+                and is_english(str(article.content_full or article.content or ""))
+            )
+        ),
         "degraded_reason": article.degraded_reason or "",
         # 中文版还在排队（第几次尝试、什么时候试的）
         "pending_translation": bool(article.status == "failed" and not str(article.digest_zh or "").strip()),
+        # 补译次数：让「中文版还在生成」的提示带上真实的重试计数
+        "i18n_attempts": article.i18n_attempts or 0,
         "attempts": article.process_attempts or 0,
     }
 

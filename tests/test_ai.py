@@ -199,13 +199,14 @@ def test_process_article_english_source_gets_chinese_version(seeded_db, settings
         client.close()
 
 
-def test_source_lang_zh_forces_no_translation_even_for_english_text(
+def test_source_lang_zh_still_translates_english_articles(
     seeded_db, settings: Settings
 ):
-    """用户把信源固定成中文站时，即使这批文章是英文也不翻。
+    """信源固定成中文站时，内容实际是英文的稿子仍然要出中文版。
 
-    「自适应」是默认值，但不是唯一入口 —— 站点混发、或者判定被样本带偏时，
-    用户需要能强制覆盖。
+    「中文」的语义是「这个源以中文为主」，不是「里面每一篇都是中文」——
+    中文站转载英文原文并不少见，按站点一刀切会让读者点开整页英文。
+    旧行为（zh 强制跳过翻译）已按用户要求改为按**文章内容**判定。
     """
     calls = {"n": 0}
 
@@ -225,8 +226,11 @@ def test_source_lang_zh_forces_no_translation_even_for_english_text(
                 status="pending", relevance=None,
             )
             process_article(session, article, client, settings, source_lang="zh")
-            assert article.title_en is None, "强制中文源时不应产出英文版"
-            assert article.content_zh == ""
+            # 英文内容 → 走双语分支：英文标题直接复用（不再被强制清空）
+            assert article.title_en == "Apple ships a new model"
+            # 译文走了翻译路径：stub 输出不达标被完整性闸拦下 → None。
+            # 旧行为是 native_zh 直接写 ""（明确「不翻」），两者可以此区分。
+            assert article.content_zh is None
     finally:
         client.close()
 

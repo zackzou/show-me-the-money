@@ -62,6 +62,9 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.body_sections_zh": "TEXT",
     # 信源软删除（保留行以免抹掉历史文章的来源归属）
     "sources.deleted": "INTEGER NOT NULL DEFAULT 0",
+    # 信源停用原因/时间（见 models.Source 字段说明）
+    "sources.disabled_reason": "TEXT",
+    "sources.disabled_at": "TEXT",
 }
 
 # 索引迁移表：跟 _COLUMN_MIGRATIONS 同一个理由，但补的是索引。

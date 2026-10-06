@@ -44,8 +44,7 @@
           <p class="why"><b>推荐理由</b>：{{ item.reason }}</p>
         {% endif %}
         {% if item.degraded %}
-          <p class="why pending"><b>中文版还在生成</b>：这条暂时显示的是英文原文
-            （已重试 {{ item.attempts }} 次，程序会在上游恢复后自动补齐译文）</p>
+          <p class="why pending"><b>中文版生成中</b>：这条暂时显示英文原文，系统在后台每半小时自动重试翻译，完成后自动换成中文版{% if item.i18n_attempts %}（已重试 {{ item.i18n_attempts }} 次）{% endif %}</p>
         {% endif %}
         <div class="i-foot">
           {% if item.time_full %}<span>{{ item.time_full }}</span><span>·</span>{% endif %}

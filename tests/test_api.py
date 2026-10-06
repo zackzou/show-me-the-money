@@ -1167,8 +1167,9 @@ def test_degraded_card_says_the_chinese_version_is_still_coming(client, settings
         )
 
     text = client.get("/").text
-    assert "中文版还在生成" in text
-    assert "已重试 3 次" in text
+    # 文案改成「自动翻译优先」的说法：明确系统在后台每半小时自动重试
+    assert "中文版生成中" in text
+    assert "每半小时" in text
 
 
 def test_requeued_article_stays_visible_while_waiting_for_retry(client, settings: Settings, seeded_db):
@@ -1194,8 +1195,8 @@ def test_requeued_article_stays_visible_while_waiting_for_retry(client, settings
     text = client.get("/").text
     assert "Capcom is preparing" in text
     assert "刚抓回来的" not in text
-    # 读者看到的是英文，就要告诉他中文版还在生成
-    assert "中文版还在生成" in text
+    # 读者看到的是英文，就要告诉他中文版在自动生成中
+    assert "中文版生成中" in text
 
 
 # ── 先过滤后分页 ────────────────────────────────────────────────────────────
