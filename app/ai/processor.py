@@ -1143,33 +1143,17 @@ def _build_bilingual_sections(
         return False
     chinese_source = not looks_english(body)
     zh_sections = section_pair(sections, chinese=True)
-    if zh_sections is None:
-        return False
-    if chinese_source:
-        # 原文就是中文：t 本来就是中文终稿，可以直接落库。
+    if zh_sections is not None:
         article.body_sections_zh = json.dumps(zh_sections, ensure_ascii=False)
+    if chinese_source:
         article.content_zh = ""          # 本来就是中文，标成已译完
-        return True
-
-    # 英文原文：**中文侧的 t 必须来自翻译**。
-    # section_pair(chinese=True) 只把标题换成中文，t 仍是英文原文 —— 直接
-    # 落库就是「中文小标题 + 英文段落」，页面还当它是中文译文渲染。
-    # 1267881 修的是 process_article 那条路径，漏了这里；而
-    # backfill_translations / backfill_sections 走的都是这个函数，于是每补一次
-    # 排版就把存量文章重新写坏一遍（实测清完 0 篇、下一轮又回到 33 篇）。
+        return zh_sections is not None
     en_sections = section_pair(sections, chinese=False)
-    if en_sections is None:
-        return False
-    # 全部翻成功才落库：缺一节就整篇不写，宁可退回平铺也不要半中半英。
-    translated: list[dict[str, str]] = []
-    for zh_sec, en_sec in zip(zh_sections, en_sections, strict=True):
-        one = translate_to_chinese(client, prompts, en_sec["t"])
-        if not one:
-            return False
-        translated.append({"h": zh_sec["h"], "t": one})
-    article.body_sections = json.dumps(en_sections, ensure_ascii=False)
-    article.body_sections_zh = json.dumps(translated, ensure_ascii=False)
-    return True
+    if en_sections is not None:
+        article.body_sections = json.dumps(en_sections, ensure_ascii=False)
+    # 英文侧缺小标题就整篇不用章节结构：与其存一个必然错位的组合，
+    # 不如让两个语言版本都退回「原文直排」，至少是对称的。
+    return en_sections is not None
 
 
 def backfill_sections(
