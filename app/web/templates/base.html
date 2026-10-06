@@ -319,6 +319,10 @@
                             padding:6px 13px; color:var(--muted); }
     .pager .cur { border-color:var(--accent); color:var(--accent); font-weight:600; }
     .empty { text-align:center; color:var(--faint); padding:70px 0; border:1px dashed var(--line); border-radius:14px; }
+    /* 空态的补充说明（首页：是没抓到还是没处理完）。单列一行、字号小一号，
+       不跟主文案抢视线，但足够让人知道下一步该干什么。 */
+    .empty-note { display:block; margin-top:14px; font-size:12.5px; line-height:1.8;
+                  color:var(--muted); max-width:44em; margin-inline:auto; }
     .ft { border-top:1px solid var(--line); color:var(--faint); font-size:12px; padding:22px 0 34px; }
 
     /* 键盘焦点必须看得见。原来全站没有任何 :focus 样式 —— 逐个量过 38 个

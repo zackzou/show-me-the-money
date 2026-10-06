@@ -2670,3 +2670,45 @@ def test_homepage_falls_back_to_last_day_with_content(client, seeded_db):
     page = client.get("/")
     assert page.status_code == 200
     assert "昨天那条重要新闻" in page.text, "首页应该回退到最近有内容的一天"
+
+
+def test_home_empty_state_explains_pipeline_state(client, settings: Settings, db):
+    """首页空着时要说清原因，别让新用户对着空白页猜。
+
+    实测：抓取正常、LLM 的 Key 填错时，148 篇都躺在 pending/failed，页面只写
+    「这一天还没有筛选出相关报道」—— 看起来像没抓到内容，其实是处理没跑成。
+    """
+    # 1) 库里什么都没有 → 提示抓取节奏与试抓入口
+    text = client.get("/").text
+    assert "今天还没有报道" in text
+    assert "试抓一个源" in text
+
+    # 2) 有 pending（在抽正文 / 等 AI）→ 说清是在处理
+    with session_scope() as session:
+        make_article(session, title="在等 AI", link="https://example.com/wait",
+                     status="pending", relevance=None, published_at=now_local())
+    text = client.get("/").text
+    assert "正在抽正文与 AI 处理" in text
+    assert "试抓一个源" not in text
+
+    # 3) 有 failed（多半是 Key 不对）→ 直接指向设置页的连通性测试
+    # relevance 留 None：还没判出相关性就没进日报，卡片不会出现在首页，
+    # 于是空态与这条提示都成立（相关且降级的文章是**要**展示的，见上面那条）。
+    with session_scope() as session:
+        make_article(session, title="处理失败", link="https://example.com/dead",
+                     status="failed", relevance=None, published_at=now_local(),
+                     degraded_reason="LLM 不可用：HTTP 401")
+    text = client.get("/").text
+    assert "AI 处理失败" in text
+    assert "LLM Key" in text
+    assert "仅测试连接" in text
+
+
+def test_home_has_no_empty_note_when_there_are_articles(client, settings: Settings, seeded_db):
+    """有内容时不显示那段补充说明。"""
+    with session_scope() as session:
+        make_article(session, title="正常文章", link="https://example.com/ok",
+                     status="processed", relevance=1, published_at=now_local())
+    text = client.get("/").text
+    assert "正在抽正文与 AI 处理" not in text
+    assert 'class="empty-note"' not in text
