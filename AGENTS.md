@@ -20,10 +20,6 @@ docker compose up -d
 # http://localhost:8000
 ```
 
-`docker compose up -d` **只启动 `app`**：本地模型那套放在 `local-llm` profile 后面，需要时
-用 `docker compose --profile local-llm up -d` 显式开启（会拉约 7GB 的 ollama 镜像）。
-默认就指向远程 API，所以远程用户不会白下这个镜像。
-
 不用 Docker：
 
 ```bash

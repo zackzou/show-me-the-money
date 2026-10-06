@@ -10,13 +10,8 @@ services:
       - ./config:/app/config
     restart: unless-stopped
 
-  # 只有跑**本地模型**时才需要，而且必须显式开启：
-  #     docker compose --profile local-llm up -d
-  # 为什么放在 profile 里：ollama/ollama:latest 有 7GB，而默认配置（.env.example）
-  # 指向远程 API。不设 profile 的话，用远程 key 的新用户 `docker compose up -d`
-  # 会白拉 7GB 镜像 —— 第一印象就是「怎么这么慢」，还不知道自己在下模型。
+  # 只有本地模型时才需要；用远程/云端 API 时可直接删掉这个服务
   ollama:
-    profiles: ["local-llm"]
     image: ollama/ollama:latest
     ports:
       - "11434:11434"
