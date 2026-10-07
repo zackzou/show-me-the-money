@@ -890,8 +890,10 @@ def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settin
         payload = json.loads(request.content)
         text = payload["messages"][0]["content"]
         seen.append(text)
-        # 每块按原长度的一半重写，落在 0.25~1.3 的合格区间里
-        return httpx.Response(200, json={"choices": [{"message": {"content": "这段是译文。" * 200}}]})
+        # 按输入长度的一半返回：比例落在 0.25~1.3 的合格区间，
+        # 且**与分块大小无关**（块预算从 2600 调到 800 时固定长度的
+        # mock 会算出完全不同的比例，测试就跟着实现细节一起碎了）
+        return httpx.Response(200, json={"choices": [{"message": {"content": "译" * max(1, len(text) // 2)}}]})
 
     client = _client(handler, retries=0)
     try:
@@ -900,7 +902,9 @@ def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settin
         assert len(seen) >= 2, "长文不该一次就翻完"
         assert "Paragraph 1 " in seen[0]
         assert "Paragraph 120 " in seen[-1]
-        assert out.count("这段是译文") == len(seen) * 200
+        # 每块按「提示词+块」的一半长度返回，拼起来在全文的 0.35~1.0 之间
+        # （提示词模板本身占长度，所以上界放到 1.0 而不是 0.7）
+        assert len(body) * 0.35 <= len(out) <= len(body) * 1.0
         # 重写得太短（模型只回了一截 / 压成摘要）要判为失败，不写进库
         short = _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "太短"}}]}), retries=0)
         try:
@@ -923,7 +927,8 @@ def test_chunk_for_rewrite_respects_char_budget():
     """回归：分块从「固定 4 段」改成「字符预算」。
 
     固定 4 段对重写有两个坏处：模型看不到足够上下文重组行文（还是译文味），
-    且长文调用次数翻好几倍。改成约 2600 字符一块。
+    且长文调用次数翻好几倍。预算值见 TRANSLATE_CHUNK_CHARS（当前 800，
+    对准网关单次输出上限，让首次分块就直接写得完）。
     """
     from app.ai.processor import TRANSLATE_CHUNK_CHARS, chunk_for_rewrite
 

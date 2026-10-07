@@ -624,7 +624,15 @@ def _homepage_date(session: Session, now: datetime) -> str:
     「日报已生成：2026-10-05（0 篇）」连着出现四次，首页就空了约两小时。
 
     这里从最新往回找第一份真有文章的日期；一份都没有才退回今天。
+
+    快路径：**今天的文章一处理完就直接展示今天**，不等日报行。日报行是
+    处理批次结束时才刷新的（一批 60 篇在慢网关下要一两个小时），只按
+    日报行挑日期的话，今天已处理完的文章会被挡在首页外一上午 ——
+    页面明明是实时查 articles 的，没必要被报告行拖住。
     """
+    today = now.strftime("%Y-%m-%d")
+    if counts_by_day(session, [today]).get(today, 0) > 0:
+        return today
     reports = session.execute(
         select(DailyReport.date).order_by(DailyReport.date.desc()).limit(14)
     ).scalars().all()
@@ -632,7 +640,7 @@ def _homepage_date(session: Session, now: datetime) -> str:
     for date_str in reports:
         if counts.get(date_str, 0) > 0:
             return str(date_str)
-    return now.strftime("%Y-%m-%d")
+    return today
 
 
 def _pipeline_note(session: Session, date_str: str) -> str:
