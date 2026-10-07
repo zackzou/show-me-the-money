@@ -176,7 +176,9 @@ class AISettings(BaseModel):
     # 每个调度周期最多处理多少篇 pending，剩下的留给下个周期，避免单次任务跑太久。
     batch_size: int = 60
     # 每处理多少篇提交一次，防止长任务中途失败把进度一起回滚。
-    batch_checkpoint_every: int = 10
+    # 每篇处理完就提交：内联翻译一篇要几分钟，攒批提交会把 SQLite 写锁
+    # 握住几十分钟（实测 26 次 database is locked、5 轮抓取全挂）。
+    batch_checkpoint_every: int = 1
     # 「LLM 不可用而降级」的文章最多完整重试几次。上游限流是常态，
     # 不重试就整篇停在英文；重试要有上限，否则真的坏数据会被无限重试。
     retry_max_attempts: int = 6

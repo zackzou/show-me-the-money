@@ -26,6 +26,7 @@ from app.ai.prompts import (
     render_translate_title_zh_prompt,
 )
 from app.config import PromptsConfig, Settings
+from app.db import session_scope
 from app.fetcher.content import is_real_body
 from app.fetcher.lang import (
     LANG_AUTO,
@@ -212,6 +213,15 @@ TRANSLATE_CHUNK_ATTEMPTS = 2
 # 全废、整篇判失败。放宽到 6 层（≈40 字符/块），网关的上限再低也压得进去；
 # 拆得越深块越小、单次调用越快，总成本反而更低。
 MAX_REWRITE_SPLIT_DEPTH = 6
+# 整篇翻译的调用预算： hopeless 内容（网关持续截断）会靠递归拆块烧出
+# 几百次调用（实测文章 520 两轮共 264 次），把网关和补译批次一起拖死。
+# 正常文章 3~6 块、12 次以内完成，120 是 10 倍余量；超限整篇放弃，
+# 交给下一轮补译 / 手动「立即重试」。
+TRANSLATE_MAX_CALLS = 120
+# 补译放弃线：试了这么多次还没成功的内容（网关截断类）不再自动重试 ——
+# 每轮一小时的白烧会把整个补译批次拖死，还挤占其他文章的名额。
+# 页面上的「立即重试翻译」不受此限制，换模型后手动点一次即可。
+I18N_MAX_ATTEMPTS = 6
 # 参与翻译的正文长度上限（与抓取时的上限对齐）
 MAX_CONTENT_CHARS = 40_000
 # 重写后的中文长度下限（占原文的比例）。
@@ -570,9 +580,15 @@ def _halve_by_sentence(text: str) -> list[str]:
 
 
 def _rewrite_chunk(
-    client: LLMClient, prompts: PromptsConfig, chunk: str, *, depth: int = 0
+    client: LLMClient, prompts: PromptsConfig, chunk: str, *,
+    depth: int = 0, budget: dict[str, int] | None = None,
 ) -> tuple[str, bool]:
     """把一块重写成中文；返回 ``(译文, 是否可用)``。
+
+    ``budget`` 是跨递归共享的调用预算（``{"left": n}``）：递归拆块遇到
+    hopeless 内容时叶子数是指数级的（2^depth），没有预算就会烧出几百次
+    调用（实测文章 520 两轮 264 次）。预算耗尽直接判失败，交给上层
+    按「整篇或没有」处理。
 
     会**自适应拆块**：网关对某些块的输出会莫名其妙被截断（实测 183 的第二块
     稳定停在 343 字、半个数字上，重试三次结果一样 —— 不是随机抖动，是这块本身
@@ -581,8 +597,14 @@ def _rewrite_chunk(
     拆到 ``MAX_REWRITE_SPLIT_DEPTH`` 层还写不出来就放弃（返回空），
     由调用方按「整篇或没有」处理。
     """
+    if budget is not None and budget["left"] <= 0:
+        return "", False
     translated = ""
     for _ in range(TRANSLATE_CHUNK_ATTEMPTS):
+        if budget is not None:
+            if budget["left"] <= 0:
+                return "", False
+            budget["left"] -= 1
         translated = _optional_llm(
             client, render_translate_content_prompt(prompts, chunk), ""
         ).strip()
@@ -604,7 +626,7 @@ def _rewrite_chunk(
     pieces = ["\n\n".join(parts[:middle]), "\n\n".join(parts[middle:])]
     done: list[str] = []
     for piece in pieces:
-        text, ok = _rewrite_chunk(client, prompts, piece, depth=depth + 1)
+        text, ok = _rewrite_chunk(client, prompts, piece, depth=depth + 1, budget=budget)
         if not ok:
             return "", False
         done.append(text)
@@ -634,12 +656,17 @@ def translate_to_chinese(
     chunks = chunk_for_rewrite(paragraphs)
     out: list[str] = []
     failed = 0
+    budget = {"left": TRANSLATE_MAX_CALLS}
     for chunk in chunks:
-        translated, ok = _rewrite_chunk(client, prompts, chunk)
+        translated, ok = _rewrite_chunk(client, prompts, chunk, budget=budget)
         if ok:
             out.append(translated)
         else:
             failed += 1
+        if budget["left"] <= 0:
+            log.info("翻译调用预算（%d 次）耗尽，剩余 %d 块放弃", TRANSLATE_MAX_CALLS,
+                     len(chunks) - len(out) - failed)
+            return None
     if not out:
         return None
     if failed:
@@ -1044,7 +1071,7 @@ def backfill_translations(
     就一直是空，「中文」模式下又在标题、导读、正文里露出英文，而且再也没人
     回来补。这里定期扫一遍把它们填上。
 
-    四个坑，都是实测踩出来的：
+    五个坑，都是实测踩出来的：
 
     1. **中文原文要当场把三个字段都标成已处理。** 只写 ``content_zh=""`` 的话，
        ``title_zh`` / ``digest_zh`` 还是 NULL，这篇每轮都会被重新捞回来，白占名额。
@@ -1055,14 +1082,22 @@ def backfill_translations(
     4. **先补标题与导读，再翻正文。** 正文是长文、一次要翻好几段，单篇成本是
        标题的十几倍；而标题与导读是首页和详情页最显眼的地方。先把便宜的补齐，
        读者先看到全中文，再慢慢补正文。
+    5. **整批一个事务 = 写锁被握几个小时。** 每篇的翻译要几分钟，二十篇一批
+       就是几个小时的开着写事务 —— 抓取/处理/网页的写入全部 "database is
+       locked"（实测 26 次、5 轮抓取全挂、当天首页空了一上午）。所以改成
+       **逐篇三段式**：短事务记尝试次数并提交 → 事务外做 LLM 翻译 →
+       短事务写回。写锁只盖住毫秒级的写入，翻译期间别人随便写。
     """
+    empty = {"candidates": 0, "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
     if not settings.i18n.enabled:
-        return {"candidates": 0, "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
+        return dict(empty)
     wants_content = settings.i18n.translate_content
     batch = limit if limit is not None else settings.i18n.backfill_batch_size
-    rows = list(
+    # 短事务：只取候选 id（同一种内容反复失败到上限就放它过 —— 每轮一小时
+    # 的白烧会把整个批次和其他文章一起拖死；「立即重试」不受此限）。
+    ids = list(
         session.execute(
-            select(Article)
+            select(Article.id)
             .where(
                 # 中文标题 / 中文速览缺一个都补；正文译文按开关决定补不补
                 Article.digest_zh.is_(None)
@@ -1075,16 +1110,20 @@ def backfill_translations(
                     Article.relevance == 1,
                     and_(Article.relevance == 0, Article.title_zh.is_(None)),
                 ),
+                Article.i18n_attempts < I18N_MAX_ATTEMPTS,
                 Article.link.notlike("http://localhost%"),
             )
             .order_by(Article.i18n_attempts.asc(), Article.published_at.desc(), Article.id.desc())
             .limit(batch)
         ).scalars()
     )
-    stats = {"candidates": len(rows), "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
-    pending_content: list[tuple[Article, str]] = []
-    for article in rows:
-        source = article.content_full or ""
+    stats = {"candidates": len(ids), "titles": 0, "digests": 0, "contents": 0, "skipped": 0}
+
+    for article_id in ids:
+        # ── 短事务 A：读字段、记尝试次数，立刻提交（锁几毫秒）─────────
+        article = session.get(Article, article_id)
+        if article is None:
+            continue
         # 与 process_article 用同一个判定（含信源上的显式语言设置），
         # 否则会出现「处理时翻了、补译时又当成中文原文标成已处理」的矛盾状态。
         if resolves_native_zh(article, article.source.lang if article.source else LANG_AUTO):
@@ -1093,39 +1132,58 @@ def backfill_translations(
             article.digest_zh = article.digest_zh or ""
             article.title_zh = article.title_zh or ""
             stats["skipped"] += 1
+            session.commit()
             continue
         article.i18n_attempts = (article.i18n_attempts or 0) + 1
-        if not article.title_zh:
-            title_zh = translate_title_to_chinese(client, settings.prompts, article.title or "")
-            if title_zh:
-                article.title_zh = title_zh
-                stats["titles"] += 1
+        need_title = not article.title_zh
+        need_digest = (
+            article.relevance != 0
+            and not article.digest_zh
+            and bool((article.digest or "").strip())
+            and not is_chinese_text(article.digest or "")
+        )
+        body_text = article.content_full or article.content or ""
+        need_content = (
+            article.relevance == 1
+            and wants_content
+            and not (article.content_zh or "").strip()
+            and bool(body_text.strip())
+        )
+        session.commit()
+
+        # ── 事务外：LLM 翻译（不持锁，一篇几分钟也没关系）──────────────
+        title_zh = (
+            translate_title_to_chinese(client, settings.prompts, article.title or "")
+            if need_title else None
+        )
+        digest_zh = (
+            translate_digest_to_chinese(client, settings.prompts, article.digest or "")
+            if need_digest else None
+        )
+        content_zh = (
+            translate_to_chinese(client, settings.prompts, body_text) if need_content else None
+        )
+
+        # ── 短事务 B：写回（先失效缓存重读，别覆盖别的进程刚写入的译文）─
+        session.expire(article)
+        article = session.get(Article, article_id)
+        if article is None:
+            continue
+        if title_zh and not article.title_zh:
+            article.title_zh = title_zh
+            stats["titles"] += 1
         if article.relevance == 0:
             # 不相关的只存标题：导读本来就没有（标已处理，别下轮再来），
             # 正文不进日报，不花长文翻译的钱。详情页缺译文会如实说明。
             article.digest_zh = ""
-            continue
-        if not article.digest_zh:
-            if not (article.digest or "").strip():
-                # 压根没有导读：没有东西可翻，标成已处理，别每轮都来占名额。
-                # 否则 digest_zh 永远是 NULL，这篇每轮都被捞回来白跑一趟。
-                article.digest_zh = ""
-            elif not is_chinese_text(article.digest or ""):
-                digest_zh = translate_digest_to_chinese(client, settings.prompts, article.digest or "")
-                if digest_zh:
-                    article.digest_zh = digest_zh
-                    stats["digests"] += 1
-            else:
-                # 没有导读、或导读本来就是中文：标成已处理，别每轮都来扫
-                article.digest_zh = ""
-        if wants_content and not article.content_zh:
-            pending_content.append((article, source))
-
-    # 正文译文单独一轮：标题与导读都已经补上了，这里只翻长文
-    for article, source in pending_content:
-        translated = translate_to_chinese(client, settings.prompts, source)
-        if translated:
-            article.content_zh = translated
+        elif digest_zh and not article.digest_zh:
+            article.digest_zh = digest_zh
+            stats["digests"] += 1
+        elif not article.digest_zh:
+            # 没有导读、或导读本来就是中文：标成已处理，别每轮都来扫
+            article.digest_zh = ""
+        if content_zh and not (article.content_zh or "").strip():
+            article.content_zh = content_zh
             stats["contents"] += 1
             # 顺手把章节结构也建起来。
             # 早先只在 process_article（新入库）里排版，补译这条路不排 ——
@@ -1135,10 +1193,12 @@ def backfill_translations(
             # 关键：**基于英文原文**排版，而不是基于译文。译文是重新组织的，
             # 拿它切出来的分节与原文对不上；而原文那一份的英文小标题正好是
             # 双语视图英文侧要用的。两边由同一节结构派生，所以逐节对齐。
+            # （这一步有 2~4 次 LLM 调用，在短事务里做 —— 有界，可接受。）
             if not article.body_sections_zh or not article.body_sections:
-                _build_bilingual_sections(client, settings.prompts, article, source)
+                _build_bilingual_sections(client, settings.prompts, article, body_text)
                 stats["sections"] = stats.get("sections", 0) + 1
-    session.flush()
+        session.commit()
+
     if any(stats[key] for key in ("titles", "digests", "contents")):
         log.info(
             "补齐中文版：标题 %d、速览 %d、正文 %d（候选 %d 篇）",
