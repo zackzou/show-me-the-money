@@ -12,9 +12,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, Response
 from fastapi import Path as PathParam
-from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse
+from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -53,6 +53,21 @@ WEEKDAYS = "一二三四五六日"
 # 全收下 10**30 这种值，然后由 SQLite 抛 OverflowError —— 也就是 500。
 # 不存在的 id 本来就该是 404，所以直接在参数声明处挡掉超界值。
 IdParam = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
+
+
+@page_router.get("/skin/aihot.css")
+def skin_css():
+    """AIHOT 风格皮肤样式表。
+
+    独立成文件而不是内联进 base.html：默认皮肤的用户不为它付出任何字节
+    （只有一行 <link>），浏览器还会按 immutable 缓存一年。文件不存在时
+    404 而不是 500 —— 皮肤是可选增强，不该拖垮页面。
+    """
+    path = TEMPLATE_DIR / "_skin_aihot.css"
+    if not path.is_file():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(path, media_type="text/css",
+                        headers={"Cache-Control": "public, max-age=31536000, immutable"})
 
 
 @page_router.get("/img/{name}")
@@ -721,20 +736,19 @@ def search_page(
     cat: str | None = None,
     tag: str | None = None,
     session: Session = Depends(get_session),
-) -> HTMLResponse:
-    """站内搜索。``scope=full`` 时连正文一起搜。"""
+) -> Response:
+    """站内搜索。``scope=full`` 时连正文一起搜。
+
+    没有关键词（``q`` 为空）时**重定向回首页**：一个空搜索页对读者毫无意义
+    （原来会渲染一个「输入关键词开始搜索」的空白页，看起来像坏了）。
+    顶栏搜索框的 × 也是清空后回首页。
+    """
     keyword = (q or "").strip()
+    if not keyword:
+        return RedirectResponse("/", status_code=303)
     effective_scope = normalize_scope(scope)
-    rows = (
-        search_articles(session, keyword, scope=effective_scope, category=cat, tag=tag)
-        if keyword
-        else []
-    )
-    counts = (
-        count_by_category(session, keyword, scope=effective_scope, category=cat, tag=tag)
-        if keyword
-        else {}
-    )
+    rows = search_articles(session, keyword, scope=effective_scope, category=cat, tag=tag)
+    counts = count_by_category(session, keyword, scope=effective_scope, category=cat, tag=tag)
     now = now_local()
     cards = [_card(article, None, None, now) for article in rows]
     # 搜索结果里要显示来源名与域名，所以再查一次 source

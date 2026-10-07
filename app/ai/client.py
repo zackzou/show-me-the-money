@@ -266,6 +266,7 @@ class LLMClient:
         client: httpx.Client | None = None,
         fallback_models: list[str] | None = None,
         usage_sink: Any | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self.base = base.rstrip("/")
         self.key = key
@@ -282,6 +283,12 @@ class LLMClient:
         self.timeout = timeout
         self.retries = retries
         self.temperature = temperature
+        # 单次回复的输出 token 预算（可选）。长文翻译一次要吐几百到几千字，
+        # 不设上限时上游默认上限（常常只有 1~2k）会把回复**截断在半句**上，
+        # 长度校验拒掉之后靠递归拆块硬扛 —— 拆到 40 字符一块仍然写不完。
+        # AIHOT 的翻译管线就是按「输入长度 × 1.2 + 余量」显式给 maxTokens，
+        # 这里对齐它的做法（调用方按内容长度算好再传进来）。
+        self.max_tokens = max_tokens
         # 网关自定义头（``LLM_EXTRA_HEADERS``）。中转网关常靠请求头开关行为，
         # 例如 9router 的 ``x-9router-token-saver: off`` —— 不开的话它会往
         # system 里注入一段「回答要尽量简短」的指令，与「完整翻译」直接打架，
@@ -307,14 +314,19 @@ class LLMClient:
             self._client.close()
             self._client = None
 
-    def chat(self, prompt: str) -> str:
+    def chat(self, prompt: str, *, max_tokens: int | None = None) -> str:
         """发一次 chat 请求，返回回复文本。
 
         返回体格式不对（HTML 错误页、SSE、Responses 风格）时抛 ``LLMFormatError``，
         它不会被重试 —— 同一个模型重试也还是同样的错；但会换下一个模型试
         （不同网关路径的格式可能不一样），所有模型都失败才抛出来。
         总尝试次数还是 ``retries + 1``，模型之间轮换，不额外多花调用。
+
+        ``max_tokens`` 是本次调用的输出预算，覆盖实例默认值：长文翻译按
+        「输入长度 × 1.2 + 余量」现算（对齐 AIHOT 的 translate 做法），
+        短步骤不传就沿用默认（通常是 ``None``，交给上游）。
         """
+        budget = self.max_tokens if max_tokens is None else max_tokens
         last_error: Exception | None = None
         attempts = self.retries + 1
         for attempt in range(attempts):
@@ -324,7 +336,7 @@ class LLMClient:
             started = time.monotonic()
             try:
                 self.last_usage = {"input": 0, "output": 0, "cached": 0, "cache_write": 0, "reasoning": 0, "total": 0}
-                reply = self._chat_once(prompt, model)
+                reply = self._chat_once(prompt, model, max_tokens=budget)
                 self._record(prompt, model, ok=True, reply=reply,
                              usage=self.last_usage, started=started)
                 return reply
@@ -370,7 +382,7 @@ class LLMClient:
         except Exception as exc:  # 兜底：记账失败不能拖垮抓取
             log.debug("用量记录失败：%r", exc)
 
-    def _chat_once(self, prompt: str, model: str) -> str:
+    def _chat_once(self, prompt: str, model: str, *, max_tokens: int | None = None) -> str:
         """用指定模型发一次请求。"""
         payload = {
             "model": model,
@@ -378,6 +390,8 @@ class LLMClient:
             "temperature": self.temperature,
             "stream": False,
         }
+        if max_tokens is not None:
+            payload["max_tokens"] = max_tokens
         response = self._http().post(self.endpoint, json=payload)
         if response.status_code >= 400:
             raise LLMError(f"HTTP {response.status_code}: {redact(response.text, secret=self.key)}")

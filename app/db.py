@@ -27,6 +27,12 @@ def _apply_sqlite_pragmas(engine: Engine) -> None:
         cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
         cursor.execute("PRAGMA journal_mode=WAL")
         cursor.execute("PRAGMA foreign_keys=ON")
+        # synchronous=NORMAL 是 WAL 模式下的官方推荐档位：每次提交不再强制
+        # fsync 整个 WAL，写放大从「每篇一次全量 fsync」降到「检查点时一次」。
+        # SQLite 文档明确 WAL + NORMAL 不会因断电损坏数据库（最坏丢最后几个
+        # 已提交事务，而这个系统里丢的是「刚写的一篇摘要」——下一轮抓取还会
+        # 重来）。默认的 FULL 在每篇处理提交一次的节奏下是纯开销。
+        cursor.execute("PRAGMA synchronous=NORMAL")
         cursor.close()
 
 

@@ -100,6 +100,23 @@ def render_translate_content_prompt(prompts: PromptsConfig, text: str) -> str:
     return _fill(prompts.translate_content_prompt, {"text": text})
 
 
+def render_translate_batch_prompt(prompts: PromptsConfig, chunks: list[str]) -> str:
+    """英译中正文（批量）。模板为空时返回空串，调用方走逐块兜底。
+
+    把 N 个块一次交给模型，要求返回 JSON 数组 —— 对齐 AIHOT 的
+    ``translate-body``（``{"t": ["…", "…"]}``）。占位符：
+      ``{count}``   块数（提示词用它强调「必须恰好 N 项」）
+      ``{segments}`` 编号后的块正文
+    """
+    template = prompts.translate_batch_prompt.strip()
+    if not template or not chunks:
+        return ""
+    segments = "\n\n".join(
+        f"【片段 {i + 1}】\n{chunk}" for i, chunk in enumerate(chunks)
+    )
+    return _fill(template, {"count": str(len(chunks)), "segments": segments})
+
+
 def render_translate_digest_zh_prompt(prompts: PromptsConfig, text: str) -> str:
     """英译中速览（AI 导读）。模板为空（老配置）时返回空串。"""
     if not prompts.translate_digest_zh_prompt.strip():

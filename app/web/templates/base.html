@@ -1,3 +1,4 @@
+{% from "_icons.html" import ic -%}
 <!doctype html>
 <html lang="zh-CN" class="h-full">
 <head>
@@ -11,6 +12,10 @@
       var saved = localStorage.getItem("smtm-theme");
       var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
       if (saved === "dark" || (!saved && prefersDark)) document.documentElement.classList.add("dark");
+      // 皮肤：默认 / AIHOT 风格。属性先于 CSS 落地，避免闪一下默认皮肤。
+      if (localStorage.getItem("smtm-skin") === "aihot") {
+        document.documentElement.setAttribute("data-skin", "aihot");
+      }
       // 语言：每页（每篇文章）打开都默认中文。以前这里恢复上次的 smtm-lang
       // 选择 —— 切过一次 EN/双语后，之后每篇文章都默认非中文，与「语言是
       // 这一篇的属性」的设计相悖。想看英文/双语，在文章内随时切，只影响当前页。
@@ -346,6 +351,32 @@
     .s-clear { color:var(--faint); font-size:16px; line-height:1; padding:0 2px; }
     .s-clear:hover { color:var(--text); }
 
+    /* ── 页内搜索框（内容区右上角，AIHOT 版式） ───────────────
+       搜索页与首页共用：桌面 + AIHOT 皮肤下显示（顶栏被侧栏替代，这是
+       改词重搜的入口）；默认皮肤桌面与所有窄屏由下面的规则隐藏 ——
+       顶栏那个搜索框一直可见，同屏放两个是重复。 */
+    .search-field { position:relative; display:flex; align-items:center; gap:7px;
+                    flex:1 1 260px; max-width:360px; min-width:0; padding:0 12px;
+                    height:42px; background:var(--surface); border:1px solid var(--line);
+                    border-radius:999px; transition:border-color .15s, box-shadow .15s; }
+    .search-field:focus-within { border-color:var(--accent);
+                                 box-shadow:0 0 0 3px var(--accent-soft); }
+    .sf-ico { color:var(--faint); font-size:15px; flex:none; }
+    .search-field input { flex:1 1 auto; min-width:0; border:0; outline:0;
+                          background:transparent; color:var(--text); font-size:13.5px;
+                          font-family:inherit; }
+    .search-field input::-webkit-search-cancel-button { display:none; }
+    .sf-key { font-size:10px; color:var(--faint); border:1px solid var(--line);
+              border-radius:4px; padding:0 4px; font-family:ui-monospace,monospace; flex:none; }
+    .sf-clear { color:var(--faint); font-size:17px; line-height:1; padding:0 2px; flex:none; }
+    .sf-clear:hover { color:var(--text); }
+    /* 窄屏（≤680px）顶栏搜索框一直可见，页内框隐藏 */
+    @media (max-width:680px) { .search-field { display:none; } }
+    /* 默认皮肤的桌面顶栏自带搜索框，页内框隐藏（只在 AIHOT 皮肤里出现） */
+    @media (min-width:681px) {
+      html:not([data-skin="aihot"]) .search-field { display:none; }
+    }
+
     /* ── 中英双语 ──────────────────────────────────────────── */
     .zh, .en { display:block; }
     html[data-lang="zh"] .en { display:none; }
@@ -569,6 +600,9 @@
     #lb .lb-x { position:absolute; top:14px; right:18px; color:#fff; font-size:26px; cursor:pointer; line-height:1; }
     #lb .lb-n { position:absolute; bottom:16px; color:#ddd; font-size:13px; }
   </style>
+  {# AIHOT 风格皮肤：可选样式层，全部选择器锁在 html[data-skin="aihot"] 下。
+     独立成文件并走 /skin/aihot.css（带强缓存），不给默认皮肤加一分重量。 #}
+  <link rel="stylesheet" href="/skin/aihot.css">
 </head>
 <body class="h-full">
 <header class="hd">
@@ -590,7 +624,9 @@
         <input type="search" name="q" id="q" value="{{ q|default('') }}" placeholder="搜索标题、摘要…"
                aria-label="搜索文章" autocomplete="off">
         {% if q|default('') %}
-          <a class="s-clear" href="/search" title="清空">×</a>
+          {# 清空 = 回到首页。原来指向 /search（一个没有关键词的空白搜索页），
+             读者点 × 的意图是「我不搜了」，该看到的是默认内容流。 #}
+          <a class="s-clear" href="/" title="清空并回到首页" aria-label="清空搜索">×</a>
         {% else %}
           <kbd class="s-key">/</kbd>
         {% endif %}
@@ -598,6 +634,7 @@
     </form>
     <div class="tools">
       <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
+      <button class="ico" id="skin" title="切换外观风格（默认 / AIHOT）" aria-label="切换外观风格">✦</button>
       <a class="ico" href="/api/health" title="状态" aria-label="服务状态">⋯</a>
       <button class="ico nav-tg" id="nav-tg" aria-expanded="false" aria-controls="m-nav" aria-label="站内导航菜单">☰</button>
     </div>
@@ -614,6 +651,41 @@
     <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
   </nav>
 </header>
+
+{# ── AIHOT 皮肤壳层：桌面左侧栏 + 手机底部标签栏 ──────────────────
+   默认皮肤下 display:none（见 _skin_aihot.css 的第一条规则），不占布局。
+   导航项与顶栏完全同源（nav 变量决定高亮），功能不新增也不删减。 #}
+<aside class="sk-side" aria-label="主导航">
+  <a href="/" class="sk-brand">Show Me the <em>Money</em></a>
+  <nav class="sk-nav">
+    <div class="sk-sec-t">内容</div>
+    <a class="sk-link {{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home') }}热点资讯</a>
+    <a class="sk-link {{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive') }}历史日报</a>
+    <a class="sk-link {{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved') }}收藏</a>
+    <div class="sk-sec-t">更多</div>
+    <a class="sk-link {{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources') }}信源</a>
+    <a class="sk-link {{ 'on' if nav == 'settings' else '' }}" href="/settings">{{ ic('settings') }}设置</a>
+    <a class="sk-link {{ 'on' if nav == 'rss' else '' }}" href="/rss-guide">{{ ic('rss') }}RSS 订阅</a>
+  </nav>
+  <div class="sk-foot">
+    <div class="sk-seg" id="sk-seg" role="radiogroup" aria-label="外观">
+      <span class="sk-seg-thumb" aria-hidden="true"></span>
+      <button type="button" data-sk-theme="dark" role="radio" title="深色" aria-label="深色">{{ ic('moon', 14) }}</button>
+      <button type="button" data-sk-theme="system" role="radio" title="跟随系统" aria-label="跟随系统">{{ ic('monitor', 14) }}</button>
+      <button type="button" data-sk-theme="light" role="radio" title="浅色" aria-label="浅色">{{ ic('sun', 14) }}</button>
+    </div>
+    <button type="button" class="sk-skin-toggle" id="sk-back">换回默认风格</button>
+    <a class="sk-status" href="/api/health">服务状态</a>
+  </div>
+</aside>
+<nav class="sk-tabbar" aria-label="底部导航">
+  <a class="{{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home', 22) }}热点</a>
+  <a class="{{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive', 22) }}日报</a>
+  <a class="{{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved', 22) }}收藏</a>
+  <a class="{{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources', 22) }}信源</a>
+  <a class="{{ 'on' if nav == 'settings' else '' }}" href="/settings">{{ ic('settings', 22) }}设置</a>
+  <a class="{{ 'on' if nav == 'rss' else '' }}" href="/rss-guide">{{ ic('rss', 22) }}RSS</a>
+</nav>
 
 <main class="wrap{% block container_extra %}{% endblock %}">
 {% block content %}{% endblock %}
@@ -634,7 +706,87 @@
   if (themeBtn) themeBtn.onclick = function () {
     var dark = document.documentElement.classList.toggle("dark");
     localStorage.setItem("smtm-theme", dark ? "dark" : "light");
+    syncSeg();
   };
+  // ── 皮肤（默认 / AIHOT 风格）与三态外观（深色 / 跟随系统 / 浅色） ──
+  // AIHOT 皮肤下的外观控件是「轨道 + 滑块」三选一：dark 写 smtm-theme=dark、
+  // light 写 light、system 删掉键（回到跟随系统）。两种入口（顶栏 ◐ 与
+  // 侧栏三态）操作同一份 localStorage，互相同步。
+  function currentThemeChoice() {
+    var saved = localStorage.getItem("smtm-theme");
+    return saved === "dark" ? "dark" : (saved === "light" ? "light" : "system");
+  }
+  function applyThemeChoice(choice) {
+    if (choice === "system") localStorage.removeItem("smtm-theme");
+    else localStorage.setItem("smtm-theme", choice);
+    var dark = choice === "dark" ||
+      (choice === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    document.documentElement.classList.toggle("dark", dark);
+    syncSeg();
+  }
+  function syncSeg() {
+    var seg = document.getElementById("sk-seg");
+    if (!seg) return;
+    var order = { dark: 0, system: 1, light: 2 };
+    var choice = currentThemeChoice();
+    seg.style.setProperty("--sk-i", order[choice]);
+    seg.querySelectorAll("button[data-sk-theme]").forEach(function (b) {
+      var on = b.getAttribute("data-sk-theme") === choice;
+      b.classList.toggle("on", on);
+      b.setAttribute("aria-checked", on ? "true" : "false");
+    });
+  }
+  (function () {
+    var seg = document.getElementById("sk-seg");
+    if (seg) {
+      seg.addEventListener("click", function (e) {
+        var b = e.target.closest("button[data-sk-theme]");
+        if (b) applyThemeChoice(b.getAttribute("data-sk-theme"));
+      });
+    }
+    var back = document.getElementById("sk-back");
+    if (back) back.addEventListener("click", function () { applySkin("default"); });
+    var skinBtn = document.getElementById("skin");
+    if (skinBtn) skinBtn.addEventListener("click", function () {
+      applySkin(document.documentElement.getAttribute("data-skin") === "aihot" ? "default" : "aihot");
+    });
+    syncSeg();
+  })();
+  // 皮肤切换：支持 View Transitions 的浏览器整页交叉淡入（AIHOT 的做法），
+  // 不支持的直接换。换完刷新高亮控件。
+  function applySkin(skin) {
+    var next = skin === "aihot" ? "aihot" : "default";
+    var apply = function () {
+      if (next === "aihot") {
+        document.documentElement.setAttribute("data-skin", "aihot");
+        localStorage.setItem("smtm-skin", "aihot");
+      } else {
+        document.documentElement.removeAttribute("data-skin");
+        localStorage.removeItem("smtm-skin");
+      }
+      var b = document.getElementById("skin");
+      if (b) {
+        b.classList.toggle("on", next === "aihot");
+        b.setAttribute("aria-pressed", next === "aihot" ? "true" : "false");
+      }
+      syncSeg();
+    };
+    if (document.startViewTransition &&
+        !window.matchMedia("(prefers-reduced-motion: reduce)").matches) {
+      document.startViewTransition(apply);
+    } else {
+      apply();
+    }
+  }
+  window.smtmApplySkin = applySkin;
+  // 初始回显：皮肤按钮在 AIHOT 皮肤下保持高亮
+  (function () {
+    var b = document.getElementById("skin");
+    if (b && document.documentElement.getAttribute("data-skin") === "aihot") {
+      b.classList.add("on");
+      b.setAttribute("aria-pressed", "true");
+    }
+  })();
   // 手机导航开合：汉堡 ↔ ×，点面板外 / Esc 收起；跳转后是新文档，状态自然重置。
   var navTg = document.getElementById("nav-tg"), mNav = document.getElementById("m-nav");
   if (navTg && mNav) {
@@ -708,12 +860,18 @@
     if (e.target.id === "lb" || e.target.id === "lb-x") hide();
   });
   document.addEventListener("keydown", function (e) { if (e.key === "Escape") hide(); });
-  // 「/」聚焦搜索框（搜索框里打字时不拦截）
+  // 「/」聚焦搜索框（搜索框里打字时不拦截）。
+  // 候选按优先级：页内搜索框（首页/搜索页，AIHOT 皮肤桌面端）→ 顶栏搜索框。
+  // 只聚焦「当前真正可见」的那一个：AIHOT 皮肤下桌面顶栏整条隐藏，
+  // 聚焦一个隐藏元素等于没反应。
   document.addEventListener("keydown", function (e) {
     if (e.key !== "/" || e.metaKey || e.ctrlKey || e.altKey) return;
     var tag = (e.target.tagName || "").toLowerCase();
     if (tag === "input" || tag === "textarea" || e.target.isContentEditable) return;
-    var box = document.getElementById("q");
+    var candidates = ["search-q", "q"]
+      .map(function (id) { return document.getElementById(id); })
+      .filter(function (el) { return el && el.offsetParent !== null; });
+    var box = candidates[0];
     if (box) { e.preventDefault(); box.focus(); box.select(); }
   });
   // 收藏：存在浏览器 localStorage，不上传任何数据

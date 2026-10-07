@@ -211,6 +211,20 @@ def test_scheduler_defaults_to_interval_triggers(settings: Settings):
     }
 
 
+def test_scheduler_tolerates_late_wakeup(settings: Settings):
+    """笔记本合盖 / 容器暂停后醒来：迟到的任务要补跑，而不是被跳过。
+
+    APScheduler 默认 misfire_grace_time 只有 1 秒，超出就整次跳过 ——
+    实测「睡 3 小时醒来后抓取没跑」正是这个原因。
+    """
+    scheduler = build_scheduler(settings)
+    # 不启动调度线程（避免后台真跑任务），直接读装配好的默认值
+    defaults = scheduler._job_defaults
+    assert defaults["misfire_grace_time"] >= 3600
+    assert defaults["coalesce"] is True
+    assert defaults["max_instances"] == 1
+
+
 def test_scheduler_switches_to_daily_cron_when_configured(settings: Settings):
     settings.schedule.fetch_cron = "0 7 * * *"
     settings.schedule.process_cron = "30 7 * * *"

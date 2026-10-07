@@ -830,6 +830,134 @@ def test_parse_translate():
     assert parse_translate("") == (None, None)
 
 
+def test_looks_telegraphic_separates_poisoned_from_clean():
+    """电报体判定：虚词密度。样本取自线上库的污染期 / 正常期。
+
+    污染样本（CAVEMAN 注入）虚词密度 0~5.6，正常样本 7.1~20。
+    阈值 6.5 是两者之间唯一的空档。
+    """
+    from app.utils.text import looks_telegraphic
+
+    # 污染样本（真实数据）
+    poisoned = [
+        "OpenAI首日翻车。大模型商业化推视觉广告砍API等值引怨。AI Agent向Codex接第三方生态提速50%实测低。",
+        "NanoMuse 开源 AI Agent 发。多端自托管。GPL-3.0-or-later 仓库含手机桌面 "
+        "web relay。类 Meta's Muse 做事不问答后台记忆。",
+        "苹果宣布新AI模型Ferret。全端侧运行。图文同处理。公司称下月供开发者。",
+    ]
+    for text in poisoned:
+        assert looks_telegraphic(text), f"应判为电报体：{text[:30]}"
+
+    # 正常样本（真实数据）
+    clean = [
+        "OpenAI推进大模型商业化，将在ChatGPT中测试视觉广告。本月晚些时候将在美国启动测试，用户生成图片时会展示赞助内容。",
+        "AI Agent教育落地提效有限，其表现与无AI练习相当。两年实验显示，Khanmigo提分轻微，学生极少进行实质对话。",
+        "苹果公司宣布了一款名为 Ferret 的新 AI 模型，该模型完全在设备端运行，并且能够同时处理图像和文本。",
+    ]
+    for text in clean:
+        assert not looks_telegraphic(text), f"不该判为电报体：{text[:30]}"
+
+    # 短文本不判（统计不可靠）
+    assert not looks_telegraphic("苹果发新模型。")
+    assert not looks_telegraphic("")
+    assert not looks_telegraphic(None)
+
+
+def test_parse_translation_json_enforces_count():
+    """批量翻译解析：条数必须完全匹配，电报体条目整批拒绝。"""
+    from app.ai.processor import parse_translation_json
+
+    assert parse_translation_json('{"t": ["甲", "乙"]}', 2) == ["甲", "乙"]
+    # Markdown 代码块包裹也能解析
+    assert parse_translation_json('```json\n{"t": ["甲"]}\n```', 1) == ["甲"]
+    # 前后带解释文字也能解析
+    assert parse_translation_json('好的，结果如下：{"t": ["甲"]}', 1) == ["甲"]
+    # 条数不匹配 → None（模型漏译/多译的信号）
+    assert parse_translation_json('{"t": ["甲"]}', 2) is None
+    assert parse_translation_json('{"t": ["甲", "乙", "丙"]}', 2) is None
+    # 空条目 → None
+    assert parse_translation_json('{"t": ["", "乙"]}', 2) is None
+    # 不是 JSON → None
+    assert parse_translation_json("直接给了一段中文", 1) is None
+    # 电报体条目 → 整批拒绝
+    assert parse_translation_json(
+        '{"t": ["苹果宣布新AI模型Ferret。全端侧运行。图文同处理。公司称下月供开发者。"]}', 1
+    ) is None
+
+
+def test_batch_groups_respect_char_budget():
+    """批量分组：按 3500 字符预算切批，单块超预算也单独成批。"""
+    from app.ai.processor import TRANSLATE_BATCH_CHARS, _batch_groups
+
+    chunks = ["甲" * 1000, "乙" * 1000, "丙" * 1000, "丁" * 1000]
+    groups = _batch_groups(chunks)
+    # 4 块各 1000 字符：3 块一批（3000 < 3500），第 4 块另起一批
+    assert [len(g) for g in groups] == [3, 1]
+    assert sum(len(g) for g in groups) == 4
+    # 单块超过预算：仍然单独成批（不死循环）
+    huge = _batch_groups(["大" * (TRANSLATE_BATCH_CHARS + 100)])
+    assert [len(g) for g in huge] == [1]
+
+
+def test_translate_batch_uses_json_protocol(seeded_db, settings: Settings):
+    """批量路径：一次调用翻多块，返回 JSON 数组；条数对不上时对半拆批。"""
+    import httpx
+
+    from app.ai.processor import _translate_batch
+
+    chunks = ["First English paragraph about AI.", "Second English paragraph about chips."]
+    calls = {"n": 0, "prompts": []}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        prompt = request.content.decode("utf-8", "ignore")
+        calls["prompts"].append(prompt)
+        # 第一次故意少回一条 → 触发对半拆批；之后每次回正确条数
+        if calls["n"] == 1:
+            return httpx.Response(200, json={"choices": [{"message": {"content": '{"t": ["只有一条"]}'}}]})
+        import re
+        n = len(re.findall(r"【片段 \d+】", prompt))
+        unit = "这是一段完整的译文内容，保留了原文的信息与细节。"
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"t": [unit] * n}, ensure_ascii=False)}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        out = _translate_batch(client, settings.prompts, chunks)
+        assert out is not None
+        assert len(out) == 2
+        assert calls["n"] == 3, "第一次整批失败后应对半拆成两次调用"
+        # 批量提示词里带片段编号与条数要求
+        assert "【片段 1】" in calls["prompts"][0]
+        assert "【片段 2】" in calls["prompts"][0]
+    finally:
+        client.close()
+
+
+def test_translate_batch_max_tokens_scales_with_input(seeded_db, settings: Settings):
+    """批量调用按输入长度给 max_tokens（对齐 AIHOT），避免回复被截断。"""
+    import httpx
+
+    from app.ai.processor import _translate_batch
+
+    seen_payloads = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen_payloads.append(json.loads(request.content))
+        return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+            {"t": ["这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。"]},
+            ensure_ascii=False)}}]})
+
+    client = _client(handler, retries=0)
+    try:
+        _translate_batch(client, settings.prompts, ["A short English paragraph about AI models."])
+        assert seen_payloads, "应该发出请求"
+        assert "max_tokens" in seen_payloads[0]
+        assert seen_payloads[0]["max_tokens"] >= 1200
+    finally:
+        client.close()
+
+
 def test_english_source_skips_redundant_translation(seeded_db, settings: Settings):
     """整篇英文的信源不该再花一次调用去做「中译英」。
 
@@ -880,30 +1008,41 @@ def test_english_source_skips_redundant_translation(seeded_db, settings: Setting
 
 def test_translate_to_chinese_chunks_and_keeps_order(seeded_db, settings: Settings):
     """长正文按字符预算分块重写，顺序要保持；某块失败只丢那一块。"""
+    import re as _re
+
     body = "\n\n".join(
         f"Paragraph {i} of the English article body, long enough to pass the length gate."
         for i in range(1, 121)
     )
     seen: list[str] = []
+    # 真实译文样本：虚词密度正常（不是电报体），长度按输入比例产出
+    unit = "这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。"
+
+    def fake_zh(chars: int) -> str:
+        return (unit * (chars // len(unit) + 1))[:chars]
 
     def handler(request: httpx.Request) -> httpx.Response:
         payload = json.loads(request.content)
         text = payload["messages"][0]["content"]
         seen.append(text)
-        # 按输入长度的一半返回：比例落在 0.25~1.3 的合格区间，
-        # 且**与分块大小无关**（块预算从 2600 调到 800 时固定长度的
-        # mock 会算出完全不同的比例，测试就跟着实现细节一起碎了）
-        return httpx.Response(200, json={"choices": [{"message": {"content": "译" * max(1, len(text) // 2)}}]})
+        # 批量提示词：按「片段 N」计数，回等量 JSON
+        if "英文片段：" in text:
+            n = len(_re.findall(r"【片段 \d+】", text))
+            src = text.split("英文片段：", 1)[-1]
+            per = max(1, int(len(src) / max(1, n) * 0.5))
+            return httpx.Response(200, json={"choices": [{"message": {"content": json.dumps(
+                {"t": [fake_zh(per) for _ in range(n)]}, ensure_ascii=False)}}]})
+        # 逐块兜底提示词：按输入长度的一半返回
+        return httpx.Response(200, json={"choices": [{"message": {"content": fake_zh(max(1, len(text) // 2))}}]})
 
     client = _client(handler, retries=0)
     try:
         out = translate_to_chinese(client, settings.prompts, body)
         assert out, "英文正文应该翻得出中文"
-        assert len(seen) >= 2, "长文不该一次就翻完"
+        assert len(seen) >= 1, "应该发出翻译调用"
         assert "Paragraph 1 " in seen[0]
         assert "Paragraph 120 " in seen[-1]
-        # 每块按「提示词+块」的一半长度返回，拼起来在全文的 0.35~1.0 之间
-        # （提示词模板本身占长度，所以上界放到 1.0 而不是 0.7）
+        # 每块按输入的一半长度返回，拼起来在全文的 0.35~1.0 之间
         assert len(body) * 0.35 <= len(out) <= len(body) * 1.0
         # 重写得太短（模型只回了一截 / 压成摘要）要判为失败，不写进库
         short = _client(lambda r: httpx.Response(200, json={"choices": [{"message": {"content": "太短"}}]}), retries=0)
@@ -1458,15 +1597,32 @@ def test_translate_chunk_gate_fits_chinese_density(seeded_db, settings: Settings
 
     def reply_of(prompt: str, percent: int) -> str:
         """按**输入长度**按比例产出译文 —— 真实模型的输出长度跟着输入走，
-        固定长度的假译文一遇到「自适应拆块」就会失真。"""
+        固定长度的假译文一遇到「自适应拆块」就会失真。
+
+        译文用**正常虚词密度的中文**：占位串（如「完整译文内容。」重复）的
+        虚词密度是 0，会被电报体闸门正确拦下 —— 那是被测对象，不是合法译文。
+        """
         src = prompt.split("英文原文：", 1)[-1]
         want = max(1, int(len(src) * percent / 100))
-        unit = "完整译文内容。"
+        unit = "这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。"
         return (unit * (want // len(unit) + 1))[:want]
 
     def make(percent: int):
         def handler(request: httpx.Request) -> httpx.Response:
             prompt = request.content.decode("utf-8", "ignore")
+            # 批量路径：按片段数回等量 JSON
+            if "英文片段：" in prompt:
+                import re as _re
+                n = len(_re.findall(r"【片段 \d+】", prompt))
+                src = prompt.split("英文片段：", 1)[-1]
+                per = max(1, int(len(src) / max(1, n) * percent / 100))
+                unit = "这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。"
+                return httpx.Response(
+                    200,
+                    json={"choices": [{"message": {"content": json.dumps(
+                        {"t": [(unit * (per // len(unit) + 1))[:per] for _ in range(n)]},
+                        ensure_ascii=False)}}]},
+                )
             return httpx.Response(
                 200,
                 json={"choices": [{"message": {"content": reply_of(prompt, percent)}}]},

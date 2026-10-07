@@ -18,6 +18,44 @@ from app.config import ConfigError, load_settings  # noqa: E402
 from app.db import init_db, seed_sources, session_scope  # noqa: E402
 from app.fetcher.pipeline import run_fetch_pipeline  # noqa: E402
 from app.models import Article, DailyReport, Source  # noqa: E402
+from app.utils.text import looks_telegraphic  # noqa: E402
+
+# 翻译质量探针用的样本：一段完整的英文资讯，翻成中文应有 0.35~0.6 的压缩比、
+# 且虚词密度正常。网关注入「回答简短」类指令时，这段会被压成电报体。
+_PROBE_SOURCE = (
+    "Apple announced a new AI model called Ferret, which runs entirely on-device "
+    "and can process images and text together. The company says it will be "
+    "available to developers next month."
+)
+
+
+def _probe_translation_quality(client: LLMClient) -> None:
+    """真发一次翻译请求，检查输出是否被网关的风格注入压缩。
+
+    为什么单独做这个探针：``--ping`` 只验「能不能连通」，而网关最常见的
+    故障不是不通，是**通但把内容压坏**（9router 的 CAVEMAN 注入把完整翻译
+    压成「苹果宣布新AI模型Ferret。全端侧运行。」）。这种故障下所有调用都
+    返回 200、长度校验也可能过，只有看输出形态才能发现。
+    """
+    prompt = (
+        "把下面这段英文翻译成中文，只输出译文，不要解释：\n\n" + _PROBE_SOURCE
+    )
+    try:
+        reply = client.chat(prompt, max_tokens=1200)
+    except Exception as exc:
+        print(f"⚠️ 翻译探针调用失败：{exc}")
+        return
+    ratio = len(reply) / len(_PROBE_SOURCE)
+    if looks_telegraphic(reply):
+        print("⚠️ 翻译探针：输出疑似被网关压缩成电报体（虚词密度过低）")
+        print(f"   实际输出：{reply[:80]}")
+        print("   建议检查网关是否开启了「简短回答 / token saver / caveman」类注入，")
+        print("   并确认 LLM_EXTRA_HEADERS 里的关闭开关真的到达了网关。")
+    elif ratio < 0.25:
+        print(f"⚠️ 翻译探针：输出过短（比例 {ratio:.2f}），疑似被截断或压缩")
+        print(f"   实际输出：{reply[:80]}")
+    else:
+        print(f"✅ 翻译质量探针：比例 {ratio:.2f}，形态正常")
 
 
 def main() -> int:
@@ -58,6 +96,7 @@ def main() -> int:
         try:
             reply = client.chat("只回复两个字：可用")
             print(f"✅ LLM 连通：{reply[:40]}")
+            _probe_translation_quality(client)
         except Exception as exc:
             print(f"⚠️ LLM 不可用（会走降级摘要）：{exc}")
         finally:

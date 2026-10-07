@@ -86,6 +86,7 @@ class PromptsConfig(BaseModel):
     classify_prompt: str = ""
     translate_prompt: str = ""
     translate_content_prompt: str = ""
+    translate_batch_prompt: str = ""
     translate_title_zh_prompt: str = ""
     translate_digest_zh_prompt: str = ""
     same_story_prompt: str = ""
@@ -287,15 +288,31 @@ def _validate_two_required(user: UserSettings) -> None:
         raise ConfigError("配置校验失败，进程不会启动：\n" + detail)
 
 
+def _user_settings(env: dict[str, str] | None) -> UserSettings:
+    """构造用户配置。``env`` 显式传入时**关掉 .env 文件读取**。
+
+    否则测试注入的值会被本机 `.env` 里同名变量覆盖或补全 —— 实测
+    「默认值为空」的断言在一台配了 `LLM_EXTRA_HEADERS` 的机器上必然失败，
+    而 CI 上又通过，成了看机器脸色的测试。注入即完全隔离。
+
+    （``_env_file`` 是 pydantic-settings 的运行时参数、``**dict`` 展开也超出
+    类型存根的参数列表，两处都需要绕过类型检查。）
+    """
+    if env is None:
+        return UserSettings()
+    return UserSettings(
+        _env_file=None,  # type: ignore[call-arg]
+        **{k.lower(): v for k, v in env.items()},  # type: ignore[arg-type]
+    )
+
+
 def load_settings(
     *,
     env: dict[str, str] | None = None,
     config_dir: Path | str | None = None,
 ) -> Settings:
     """加载并校验配置。``env`` / ``config_dir`` 便于测试注入。"""
-    user = (
-        UserSettings.model_validate({k.lower(): v for k, v in env.items()}) if env is not None else UserSettings()
-    )
+    user = _user_settings(env)
     _validate_two_required(user)
 
     cfg_dir = Path(config_dir) if config_dir else Path(user.config_dir or DEFAULT_CONFIG_DIR)

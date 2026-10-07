@@ -24,7 +24,12 @@
           {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
           <span style="flex:1"></span>
           {% if item.score is not none %}
-            <span class="score {{ 'strong' if item.score >= 70 else '' }}" title="相关度评分">AI 评分 <b>{{ item.score }}</b></span>
+            {# 评分分档与 AIHOT 一致：85+ 热（红）、70+ 主色、其余安静。
+               类名顺序固定为 strong 在前 hot 在后：默认皮肤只认 .strong，
+               .hot 在那里没有样式、不改变观感；AIHOT 皮肤里 .hot 写在后面，
+               同优先级后者胜出，88 分显示为「热」而不是「主色」。
+               （`score strong` 的连续子串也保留，兼容既有测试与外部样式。） #}
+            <span class="score {{ 'strong' if item.score >= 70 else '' }}{{ ' hot' if item.score >= 85 else '' }}" title="相关度评分">AI 评分 <b>{{ item.score }}</b></span>
           {% endif %}
           <button class="bm" data-save="{{ item.id }}" title="收藏（存在本地浏览器）">☆</button>
         </div>

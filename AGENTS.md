@@ -56,12 +56,25 @@ python -m app.main
 
 命令行也能改信源（批量默认值）：`config/default_sources.yaml`。
 
+## 外观：两套皮肤
+
+- **默认风格**：顶栏横导航 + 顶栏搜索框，蓝主色。
+- **AIHOT 皮肤**：`app/web/templates/_skin_aihot.css`（走 `/skin/aihot.css` 强缓存）+
+  `base.html` 里的 `.sk-side` / `.sk-tabbar` 壳层。桌面 = 左侧栏（搜索框在内容区右上角），
+  手机 = 顶栏 + 底部标签栏，暖白 + 青绿配色。
+- 切换是**纯前端偏好**（`localStorage` 的 `smtm-skin`），服务端不渲染 `data-skin`。
+- 两条硬约束（有测试守着，见 `tests/test_skin.py`）：
+  1. 皮肤全部选择器锁在 `html[data-skin="aihot"]` 下，默认皮肤零影响；
+  2. 只改样式不改行为 —— 新功能必须两种皮肤都能用。
+- 加页面时注意：搜索框样式（`.search-field`）在 `base.html` 里统一维护，
+  首页与搜索页共用；页内搜索框在「默认皮肤桌面」与「窄屏」由 CSS 隐藏（顶栏那个可见）。
+
 ## 质量门（改代码后必须全过）
 
 ```bash
 ruff check app tests scripts
 mypy app scripts
-pytest                      # 当前基线：388 passed
+pytest                      # 当前基线：405 passed
 ```
 
 ## 会让你踩坑的几件事
@@ -81,6 +94,13 @@ pytest                      # 当前基线：388 passed
    `auto`（按正文内容判定），中文原文不产出英文版。改语言相关代码前先读
    `README.md` 的「页面与语言策略」。
 5. **首次启动别把 `ai.batch_size` 调大**（默认 60）：处理不完就不会进日报。
+6. **网关可能「通但把内容压坏」。** 中转网关（9router 等）会注入「回答尽量简短」
+   类风格指令，把完整翻译压成电报体（「苹果发新AI模型Ferret。全端侧运行。」）。
+   这种故障下所有调用都返回 200、长度也达标，只有虚词密度能识别
+   （`app.utils.text.looks_telegraphic`，已接进翻译/摘要/导读/理由各条路径）。
+   排查：`python scripts/init_check.py --ping` 会跑翻译质量探针；确认
+   `LLM_EXTRA_HEADERS` 里的关闭开关真的到达网关 —— **中间任何一层代理
+   转发时丢请求头，开关就失效**（实测 8890 的 OCR 桥接只转发 3 个固定头）。
 
 ## 数据维护脚本
 
@@ -89,7 +109,12 @@ pytest                      # 当前基线：388 passed
 ```bash
 python scripts/cleanup_native_zh.py          # 中文原文却存了英文版（title_en/digest_en）
 python scripts/repair_half_translated.py     # 中文侧小节里其实是英文原文（半截译文）
+python scripts/repair_telegraphic.py         # 被网关风格注入压成「电报体」的文案/译文
 ```
+
+**脚本必须在应用进程内跑**（`docker exec <容器> python scripts/...`），
+不要从宿主机直接对着 `data/smtm.db` 跑 —— 应用持有 WAL 时外部进程写入会
+把库写坏（见上面第 1 条）。
 
 ## 代码地图
 
@@ -106,8 +131,9 @@ app/report/          generator 日报生成与时间窗口
 app/web/             routes 页面 · sources 信源管理 · settings 设置 · api JSON（含重新获取）
                      search · rss 订阅
 app/web/templates/   Jinja2；base.html 持有全站 CSS 与公共 JS
+                     _skin_aihot.css AIHOT 皮肤（/skin/aihot.css）· _icons.html 皮肤图标
 config/              可直接改的默认配置（挂载进容器，改完重启即生效）
-scripts/             init_check（自检）· cleanup_native_zh · repair_half_translated
+scripts/             init_check（自检）· cleanup_native_zh · repair_half_translated · repair_telegraphic
 tests/               pytest；tests/fixtures/bad_schedule 是「配置坏了」的测试夹具
 ```
 

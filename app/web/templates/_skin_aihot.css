@@ -1,0 +1,443 @@
+/* ═══════════════════════════════════════════════════════════════════════
+   AIHOT 风格皮肤（可选，默认关闭）
+
+   设计参考 aihot.news 的引擎设计系统（KKKKhazix/AIHOT，MIT）：
+   暖白纸面 + 墨色文字 + 单一青绿主色、发丝线边框、无渐变；
+   桌面 = 左侧栏 + 时间轴卡片，手机 = 顶栏 + 底部标签栏；
+   药丸轨道 + 白色滑块的切换器；卡片悬浮上浮；进场 fade-up。
+
+   两条硬规则：
+   1. 所有组件覆盖都锁在 html[data-skin="aihot"] 下 —— 默认皮肤一个像素都不变；
+   2. 只覆盖样式，不动功能：双语切换、早报浮层、重新获取、悬浮跳转条等
+      全部照旧工作（它们用的语义 token 会跟着皮肤走）。
+
+   新壳层元素（.sk-side / .sk-tabbar）默认隐藏，只在皮肤激活时出现。
+   ═══════════════════════════════════════════════════════════════════════ */
+
+/* 新壳层元素：默认皮肤下完全隐藏 */
+.sk-side, .sk-tabbar { display:none; }
+.ico.on { color:var(--accent); border-color:var(--accent); }
+
+/* 切换皮肤 / 深浅色时的整页交叉淡入（AIHOT 的 view transition） */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration:200ms;
+  animation-timing-function:cubic-bezier(.25,1,.5,1);
+}
+
+@keyframes sk-fade-up { from { opacity:0; transform:translateY(6px); } }
+
+/* ── 设计 token（对齐 AIHOT 的语义色板） ─────────────────────────── */
+html[data-skin="aihot"] {
+  --bg:#faf9f6; --bg-sunk:#f3f3ef; --surface:#ffffff; --surface-2:#fdfdfb;
+  --sidebar:#fdfdfb; --field:#eef1ed;
+  --line:#dfe4e1; --line-strong:#d1d9d5; --line-soft:#e9ede9;
+  --text:#202a30; --muted:#59656b; --faint:#657176;
+  --accent:#176b75; --accent-ink:#145f68; --accent-bright:#176b75;
+  --accent-soft:rgba(23,107,117,.08); --accent-contrast:#ffffff;
+  --chip:#f3f3ef; --chip-text:#59656b;
+  --note:#526f72; --prose-ink:#26323a;
+  --hot:#b3402a; --hot-soft:rgba(179,64,42,.08);
+  --amber-ink:#7c5a24; --amber-soft:rgba(184,135,58,.1);
+  --ok:#2f7d5c; --ok-ink:#2a6e51;
+  --shadow:0 1px 2px rgba(32,42,48,.025);
+  --shadow-card:0 1px 2px rgba(32,42,48,.025);
+  --shadow-card-hover:0 3px 12px rgba(32,42,48,.055);
+  --shadow-thumb:0 1px 2px rgba(28,39,51,.1), 0 1px 1px rgba(28,39,51,.04);
+  --shadow-pop:0 12px 32px rgba(28,39,51,.12);
+  --sk-thumb:var(--surface);
+  --ease-out-quart:cubic-bezier(.25,1,.5,1);
+}
+html[data-skin="aihot"].dark {
+  --bg:#13191c; --bg-sunk:#182024; --surface:#1a2226; --surface-2:#1d272b;
+  --sidebar:#161e21; --field:rgba(255,255,255,.06);
+  --line:rgba(255,255,255,.08); --line-strong:rgba(255,255,255,.12); --line-soft:rgba(255,255,255,.06);
+  --text:#e7eceb; --muted:#a5b0b3; --faint:#89979d;
+  --accent:#12ccd8; --accent-ink:#2ce2e8; --accent-bright:#12ccd8;
+  --accent-soft:rgba(18,204,216,.12); --accent-contrast:#000000;
+  --chip:#202a2f; --chip-text:#a5b0b3;
+  --note:#8fb8a8; --prose-ink:#d7dfdf;
+  --hot:#d86a52; --hot-soft:rgba(216,106,82,.12);
+  --amber-ink:#d3b26a; --amber-soft:rgba(211,178,106,.12);
+  --ok:#5fc79a; --ok-ink:#7fd1ad;
+  --shadow:none; --shadow-card:none; --shadow-card-hover:none;
+  --shadow-thumb:0 1px 2px rgba(0,0,0,.45);
+  --shadow-pop:0 16px 40px rgba(0,0,0,.45);
+  --sk-thumb:#202a2f;
+}
+html[data-skin="aihot"] body {
+  font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC",
+              "Hiragino Sans GB","HarmonyOS Sans SC","Microsoft YaHei",sans-serif;
+  font-size:14px; line-height:1.5;
+}
+html[data-skin="aihot"] ::selection { background:rgba(23,107,117,.16); }
+html[data-skin="aihot"].dark ::selection { background:rgba(18,204,216,.22); }
+html[data-skin="aihot"] :focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:6px; }
+
+/* ── 壳层：桌面侧栏 / 手机底部标签栏 ─────────────────────────────── */
+@media (min-width:961px) {
+  html[data-skin="aihot"] .hd { display:none; }
+  html[data-skin="aihot"] .sk-side {
+    display:flex; flex-direction:column;
+    position:fixed; top:0; bottom:0; left:0; width:180px; z-index:40;
+    padding:24px 12px 14px; border-right:1px solid var(--line); background:var(--sidebar);
+  }
+  /* 内容让出侧栏，宽度按屏幕形状走（对齐 AIHOT 的 --page-max-wide 思路）；
+     max() 让超宽屏上容器在「侧栏右侧的区域」里居中，而不是贴左留一条大空白。
+     宽度必须同时受 calc(100vw - 180px) 约束，否则 dvh 公式在大屏上算出
+     1680px、加上侧栏直接横向溢出。 */
+  html[data-skin="aihot"] main.wrap,
+  html[data-skin="aihot"] footer.wrap {
+    --sk-w:min(1680px, max(1200px, calc(270dvh - 236px)), calc(100vw - 180px));
+    max-width:var(--sk-w);
+    margin-left:180px; /* 老浏览器兜底 */
+    margin-left:max(180px, calc(50vw + 90px - var(--sk-w) / 2));
+    margin-right:auto; padding:0 28px;
+  }
+}
+html[data-skin="aihot"] .sk-brand { display:block; margin:0 4px 16px; font-size:15px; font-weight:700;
+  letter-spacing:-.2px; color:var(--text); }
+html[data-skin="aihot"] .sk-brand em { font-style:normal; color:var(--accent); }
+html[data-skin="aihot"] .sk-nav { flex:1 1 auto; overflow-y:auto; margin:0 -2px; padding:0 2px;
+  scrollbar-width:thin; scrollbar-color:var(--line-strong) transparent; }
+html[data-skin="aihot"] .sk-sec-t { padding:14px 10px 4px; font-size:11px; color:var(--faint); }
+html[data-skin="aihot"] .sk-link { display:flex; align-items:center; gap:10px; height:40px; padding:0 10px;
+  border-radius:10px; font-size:14px; color:var(--muted);
+  transition:background-color .15s, color .15s; }
+html[data-skin="aihot"] .sk-link svg { width:17px; height:17px; flex:none; }
+html[data-skin="aihot"] .sk-link:hover { background:var(--bg-sunk); color:var(--text); }
+html[data-skin="aihot"] .sk-link.on { background:var(--accent-soft); color:var(--text); font-weight:600; }
+html[data-skin="aihot"] .sk-link.on svg { color:var(--accent); }
+html[data-skin="aihot"] .sk-foot { display:flex; flex-direction:column; gap:9px; padding:10px 2px 0; }
+html[data-skin="aihot"] .sk-seg { position:relative; display:grid; grid-template-columns:repeat(3,1fr);
+  height:34px; padding:3px; border:1px solid var(--line); border-radius:999px;
+  background:var(--bg-sunk); --sk-i:1; }
+html[data-skin="aihot"] .sk-seg-thumb { position:absolute; top:3px; bottom:3px; left:3px;
+  width:calc((100% - 6px)/3); border-radius:999px; background:var(--sk-thumb);
+  box-shadow:0 0 0 1px var(--line), var(--shadow-thumb);
+  transform:translateX(calc(var(--sk-i,1) * 100%));
+  transition:transform .2s cubic-bezier(.25,1,.5,1); }
+html[data-skin="aihot"] .sk-seg button { position:relative; z-index:1; display:grid; place-items:center;
+  border:0; background:none; padding:0; color:var(--faint); cursor:pointer; border-radius:999px; }
+html[data-skin="aihot"] .sk-seg button.on { color:var(--text); }
+html[data-skin="aihot"] .sk-seg svg { width:14px; height:14px; }
+html[data-skin="aihot"] .sk-skin-toggle { height:34px; border:1px solid var(--line); border-radius:999px;
+  background:transparent; color:var(--muted); font:inherit; font-size:12.5px; cursor:pointer;
+  transition:color .15s, border-color .15s, background-color .15s; }
+html[data-skin="aihot"] .sk-skin-toggle:hover { color:var(--text); border-color:var(--line-strong);
+  background:var(--bg-sunk); }
+html[data-skin="aihot"] .sk-status { text-align:center; font-size:11px; color:var(--faint); }
+html[data-skin="aihot"] .sk-status:hover { color:var(--text); }
+
+/* 手机壳：底栏替代桌面导航，顶栏收窄到 48px（AIHOT 的 --bar-h） */
+@media (max-width:960px) {
+  html[data-skin="aihot"] .nav,
+  html[data-skin="aihot"] .nav-tg,
+  html[data-skin="aihot"] .m-nav { display:none !important; }
+  html[data-skin="aihot"] .hd-in { height:48px; }
+  html[data-skin="aihot"] .hd { background:color-mix(in srgb, var(--bg) 85%, transparent);
+    backdrop-filter:blur(20px) saturate(150%); }
+  html[data-skin="aihot"] body { padding-bottom:calc(50px + env(safe-area-inset-bottom)); }
+  html[data-skin="aihot"] .sk-tabbar {
+    display:grid; grid-template-columns:repeat(6,1fr);
+    position:fixed; left:0; right:0; bottom:0; z-index:45;
+    height:calc(50px + env(safe-area-inset-bottom)); padding-bottom:env(safe-area-inset-bottom);
+    background:color-mix(in srgb, var(--surface) 90%, transparent);
+    backdrop-filter:blur(20px) saturate(150%);
+    box-shadow:0 -1px 0 var(--line);
+  }
+}
+html[data-skin="aihot"] .sk-tabbar a { display:flex; flex-direction:column; align-items:center;
+  justify-content:center; gap:2px; font-size:10.5px; color:var(--muted); }
+html[data-skin="aihot"] .sk-tabbar a.on { color:var(--accent); font-weight:600; }
+html[data-skin="aihot"] .sk-tabbar svg { width:22px; height:22px; }
+
+/* ── 顶栏与工具按钮（手机皮肤） ─────────────────────────────────── */
+html[data-skin="aihot"] .ico { width:34px; height:34px; border-radius:8px; background:transparent;
+  border-color:transparent; transition:color .15s, background-color .15s, border-color .15s; }
+html[data-skin="aihot"] .ico:hover { color:var(--text); background:var(--bg-sunk); border-color:transparent; }
+html[data-skin="aihot"] .search { border-radius:8px; background:var(--surface); }
+html[data-skin="aihot"] .search:focus-within { border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+html[data-skin="aihot"] .s-key { border-radius:5px; }
+
+/* ── 标题区 / Kicker（AIHOT：短横 + 大字距） ─────────────────────── */
+html[data-skin="aihot"] .lead { padding:24px 0 4px; }
+html[data-skin="aihot"] .kicker { display:flex; align-items:center; gap:10px;
+  font-size:12px; font-weight:600; letter-spacing:.3em; }
+html[data-skin="aihot"] .kicker::before { content:""; width:24px; height:2px; border-radius:999px;
+  background:var(--accent); }
+html[data-skin="aihot"] h1 { font-size:30px; font-weight:700; letter-spacing:-.01em; }
+html[data-skin="aihot"] .meta { font-size:13px; color:var(--muted); }
+
+/* ── 切换器：药丸轨道 + 白色滑块（AIHOT 的 PillTabs） ────────────── */
+html[data-skin="aihot"] .tabs { display:inline-flex; flex-wrap:nowrap; align-items:center; gap:0;
+  padding:3px; border:1px solid var(--line); border-radius:999px; background:var(--bg-sunk);
+  max-width:100%; overflow-x:auto; scrollbar-width:none; }
+html[data-skin="aihot"] .tabs::-webkit-scrollbar { display:none; }
+html[data-skin="aihot"] .tab { display:inline-flex; align-items:center; height:36px; padding:0 16px;
+  border:1px solid transparent; border-radius:999px; background:transparent; color:var(--muted);
+  font-size:13.5px; transform:none;
+  transition:color .15s, background-color .15s, box-shadow .15s; }
+html[data-skin="aihot"] .tab:hover { background:transparent; color:var(--text); transform:none; }
+html[data-skin="aihot"] .tab.on { background:var(--sk-thumb); border-color:var(--line); color:var(--text);
+  font-weight:600; transform:none; box-shadow:0 0 0 1px var(--line), var(--shadow-thumb); }
+html[data-skin="aihot"] .tab.on::after { display:none; }
+html[data-skin="aihot"] .tab .n { color:var(--faint); }
+html[data-skin="aihot"] .tab.on .n { color:var(--accent); }
+@media (max-width:960px) { html[data-skin="aihot"] .tab { height:44px; } }
+html[data-skin="aihot"] .sub-bar { padding:14px 0 4px; }
+html[data-skin="aihot"] .scope { padding:3px; background:var(--bg-sunk); }
+html[data-skin="aihot"] .scope a { display:inline-flex; align-items:center; height:30px; padding:0 13px;
+  border-radius:999px; background:transparent; color:var(--muted); }
+html[data-skin="aihot"] .scope a.on { background:var(--sk-thumb); color:var(--text);
+  box-shadow:0 0 0 1px var(--line), var(--shadow-thumb); }
+
+/* ── 时间轴（AIHOT：64px 时间列 + 22px 轨道 + 卡片） ───────────────
+   桌面（≥641px）用 AIHOT 的导轨版式；≤640px 交给默认皮肤的移动版式
+   （单列、时间在卡片上方）—— 皮肤选择器优先级更高，所以这里必须
+   用媒体查询让位，而不是靠顺序。 */
+html[data-skin="aihot"] .tl { padding:10px 0 44px; }
+html[data-skin="aihot"] .day-head { position:sticky; top:0; z-index:6; background:var(--bg);
+  padding:12px 0 8px; margin:0; font-size:18px; font-weight:600; gap:10px; }
+@media (max-width:960px) { html[data-skin="aihot"] .day-head { top:49px; } }
+html[data-skin="aihot"] .day-head .meta { font-size:13px; font-weight:400; color:var(--faint); }
+@media (min-width:641px) {
+  html[data-skin="aihot"] .tl::before { left:75px; background:var(--line-strong); }
+  html[data-skin="aihot"] .row { grid-template-columns:64px minmax(0,1fr); column-gap:22px; }
+  html[data-skin="aihot"] .row + .row { margin-top:12px; }
+  html[data-skin="aihot"] .tl-time { padding:17px 0 0; font-size:12.5px; font-weight:600;
+    color:var(--muted); font-family:ui-monospace,SFMono-Regular,Menlo,monospace; }
+  html[data-skin="aihot"] .tl-main { padding:0 0 2px; }
+  html[data-skin="aihot"] .tl-main::before { left:-14.5px; top:25px; width:7px; height:7px;
+    box-shadow:0 0 0 4px var(--bg); }
+}
+html[data-skin="aihot"] .item { padding:15px 18px 14px; border-radius:12px;
+  box-shadow:var(--shadow-card);
+  transition:box-shadow .2s var(--ease-out-quart), border-color .2s, transform .2s var(--ease-out-quart); }
+/* 进场动效只给首屏几张卡：120 天的归档页一次渲染上百行，全量动画会掉帧 */
+html[data-skin="aihot"] .tl .row:nth-child(-n+8) .item { animation:sk-fade-up .3s var(--ease-out-quart) backwards; }
+html[data-skin="aihot"] .item:hover { border-color:var(--line-strong);
+  box-shadow:var(--shadow-card-hover); transform:translateY(-1px); }
+/* 手机（≤640px）：AIHOT 的移动版式 —— 卡片退成平铺行（无边框阴影、行间发丝线），
+   导读收两行、推荐理由收一行；默认皮肤在窄屏把 .d/.why 整个藏掉（扫标题模式），
+   AIHOT 皮肤按参考站的做法保留信息密度，只是截断。 */
+@media (max-width:640px) {
+  html[data-skin="aihot"] .item { border:0; border-radius:0; box-shadow:none;
+    border-bottom:1px solid var(--line-soft); padding:14px 2px; }
+  html[data-skin="aihot"] .row:last-child .item { border-bottom:0; }
+  html[data-skin="aihot"] .item:hover { transform:none; box-shadow:none; }
+  html[data-skin="aihot"] .item .t { font-size:16.5px; }
+  html[data-skin="aihot"] .item .d { display:-webkit-box; -webkit-box-orient:vertical;
+    -webkit-line-clamp:2; overflow:hidden; margin-top:6px; font-size:14px; line-height:1.7; }
+  html[data-skin="aihot"] .item .why { display:-webkit-box; -webkit-box-orient:vertical;
+    -webkit-line-clamp:1; overflow:hidden; margin-top:8px; padding-top:8px;
+    font-size:12.5px; line-height:1.65; }
+  html[data-skin="aihot"] .tl-time { font-size:12px; }
+}
+/* AIHOT 手机壳的顶栏品牌是完整字标（默认皮肤 ≤820px 只留 em 的「Money」） */
+@media (max-width:960px) {
+  html[data-skin="aihot"] .brand { font-size:15px; }
+  html[data-skin="aihot"] .brand em { font-size:15px; }
+}
+@media (max-width:400px) {
+  html[data-skin="aihot"] .brand { font-size:0; }
+  html[data-skin="aihot"] .brand em { font-size:15px; }
+}
+html[data-skin="aihot"] .item:hover .t { color:var(--text); }
+html[data-skin="aihot"] .i-head { font-size:12.5px; }
+html[data-skin="aihot"] .i-head .src { font-weight:500; color:var(--muted); }
+html[data-skin="aihot"] .t { font-size:17px; font-weight:650; line-height:1.55; letter-spacing:-.2px; }
+html[data-skin="aihot"] .d { font-size:15px; line-height:1.75; color:var(--muted); }
+html[data-skin="aihot"] .why { border-top:1px solid var(--line-soft); padding-top:12px;
+  margin-top:12px; color:var(--note); }
+html[data-skin="aihot"] .why b { color:var(--muted); font-weight:600; }
+html[data-skin="aihot"] .item .why.pending, html[data-skin="aihot"] .item .why.pending b { color:var(--faint); }
+html[data-skin="aihot"] .more { font-size:12px; font-weight:600; }
+
+/* ── 评分药丸 / 徽标 / 标签（AIHOT 分档：85+ 热、70+ 主色、其余安静） ── */
+html[data-skin="aihot"] .score { height:20px; padding:0 8px; gap:6px; border-radius:999px;
+  font-size:11.5px; background:transparent; color:var(--faint);
+  box-shadow:inset 0 0 0 1px var(--line-soft); }
+html[data-skin="aihot"] .score b { font-size:12.5px; font-weight:700; }
+html[data-skin="aihot"] .score.strong { background:var(--accent-soft); color:var(--accent); box-shadow:none; }
+html[data-skin="aihot"] .score.strong b { color:var(--accent); }
+html[data-skin="aihot"] .score.hot { background:var(--hot-soft); color:var(--hot); box-shadow:none; }
+html[data-skin="aihot"] .score.hot b { color:var(--hot); }
+html[data-skin="aihot"] .badge, html[data-skin="aihot"] .warn { background:var(--amber-soft);
+  color:var(--amber-ink); border-radius:999px; padding:2px 8px; font-size:11px; }
+html[data-skin="aihot"] .tag { background:var(--accent-soft); color:var(--accent);
+  border-radius:999px; padding:2px 8px; }
+html[data-skin="aihot"] .cat, html[data-skin="aihot"] .rail-chip, html[data-skin="aihot"] .rail-tag {
+  border-radius:999px; padding:3px 10px; background:var(--bg-sunk); color:var(--muted);
+  box-shadow:inset 0 0 0 1px var(--line-soft); }
+html[data-skin="aihot"] .cat:hover, html[data-skin="aihot"] .rail-chip:hover { color:var(--accent); }
+html[data-skin="aihot"] .tagx { color:var(--faint); }
+
+/* ── 空态 / 分页 / 历史日报 ─────────────────────────────────────── */
+html[data-skin="aihot"] .empty { border:0; padding:56px 0; }
+html[data-skin="aihot"] .pager a, html[data-skin="aihot"] .pager span { border-radius:999px;
+  min-width:36px; height:36px; display:inline-flex; align-items:center; justify-content:center;
+  padding:0 12px; }
+html[data-skin="aihot"] .pager .cur { background:var(--accent); border-color:var(--accent);
+  color:var(--accent-contrast); }
+html[data-skin="aihot"] .arc-head:hover { background:var(--bg-sunk); }
+
+/* ── 早报片段按钮 / 浮层 ────────────────────────────────────────── */
+html[data-skin="aihot"] .digest-btn { border-radius:12px;
+  transition:border-color .2s, transform .2s, box-shadow .2s; }
+html[data-skin="aihot"] .digest-btn:hover { transform:translateY(-1px); box-shadow:var(--shadow-card-hover); }
+html[data-skin="aihot"] .digest-btn .db-ico { color:var(--accent-contrast); }
+html[data-skin="aihot"] .dg { border-radius:16px; box-shadow:var(--shadow-pop); }
+html[data-skin="aihot"] .dg-brand em, html[data-skin="aihot"] .dg-cat { color:var(--accent); }
+html[data-skin="aihot"] .dg-cat { background:var(--accent-soft); }
+html[data-skin="aihot"] .dg-copy:hover { color:var(--accent-contrast); }
+
+/* ── 单篇详情：AIHOT 阅读版式（760px 正文列 + 240px 边栏） ─────────
+   AIHOT 皮肤下内容区被固定侧栏占了 180px，详情页的塌缩阈值整体右移：
+   1360px 以下收成「左栏 + 正文」两列（右栏落到下方），
+   超宽屏（≥1536px，AIHOT 的 2xl）恢复三栏、正文 760px。
+   .side 不隐藏：早报片段按钮与本文目录是本站功能，AIHOT 的左侧事实栏
+   可以藏，这里不能。 */
+@media (min-width:961px) and (max-width:1535px) {
+  html[data-skin="aihot"] .story { grid-template-columns:190px minmax(0,1fr); gap:0 36px; }
+  html[data-skin="aihot"] .story .rail { grid-column:1 / -1; margin-top:26px; }
+}
+@media (min-width:1536px) {
+  html[data-skin="aihot"] .story { grid-template-columns:200px minmax(0,760px) 260px;
+    gap:0 48px; justify-content:center; }
+}
+html[data-skin="aihot"] .side, html[data-skin="aihot"] .rail { top:24px; }
+/* 右栏是发丝线分节，不再是卡片（AIHOT 的 RailSection） */
+html[data-skin="aihot"] .rail { border:0; background:transparent; padding:0; }
+html[data-skin="aihot"] .rail-sec { border-top:1px solid var(--line); padding-top:16px; margin-top:18px; }
+html[data-skin="aihot"] .rail-sec:first-of-type { border-top:0; margin-top:0; padding-top:0; }
+html[data-skin="aihot"] .side dt { margin-top:18px; }
+html[data-skin="aihot"] .side dd { font-size:13px; }
+/* 悬浮跳转条（默认皮肤在 ≤1180px 才给正文让槽）在 AIHOT 皮肤下要提前到
+   ≤1535px：两栏版式的正文一直顶到容器右缘，1280px 屏上实测压住语言切换器。 */
+@media (max-width:1535px) {
+  html[data-skin="aihot"] .story > article { margin-right:38px; }
+}
+@media (max-width:480px) {
+  html[data-skin="aihot"] .story > article { margin-right:30px; }
+}
+html[data-skin="aihot"] .body-title { font-size:32px; letter-spacing:-.5px; }
+html[data-skin="aihot"] .sub { font-size:14.5px; }
+html[data-skin="aihot"] .sec-t { font-size:12px; letter-spacing:.18em; font-weight:600; }
+html[data-skin="aihot"] .lead-p { font-size:17.5px; line-height:2; }
+/* 正文：AIHOT 的 .prose（17px→18px / 1.8 / 段距 1.2em），
+   字号落在 .prose 容器上（h3 的 1.1em 才有正确基准），段落继承；
+   小标题回到素面（去掉默认皮肤的渐变横幅 —— AIHOT 不用渐变） */
+html[data-skin="aihot"] .prose { font-size:17px; line-height:1.8; color:var(--prose-ink); }
+html[data-skin="aihot"] .prose p { font-size:inherit; line-height:inherit; color:inherit; }
+@media (min-width:80rem) { html[data-skin="aihot"] .prose { font-size:18px; } }
+html[data-skin="aihot"] .prose h3 { background:none; box-shadow:none; padding:0;
+  margin:1.8em 0 .7em; font-size:1.1em; font-weight:650; letter-spacing:0; border-radius:0; }
+html[data-skin="aihot"] .prose h3::before, html[data-skin="aihot"] .prose h3::after { display:none; }
+html[data-skin="aihot"] .prose .shot img { border-radius:10px; }
+html[data-skin="aihot"] .prose a, html[data-skin="aihot"] .rel-list a { color:var(--accent);
+  text-decoration:underline;
+  text-decoration-color:color-mix(in srgb, var(--accent) 35%, transparent);
+  text-underline-offset:3px; }
+html[data-skin="aihot"] .rel-list a:hover { text-decoration-color:var(--accent); }
+html[data-skin="aihot"] .note-box, html[data-skin="aihot"] .dup-note { border:0;
+  border-left:3px solid var(--accent); border-radius:0 8px 8px 0; background:var(--bg-sunk);
+  box-shadow:inset 0 0 0 1px var(--line-soft); }
+
+/* 语言切换：同款药丸轨道 + 白色滑块 */
+html[data-skin="aihot"] .lang { padding:3px; background:var(--bg-sunk); border-color:var(--line); }
+html[data-skin="aihot"] .lang button { height:30px; padding:0 12px; display:inline-flex;
+  align-items:center; border-radius:999px; }
+html[data-skin="aihot"] .lang button.on { background:var(--sk-thumb); color:var(--text);
+  box-shadow:0 0 0 1px var(--line), var(--shadow-thumb); }
+html[data-skin="aihot"] .backtop, html[data-skin="aihot"] .rf-btn, html[data-skin="aihot"] .tr-btn,
+html[data-skin="aihot"] .dg-copy { border-radius:999px; }
+
+/* ── 搜索页（对齐 AIHOT：页头带搜索框、胶囊范围切换、命中数右对齐） ── */
+html[data-skin="aihot"] .search-head { padding:26px 0 2px; }
+html[data-skin="aihot"] .search-title { font-size:30px; font-weight:700; letter-spacing:-.01em; }
+html[data-skin="aihot"] .search-field { height:42px; border-radius:999px;
+  background:var(--bg-sunk); border-color:var(--line-soft);
+  transition:background-color .15s, box-shadow .15s, border-color .15s; }
+html[data-skin="aihot"] .search-field:hover { border-color:var(--line-strong); }
+html[data-skin="aihot"] .search-field:focus-within { background:var(--surface);
+  border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
+html[data-skin="aihot"] .sf-key { border-radius:5px; border-color:var(--line-strong);
+  background:var(--surface); }
+html[data-skin="aihot"] .sf-clear { width:24px; height:24px; display:grid;
+  place-items:center; border-radius:50%; font-size:15px; }
+html[data-skin="aihot"] .sf-clear:hover { background:var(--bg-sunk); color:var(--text); }
+html[data-skin="aihot"] .search-cats { padding-top:16px; }
+html[data-skin="aihot"] .search-scope-bar .hit { font-size:12.5px; color:var(--faint); }
+html[data-skin="aihot"] .search-scope-bar .hit b { color:var(--text); font-weight:600; }
+
+/* 首页：分类 tab 与搜索框同一行，搜索框靠右（对齐 AIHOT 的精选页版式） */
+html[data-skin="aihot"] .sub-bar { display:flex; align-items:center;
+  justify-content:space-between; gap:16px; flex-wrap:wrap; }
+html[data-skin="aihot"] .sub-bar .tabs { flex:0 1 auto; min-width:0; }
+html[data-skin="aihot"] .sub-bar .search-field { flex:0 1 260px; max-width:300px;
+  margin-left:auto; }
+
+/* ── 设置页 ─────────────────────────────────────────────────────── */
+html[data-skin="aihot"] .notice { border-radius:12px; }
+html[data-skin="aihot"] .notice.ok { border-color:color-mix(in srgb, var(--ok) 40%, transparent);
+  background:color-mix(in srgb, var(--ok) 6%, transparent); }
+html[data-skin="aihot"] .notice.ok .ico { background:var(--ok); color:#fff; }
+html[data-skin="aihot"] .notice.error { border-color:color-mix(in srgb, var(--hot) 40%, transparent);
+  background:var(--hot-soft); }
+html[data-skin="aihot"] .notice.error .ico { background:var(--hot); color:#fff; }
+html[data-skin="aihot"].dark .notice.ok .ico,
+html[data-skin="aihot"].dark .notice.error .ico { color:#0b0d10; }
+html[data-skin="aihot"] .probe { border-radius:12px;
+  border-color:color-mix(in srgb, var(--ok) 35%, transparent);
+  background:color-mix(in srgb, var(--ok) 6%, transparent); }
+html[data-skin="aihot"] .probe-l { color:var(--ok-ink); }
+html[data-skin="aihot"] .probe-l .dot { background:var(--ok);
+  box-shadow:0 0 0 4px color-mix(in srgb, var(--ok) 16%, transparent); }
+html[data-skin="aihot"] .preset { border-radius:12px; }
+html[data-skin="aihot"] .preset.on .pin { color:var(--accent-contrast); }
+html[data-skin="aihot"] .fld input { border-radius:8px; background:var(--field); }
+html[data-skin="aihot"] .fld input:focus { box-shadow:0 0 0 3px var(--accent-soft); }
+html[data-skin="aihot"] .btns button { border-radius:8px; }
+html[data-skin="aihot"] .primary { color:var(--accent-contrast); }
+html[data-skin="aihot"] .kpi { border-radius:12px; }
+html[data-skin="aihot"] .lbl .tag-ok { color:var(--ok-ink);
+  background:color-mix(in srgb, var(--ok) 10%, transparent); }
+html[data-skin="aihot"] .ltable td.res { color:var(--ok-ink); }
+html[data-skin="aihot"] .ltable tr.bad td.res, html[data-skin="aihot"] .utbl td.bad { color:var(--hot); }
+html[data-skin="aihot"] .ltable tr.ok td:first-child { box-shadow:inset 3px 0 0 color-mix(in srgb, var(--ok) 55%, transparent); }
+html[data-skin="aihot"] .ltable tr.bad td:first-child { box-shadow:inset 3px 0 0 var(--hot); }
+html[data-skin="aihot"] .pager a.on { color:var(--accent-contrast); }
+
+/* ── 信源页 ─────────────────────────────────────────────────────── */
+html[data-skin="aihot"] .srcrow { border-radius:12px; }
+html[data-skin="aihot"] .srctab { border-radius:999px; background:var(--bg-sunk); }
+html[data-skin="aihot"] .srctab.on { background:var(--sk-thumb); color:var(--text);
+  border-color:var(--line); font-weight:600;
+  box-shadow:0 0 0 1px var(--line), var(--shadow-thumb); }
+html[data-skin="aihot"] .btn-add { color:var(--accent-contrast); border-radius:8px; }
+html[data-skin="aihot"] .mini { border-radius:8px; background:transparent; }
+html[data-skin="aihot"] .mini:hover { color:var(--text); border-color:var(--line-strong);
+  background:var(--bg-sunk); }
+html[data-skin="aihot"] .addform input { border-radius:8px; background:var(--field); }
+html[data-skin="aihot"] .trash { border-radius:12px; }
+html[data-skin="aihot"] .probe-out { border-radius:8px; }
+html[data-skin="aihot"] .probe-out.ok { color:var(--ok-ink);
+  border-color:color-mix(in srgb, var(--ok) 40%, transparent);
+  background:color-mix(in srgb, var(--ok) 6%, transparent); }
+html[data-skin="aihot"] .probe-out.failed { color:var(--hot);
+  border-color:color-mix(in srgb, var(--hot) 40%, transparent); background:var(--hot-soft); }
+
+/* ── 详情页状态色（默认皮肤写死的绿/红，皮肤里换成 AIHOT 的 ok/hot） ── */
+html[data-skin="aihot"] .refetch.ok .rf-btn { color:var(--ok-ink); border-color:var(--ok-ink); }
+html[data-skin="aihot"] .refetch.ok .rf-note { color:var(--ok-ink); }
+html[data-skin="aihot"] .refetch.failed .rf-btn { color:var(--hot); border-color:var(--hot); }
+html[data-skin="aihot"] .refetch.failed .rf-note { color:var(--hot); }
+html[data-skin="aihot"] .tr-btn.ok { color:var(--ok-ink); border-color:var(--ok-ink); }
+html[data-skin="aihot"] .tr-btn.failed { color:var(--hot); border-color:var(--hot); }
+
+/* ── 动效收敛 ───────────────────────────────────────────────────── */
+@media (prefers-reduced-motion: reduce) {
+  html[data-skin="aihot"] .item { animation:none; }
+  html[data-skin="aihot"] .sk-seg-thumb { transition:none; }
+}

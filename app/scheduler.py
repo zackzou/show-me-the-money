@@ -518,7 +518,15 @@ def _process_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
 
 def build_scheduler(settings: Settings) -> BackgroundScheduler:
     """按配置装配四个任务（不启动）。"""
-    scheduler = BackgroundScheduler(timezone="Asia/Shanghai")
+    # misfire_grace_time=3600：APScheduler 默认只给 1 秒的迟到宽限，超过就
+    # **整次跳过**。本机（笔记本合盖、系统休眠）或容器暂停都会让调度线程冻结，
+    # 醒来时那一跳早已超出 1 秒 —— 实测表现是「睡了 3 小时，醒来抓取任务没跑，
+    # 页面停在三小时前」。给到 1 小时：醒来补跑一次迟到的，而不是等下一个周期。
+    # coalesce=True 表示积压的多跳只补跑一次，不会连续补 8 轮。
+    scheduler = BackgroundScheduler(
+        timezone="Asia/Shanghai",
+        job_defaults={"misfire_grace_time": 3600, "coalesce": True, "max_instances": 1},
+    )
     # 三个任务必须**错开**。IntervalTrigger 是一个具体时刻，把同一个对象传给
     # 多个 add_job 就等于让它们在同一秒起跑（实测日志里三个任务在 15 毫秒内
     # 一起启动），于是抓取在插文章、正文在读同一批行、处理在写同一批行 ——

@@ -11,11 +11,7 @@
 - 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
 - 不绑定 OpenAI：任意 OpenAI 兼容接口、本地 Ollama 都可以（含返回 SSE 流的网关）
 - 单机轻量：Python + FastAPI + SQLite，一个 `docker compose up -d` 跑起来
-
-- 必填配置只有 `LLM_API_*` + `RESEARCH_TOPIC`，其余全部内置默认值
-- 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
-- 不绑定 OpenAI：任意 OpenAI 兼容接口、本地 Ollama 都可以
-- 单机轻量：Python + FastAPI + SQLite，一个 `docker compose up -d` 跑起来
+- **两套外观**：默认风格 + 一键切换的 AIHOT 风格皮肤（布局/配色/动效，纯前端偏好）
 
 ---
 
@@ -24,6 +20,7 @@
 - [快速开始（Docker，推荐）](#快速开始docker推荐)
 - [本地运行（不用 Docker）](#本地运行不用-docker)
 - [配置](#配置)
+- [外观：默认风格与 AIHOT 皮肤](#外观默认风格与-aihot-皮肤)
 - [页面与语言策略](#页面与语言策略)
 - [它是怎么跑的](#它是怎么跑的)
 - [接口一览](#接口一览)
@@ -135,6 +132,30 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 ---
 
+## 外观：默认风格与 AIHOT 皮肤
+
+顶栏的 **✦** 按钮在**默认风格**与 **AIHOT 风格皮肤**之间切换，偏好存在浏览器
+`localStorage`，刷新与翻页都保持。AIHOT 皮肤下侧栏底部还有「换回默认风格」按钮，
+以及「深色 / 跟随系统 / 浅色」三态切换。
+
+| | 默认风格 | AIHOT 皮肤 |
+| --- | --- | --- |
+| 桌面导航 | 顶部横栏 + 搜索框 | 左侧固定侧栏（180px），搜索框在内容区右上角 |
+| 移动端 | 顶栏 + 汉堡菜单 | 顶栏（48px）+ 底部标签栏 |
+| 配色 | 蓝主色 / 冷灰底 | 暖白纸面 + 青绿主色（深色版青色），参考 aihot.news |
+| 卡片 | 圆角卡片 + 阴影 | 时间轴导轨 + 卡片（悬浮上浮、进场淡入） |
+| 组件 | — | 药丸轨道 + 白色滑块（分类/语言/外观切换）、发丝线右栏、素面小标题 |
+
+两条硬性约束：
+
+- **默认皮肤零影响**：皮肤的全部 CSS 选择器都锁在 `html[data-skin="aihot"]` 下
+  （`app/web/templates/_skin_aihot.css`，走 `/skin/aihot.css` 强缓存），
+  新壳层元素默认 `display:none`；切换按钮对默认皮肤用户不可见、不加载皮肤样式之外的任何东西。
+- **功能完全一致**：双语切换、早报浮层、重新获取、悬浮跳转条、收藏等全部照常，
+  皮肤只改样式不改行为。服务端不渲染 `data-skin`（测试与爬虫拿到的永远是默认皮肤）。
+
+---
+
 ## 页面与语言策略
 
 ### 三个管理页面
@@ -235,6 +256,18 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
   并且**先补标题与导读、再翻正文** —— 正文是长文、单篇成本是标题的十几倍，
   而标题与导读才是首页和详情页最显眼的地方。
   **升级旧库会自动补上 `content_full` / `digest_zh` / `body_images` 等新列。**
+- **正文翻译按「批量 JSON + 条数校验」走（对齐 AIHOT 的 translate 管线）。**
+  每批最多 3500 字符一次调用，要求模型返回 `{"t": ["…", "…"]}`；条数对不上就
+  对半拆批重试，仍失败才逐块递归兜底（每块自带输出预算 `max_tokens`）。
+  条数校验代替长度校验：模型漏译/多译一段时立刻发现，而不是把半篇残文写进库。
+  全有或全无 —— 任何一块没译出来，整篇退回原文并标注「暂无中文译文」。
+- **译文过「电报体」质检闸门。** 中转网关（9router 等）会注入「回答尽量简短」类
+  风格指令，把完整翻译压成电报体（「苹果发新AI模型Ferret。全端侧运行。」）。
+  这种污染长度可能达标、条数也对，只有虚词密度能识别
+  （`app.utils.text.looks_telegraphic`：虚词密度 <6.5 **且** 平均句长 <14）。
+  闸门接在翻译、摘要、导读、推荐理由、早报推送语五条路径上，命中就重试或丢弃，
+  绝不把压缩体写进库端给读者。`python scripts/init_check.py --ping` 带翻译质量探针，
+  部署前就能发现这类故障。
 - **停机后会自动补齐缺失日期的日报。**
 
 ---
@@ -245,7 +278,7 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | --- | --- |
 | `/` | 首页：热点资讯流（速览 + 配图 + 标签），每页 20 条，`?page=N` 翻页 |
 | `/story/{id}` | 单篇页内详情：左栏来源 + 中栏完整正文 + 右栏推荐理由/主题/标签 |
-| `/search?q=&scope=&cat=` | 站内搜索，`scope` 取 `meta`（标题与摘要）或 `full`（含正文） |
+| `/search?q=&scope=&cat=` | 站内搜索，`scope` 取 `meta`（标题与摘要）或 `full`（含正文）；无关键词时 303 回首页 |
 | `/saved` | 我的收藏（本地） |
 | `/daily/{date}` | 指定日期（`YYYY-MM-DD`）的全部报道，没有日报则 404 |
 | `/archive` | 历史日报列表 |
@@ -268,14 +301,17 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 - **顶部分类 tab**：全部 / 一手 / 模型 / 产品 / 行业 / 论文 / 教程 / 观点，
   定义在 `config/default_topics.yaml`，增删分类不用改代码。点 tab 走 `/?cat=xxx`。
-- **搜索**：右上角搜索框，按 <kbd>/</kbd> 随时聚焦。搜标题、摘要、速览、推荐理由、主题；
-  搜索结果页可切「最新（标题与摘要）」/「全文」。走 `/search?q=xxx`。
+- **搜索**：右上角搜索框（默认风格在顶栏；AIHOT 皮肤在内容区右上角），
+  按 <kbd>/</kbd> 随时聚焦（自动挑当前可见的那个）。搜标题、摘要、速览、推荐理由、主题；
+  搜索页可切「最新（标题与摘要）」/「全文相关」，分类 tab 与搜索范围互不覆盖。
+  走 `/search?q=xxx`；**清空（×）回首页**，空关键词访问 `/search` 也重定向回首页。
 - **标签可点**：卡片与详情页的标签点进去就是 `/?tag=xxx` 过滤结果。
 - **收藏**：卡片与详情页的 ☆ 存在**浏览器本地**（localStorage），不上传任何数据；
   `/saved` 页把收藏列出来。访问 `/api/articles` 最多取 500 条，所以收藏多了会受这个上限影响。
 - **搜索实现**：只用 SQL `LIKE`，不引 FTS5（中文分词要额外 tokenizer，对小项目不划算）。
   只搜已入选的内容（`relevance=1`），否则会把判为不相关的噪音也翻出来。
-  LIKE 通配符已转义（搜 `%` 不会变成匹配全部）。
+  LIKE 通配符已转义（搜 `%` 不会变成匹配全部）。搜索范围覆盖**中文译文列**
+  （`title_zh` / `digest_zh`，全文再加 `content_zh`）—— 读者看到的是译文，搜的也是译文。
 
 ### 热点资讯时间轴（首页 / `/daily/{date}`）
 
@@ -306,9 +342,10 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 三栏布局：
 
-- **左栏**：返回、来源、域名、发布时间、相对时间
-- **中栏**：标题 → 分类/主题定位（斜体）→ **AI 导读** → 分隔线 → **完整正文**（逐段渲染，
-  配图按原站的位置插在段落之间）→ 相关阅读（同分类或同标签，标题给全不截断）→ 免责说明
+- **左栏**：早报片段按钮、来源、域名、发布时间、相对时间、本文目录
+- **中栏**：返回（顶部唯一入口）→ 标题 → 分类/主题定位（斜体）→ **AI 导读** → 分隔线
+  → **完整正文**（逐段渲染，配图按原站的位置插在段落之间）→ 相关阅读（同分类或同标签，
+  标题给全不截断）→ 免责说明
 - **右栏**：打开原文 / 收藏 → 推荐理由（含分类与 AI 评分）→ 主题（可点，跳搜索）
   → 标签（可点，跳首页过滤）
 
@@ -356,7 +393,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 36 个文件零告警、388 个测试全绿。
+当前状态：`ruff` 无告警、`mypy` 37 个文件零告警、405 个测试全绿。
 
 ---
 
@@ -403,6 +440,19 @@ python scripts/repair_half_translated.py          # 中文侧小节里其实是�
 python scripts/cleanup_native_zh.py               # 中文原文却存了 title_en/digest_en
 ```
 
+**译文读起来像「电报体」（丢虚词、碎片化）**
+中转网关注入了「回答尽量简短」类风格指令，把完整翻译压成电报体。项目已内置质检闸门
+（虚词密度 + 平均句长双信号），命中的译文会被丢弃重试、不会入库；`init_check.py --ping`
+的翻译质量探针也能提前发现。排查两处：① 网关后台是否开着
+「简短回答 / token saver / caveman」类注入；② `LLM_EXTRA_HEADERS` 里的关闭开关是否
+**真的到达了网关** —— 中间任何一层代理转发时丢请求头，开关就失效（实测一个 OCR 桥接
+只转发 3 个固定头，把 `x-9router-token-saver: off` 吃掉了）。
+库里已有被压缩的存量数据用脚本体检与修复：
+
+```bash
+python scripts/repair_telegraphic.py              # 清掉被压成电报体的文案/译文并放回处理队列
+```
+
 **想控制 API 花费**
 把 `ai.batch_size` 调小、调大 `fetch_interval_hours`、删掉 `config/default_sources.yaml` 里用不到的源。相关度判断是每篇 1 次调用，摘要 + 标签各 1 次。
 
@@ -435,18 +485,20 @@ app/
                     content.py 正文全文抽取 · images.py og:image 补图
   ai/              client.py 纯 HTTP 客户端 · prompts.py · processor.py 处理与降级
   report/          generator.py 日报生成与时间窗口
-  web/             routes.py 页面（热点流/单篇速览/归档）· sources.py 信源管理
+  web/             routes.py 页面（热点流/单篇速览/归档/搜索）· sources.py 信源管理
                     settings.py 模型设置与用量 · api.py JSON（含重新获取任务）· rss.py 订阅
-  utils/           logger.py · text.py
+                    templates/ Jinja2；_skin_aihot.css 皮肤 · _icons.html 皮肤图标
+  utils/           logger.py · text.py（含 looks_telegraphic 质检）
   fetcher/lang.py  正文的语种判定（自适应语言用）
 config/            默认信源 / 分类 / 提示词 / 调度
 tests/             test_config · test_fetcher · test_ai · test_report · test_api
                     test_media（配图抽取）· test_content（正文抽取）
                     test_search（搜索与分类过滤）· test_migration（老库补列与自愈）
-                    test_cluster（同题合并）· test_config · test_media_store
-scripts/           init_check.py 启动自检（--ping 测 LLM、--fetch 跑一次抓取）
+                    test_cluster（同题合并）· test_media_store · test_skin（皮肤）
+scripts/           init_check.py 启动自检（--ping 测 LLM 与翻译质量、--fetch 跑一次抓取）
                     cleanup_native_zh.py 中文原文的英译残留清理
                     repair_half_translated.py 半截译文的中文章节清理
+                    repair_telegraphic.py 被网关压成电报体的文案/译文清理
 docs/              样例日报（Markdown / HTML）
 ```
 

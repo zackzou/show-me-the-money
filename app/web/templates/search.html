@@ -2,35 +2,81 @@
 {% from "_articles.html" import timeline, tabs %}
 {% block content %}
 
-<div class="lead">
-  <div class="kicker">SEARCH</div>
-  <h1>{% if q %}搜索"{{ q }}"{% else %}搜索{% endif %}</h1>
-  {% if q %}
-    <p class="meta">找到 <b>{{ found }}</b> 条{% if found > shown %}（当前只渲染最近 {{ shown }} 条，
-      其余 {{ found - shown }} 条请缩小关键词范围）{% endif %}{% if active_cat %} · 分类「{{ active_cat }}」{% endif %}
-      · 搜索范围：{{ scope_label }} · 更新于 {{ searched_at.strftime('%H:%M') }}</p>
-  {% else %}
-    <p class="meta">在已入选的报道里搜标题、摘要、速览、推荐理由与正文。按 <kbd style="font-size:11px;border:1px solid var(--line);border-radius:4px;padding:0 4px">/</kbd> 快速聚焦搜索框。</p>
-  {% endif %}
+{# ── 搜索页头：标题 + 右侧搜索框（对齐 AIHOT 的搜索页） ─────────────
+   搜索框放在页面里而不是只靠顶栏：AIHOT 皮肤下桌面顶栏整条被侧栏替代，
+   页内搜索框是改词重搜的入口；默认皮肤保留顶栏搜索框的同时，页内这个
+   更靠近结果，回车即用当前 scope/cat 重新搜。 #}
+<div class="search-head">
+  <h1 class="search-title">搜索"{{ q }}"</h1>
+  <form class="search-field" action="/search" method="get" role="search">
+    <span class="sf-ico" aria-hidden="true">⌕</span>
+    <input type="search" name="q" id="search-q" value="{{ q|default('') }}"
+           placeholder="搜索标题、摘要…" aria-label="搜索文章" autocomplete="off">
+    {# 清空 = 回到首页。原来指向 /search（一个没有关键词的空白搜索页），
+       读者点 × 的意图是「我不搜了」，该看到的是默认内容流。 #}
+    <a class="sf-clear" href="/" title="清空并回到首页" aria-label="清空搜索">×</a>
+    {% if scope != scope_meta %}<input type="hidden" name="scope" value="{{ scope }}">{% endif %}
+    {% if active_cat %}<input type="hidden" name="cat" value="{{ active_cat }}">{% endif %}
+  </form>
 </div>
 
-<div class="sub-bar">
+{# ── 分类 tab 一行，范围（最新/全文）+ 命中数一行（对齐 AIHOT 的两行结构） ── #}
+{# tab 链接带上当前 scope：在「全文相关」下点分类，不该被悄悄弹回「最新」。
+   base 结尾不带分隔符 —— tabs() 宏自己会补 `&`，带了会拼出 `&&`。 #}
+<div class="search-cats">
+  {{ tabs(categories, active_cat, counts, '/search?q=' ~ (q|urlencode) ~ '&scope=' ~ scope) }}
+</div>
+
+<div class="search-scope-bar">
   <div class="sub-left">
-    {{ tabs(categories, active_cat, counts, '/search?q=' ~ (q|urlencode) ~ '&') }}
-    {% if q %}
-      <span class="scope">
-        <a class="{{ 'on' if scope == scope_meta else '' }}"
-           href="/search?q={{ q|urlencode }}&scope=meta{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}">最新</a>
-        <a class="{{ 'on' if scope == scope_full else '' }}"
-           href="/search?q={{ q|urlencode }}&scope=full{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}">全文</a>
-      </span>
-    {% endif %}
+    <span class="scope">
+      <a class="{{ 'on' if scope == scope_meta else '' }}"
+         href="/search?q={{ q|urlencode }}&scope=meta{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}"
+         title="在标题与摘要里搜">最新（标题与摘要）</a>
+      <a class="{{ 'on' if scope == scope_full else '' }}"
+         href="/search?q={{ q|urlencode }}&scope=full{% if active_cat %}&cat={{ active_cat|urlencode }}{% endif %}"
+         title="连正文一起搜">全文相关</a>
+    </span>
   </div>
+  <span class="hit">
+    找到 <b>{{ found }}</b> 条{% if found > shown %}（只渲染最近 {{ shown }} 条，
+    其余请缩小关键词范围）{% endif %}{% if active_cat %} · 分类「{{ active_cat }}」{% endif %}
+    · 更新于 {{ searched_at.strftime('%H:%M') }}
+  </span>
 </div>
 
-{% if q %}{{ timeline(groups, '没有找到匹配的内容，换个关键词试试。') }}
-{% else %}
-  <div class="empty">输入关键词开始搜索。<br><span style="font-size:12.5px">支持中英文，标题与摘要之外还能搜速览、推荐理由与主题。</span></div>
+{% if active_tag %}
+  <p class="hit">正在按标签 <b>#{{ active_tag }}</b> 筛选 · <a href="/search?q={{ q|urlencode }}" style="color:var(--accent)">清除</a></p>
 {% endif %}
 
+{{ timeline(groups, '没有找到匹配的内容，换个关键词试试。') }}
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  /* 搜索页专属版式。搜索框（.search-field 及其零件）的样式在 base.html ——
+     首页也用同一个框，样式只写一处。这里只管本页的标题行与范围行。 */
+  /* ── 搜索页头：标题与搜索框同一行 ─────────────────────────────── */
+  .search-head { display:flex; align-items:center; justify-content:space-between;
+                 gap:20px; flex-wrap:wrap; padding:22px 0 2px; }
+  .search-title { margin:0; font-size:28px; line-height:1.3; letter-spacing:-.5px;
+                  min-width:0; overflow-wrap:anywhere; }
+
+  /* ── 分类 tab 与范围行 ────────────────────────────────────────── */
+  .search-cats { padding:14px 0 0; }
+  /* 范围行：左边 最新/全文，右边命中数（对齐 AIHOT 的分布） */
+  .search-scope-bar { display:flex; align-items:center; justify-content:space-between;
+                      gap:12px 18px; flex-wrap:wrap; padding:12px 0 4px; }
+  .search-scope-bar .sub-left { display:flex; align-items:center; gap:12px; flex-wrap:wrap; }
+  .search-scope-bar .hit { margin-left:auto; }
+  @media (max-width:640px) {
+    .search-head { padding-top:16px; }
+    .search-title { font-size:23px; }
+    .search-field { max-width:none; }
+  }
+  @media (max-width:680px) {
+    .search-head { padding-top:14px; }
+  }
+</style>
 {% endblock %}

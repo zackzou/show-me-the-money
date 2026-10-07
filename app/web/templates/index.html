@@ -13,6 +13,15 @@
 
 <div class="sub-bar">
   {{ tabs(categories, active_cat, none, '/?') }}
+  {# 内容区右上角的搜索框（AIHOT 版式）：只在 AIHOT 皮肤桌面端显示 ——
+     默认皮肤与窄屏由 base.html 的 CSS 隐藏，顶栏那个一直可见。 #}
+  <form class="search-field" action="/search" method="get" role="search">
+    <span class="sf-ico" aria-hidden="true">⌕</span>
+    <input type="search" name="q" id="search-q" value="{{ q|default('') }}"
+           placeholder="搜索标题、摘要…" aria-label="搜索文章" autocomplete="off">
+    <kbd class="sf-key">/</kbd>
+    {% if active_cat %}<input type="hidden" name="cat" value="{{ active_cat }}">{% endif %}
+  </form>
 </div>
 
 {% if active_tag %}

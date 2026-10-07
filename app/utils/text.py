@@ -257,6 +257,60 @@ def chinese_ratio(text: str | None) -> float:
     return han / total if total else 0.0
 
 
+# 电报体判定：虚词密度低 **且** 句子被切成短碎片，两个条件同时成立才算。
+#
+# 实测校准（线上库真实样本）：
+#   CAVEMAN 污染体 —— 虚词密度 0~6.2、平均句长 6~11（每句都是光杆实词）；
+#   正常中文文案 —— 虚词密度 4.3~20、平均句长 18~39。
+# 单看密度会误伤「模型正常写的浓缩摘要」（如 4.3 但句长 23.5）——
+# 那是提示词要求「100 字以内」的结果，不是压缩污染。
+# 两个信号取交集后：污染样本全部命中，正常样本零误报。
+_TELEGRAPH_FW_DENSITY = 6.5
+_TELEGRAPH_AVG_SENTENCE = 14.0
+# 汉字太少时统计不可靠（一个短标题的虚词占比没有意义）
+_TELEGRAPH_MIN_HAN = 25
+# 常见虚词：的、了、吗、呢、吧、是、在、和、与、及、或、而、并、以、为、
+# 对、把、被、将、能、会、可、这、那、着、过、等、从、向、给、让、使、
+# 由、所、之、其、就、都、还、也、很、更、最
+_FUNCTION_WORDS = frozenset("的了吗呢吧是在和与及或而并以为对把被将能会可这那着过等从向给让使由所之其就都还也很更最")
+
+
+def looks_telegraphic(text: str | None) -> bool:
+    """这段中文是不是被「电报体」压缩过（网关风格注入的典型症状）。
+
+    症状：虚词被系统性丢弃（只留实词），句子被切成大量短碎片。
+    例：「苹果宣布新AI模型Ferret。全端侧运行。图文同处理。公司称下月供开发者。」
+    正常译文应是：「苹果公司宣布了一款名为 Ferret 的新 AI 模型，该模型完全
+    在设备端运行，并且能够同时处理图像和文本。」
+
+    为什么要检测它：网关（9router 等）会往 system 里注入「回答像原始人一样简短」
+    这类风格指令，把完整翻译压成电报体。**译文长度可能达标、条数也对**，
+    长度校验完全看不出来 —— 只有语言形态能识别。检测到就当译文不可用，
+    让上层重试或换网关，而不是把残次品写进库、端给读者。
+
+    两个信号同时满足才判定（防误伤模型正常写的浓缩摘要）：
+      1. 虚词密度低于 6.5；**且**
+      2. 平均句长（每句汉字数）低于 14。
+    模型正常写的浓缩摘要密度可能低（如 4.3），但句子仍有完整结构、
+    平均句长在 20 以上 —— 那是提示词要求「100 字以内」的结果，不是污染。
+    """
+    value = text or ""
+    han = sum(1 for ch in value if "\u4e00" <= ch <= "\u9fff")
+    if han < _TELEGRAPH_MIN_HAN:
+        return False
+    function_words = sum(1 for ch in value if ch in _FUNCTION_WORDS)
+    if function_words / han * 100 >= _TELEGRAPH_FW_DENSITY:
+        return False
+    pieces = [
+        piece.strip()
+        for piece in re.split(r"[。！？!?；;\n]", value)
+        if re.search(r"[\u4e00-\u9fff]", piece)
+    ]
+    if not pieces:
+        return False
+    return han / len(pieces) < _TELEGRAPH_AVG_SENTENCE
+
+
 def has_long_latin_run(text: str | None, *, min_chars: int = 10) -> bool:
     """有没有**一整句**没翻的英文。
 

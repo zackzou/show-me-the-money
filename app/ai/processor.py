@@ -20,18 +20,17 @@ from app.ai.prompts import (
     render_structure_prompt,
     render_summary_prompt,
     render_tag_prompt,
+    render_translate_batch_prompt,
     render_translate_content_prompt,
     render_translate_digest_zh_prompt,
     render_translate_prompt,
     render_translate_title_zh_prompt,
 )
 from app.config import PromptsConfig, Settings
-from app.db import session_scope
 from app.fetcher.content import is_real_body
 from app.fetcher.lang import (
     LANG_AUTO,
     LANG_EN,
-    LANG_ZH,
     article_is_foreign,
     resolve_lang,
 )
@@ -41,6 +40,7 @@ from app.utils.text import (
     has_long_latin_run,
     is_chinese_text,
     looks_english,
+    looks_telegraphic,
     now_local,
     split_tags,
     strip_html,
@@ -246,12 +246,18 @@ def translation_is_usable(source: str, translated: str) -> bool:
     64 字（翻译了开头一段就收工，比例 0.05），页面照样认为「有中文译文」，
     于是双语模式下正文只剩一个中文段落，英文却是完整六段，看起来像没译完。
 
+    还要挡**电报体**（``looks_telegraphic``）：长度比例合格、句子也完整，
+    但虚词被系统性丢弃（网关风格注入）。这种残次品长度校验看不出来，
+    展示层同样要当成「不可用」，库里已写坏的老数据才不会继续端给读者。
+
     展示层也用这个判断，这样库里已经写坏的老数据同样会被当成「暂无译文」，
     而不是继续把残篇当译文端上去。
     """
     src = (source or "").strip()
     out = (translated or "").strip()
     if not out:
+        return False
+    if looks_telegraphic(out):
         return False
     if len(src) < _TRANSLATE_MIN_SRC_CHARS:
         # 原文太短，比例没意义（一句英文标题也占不到 0.25）
@@ -286,7 +292,9 @@ def translate_title_to_chinese(client: LLMClient, prompts: PromptsConfig, title:
     if not title or is_chinese_text(title):
         return None
     raw = _optional_llm(client, render_translate_title_zh_prompt(prompts, title), "")
-    return parse_title_zh(raw)
+    parsed = parse_title_zh(raw)
+    # 标题短，虚词统计不可靠，不做电报体判定（looks_telegraphic 自带最小汉字数门槛）
+    return parsed
 
 
 def translate_digest_to_chinese(client: LLMClient, prompts: PromptsConfig, digest: str) -> str | None:
@@ -306,7 +314,12 @@ def translate_digest_to_chinese(client: LLMClient, prompts: PromptsConfig, diges
         lines = lines[1:]
     result = strip_markdown(" ".join(lines))
     # 拿回一段英文等于没翻，别把它当成功写进库里（写进去就再也不会重试了）
-    return None if not result or looks_english(result) else result
+    if not result or looks_english(result):
+        return None
+    # 电报体（网关风格注入压缩）同样不能收：长度够、句子完整，但虚词被丢光
+    if looks_telegraphic(result):
+        return None
+    return result
 
 
 def generate_brief_zh(
@@ -327,6 +340,9 @@ def generate_brief_zh(
     # 推送语是中文手机推送：没有汉字等于没写（短英文会绕过 looks_english 的
     # 40 字母门槛，写进库就再也不会重试了）
     if not result or not is_chinese_text(result):
+        return None
+    # 电报体压缩同样不能推给读者（虚词被丢光，读起来像机器打电报）
+    if looks_telegraphic(result):
         return None
     # 必须是完整的一句话：以句末标点收尾。
     # 实测踩过：模型偶尔只回半句就停了，直接入库就推成了
@@ -584,6 +600,136 @@ def _halve_by_sentence(text: str) -> list[str]:
     return [left, right] if left and right else [text]
 
 
+def parse_translation_json(raw: str, expected: int) -> list[str] | None:
+    """解析批量翻译的 JSON 回复，返回**恰好 expected 条**的译文。
+
+    对齐 AIHOT 的校验方式（``res.data.t.length === parts.length ? t : null``）：
+    条数对不上就当整批失败。模型漏译一段、多吐一段、或者把 JSON 包在
+    Markdown 代码块里（``\\`\\`\\`json ... \\`\\`\\``）都要能识别出来。
+
+    容忍两点现实：回复前后带解释文字（取第一个 ``{`` 到最后一个 ``}``），
+    以及 JSON 里的转义换行。**不容忍**条数不匹配 —— 那正是「有一半没翻」的信号。
+    """
+    text = (raw or "").strip()
+    if not text:
+        return None
+    start = text.find("{")
+    end = text.rfind("}")
+    if start < 0 or end <= start:
+        return None
+    try:
+        data = json.loads(text[start:end + 1])
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    items = data.get("t")
+    if not isinstance(items, list) or len(items) != expected:
+        return None
+    out: list[str] = []
+    for item in items:
+        if not isinstance(item, str) or not item.strip():
+            return None
+        # 逐条挡电报体：整批条数对、长度也够，但内容是压缩体时同样不能收。
+        # 单条命中就整批退回（上层会对半拆批或逐块兜底），不混合收。
+        if looks_telegraphic(item):
+            return None
+        out.append(item.strip())
+    return out
+
+
+def _batch_max_tokens(chars: int) -> int:
+    """按输入长度给输出预算（对齐 AIHOT：输入 × 1.2 + 余量，封顶 8000）。
+
+    不给预算时上游默认上限常常只有 1~2k token，长文回复会被**截断在半句**上 ——
+    实测网关把一段 900 字符的块稳定截在 343 字（半个数字）。给足预算后
+    首次就写得完，递归拆块退化成兜底而非常规路径。
+    """
+    return min(8000, max(1200, int(chars * 1.2) + 400))
+
+
+# 单次批量调用的输入字符预算（对齐 AIHOT 的 BATCH_CHARS=3500）。
+# 太小退化成逐块调用（失去批量的意义），太大则单次回复过长、容易被截断。
+TRANSLATE_BATCH_CHARS = 3500
+
+
+def _batch_groups(chunks: list[str]) -> list[list[str]]:
+    """把块按字符预算分成若干批（对齐 AIHOT 的 translateAll 分组）。
+
+    每批至少一块 —— 单块超过预算时仍然单独成批，交给 ``_translate_batch``
+    的对半拆批处理，不能死循环。
+    """
+    groups: list[list[str]] = []
+    current: list[str] = []
+    size = 0
+    for chunk in chunks:
+        if current and size + len(chunk) > TRANSLATE_BATCH_CHARS:
+            groups.append(current)
+            current, size = [], 0
+        current.append(chunk)
+        size += len(chunk)
+    if current:
+        groups.append(current)
+    return groups
+
+
+def _translate_batch(
+    client: LLMClient,
+    prompts: PromptsConfig,
+    chunks: list[str],
+    *,
+    budget: dict[str, int] | None = None,
+) -> list[str] | None:
+    """一次调用翻译**一批块**（AIHOT 的做法），返回与输入等长的译文或 ``None``。
+
+    为什么要批量：一块一次调用时，长文 = 块数次往返，每次都带着完整的提示词
+    开销；更糟的是网关对单块回复偶发截断，只能靠「重试 → 对半拆 → 再拆」
+    烧调用（实测文章 520 两轮 264 次）。批量把 N 块压成 1 次调用，
+    **条数校验**代替长度校验：条数不对就整批失败，交给上层对半拆。
+
+    拆批策略（与 AIHOT 一致）：
+      1. 整批一次试；
+      2. 条数不对且块数 > 1：对半拆成两批各试一次；
+      3. 还不行就返回 ``None``，由 ``_rewrite_chunk`` 逐块递归兜底。
+    """
+    if not chunks:
+        return []
+    if budget is not None:
+        if budget["left"] <= 0:
+            return None
+        budget["left"] -= 1
+
+    prompt = render_translate_batch_prompt(prompts, chunks)
+    if not prompt:
+        # 老配置没有批量模板：返回 None，调用方走逐块兜底
+        return None
+    try:
+        raw = client.chat(prompt, max_tokens=_batch_max_tokens(sum(len(c) for c in chunks)))
+    except LLMError as exc:
+        log.warning("批量翻译调用失败（%s），转逐块兜底", exc)
+        return None
+    parsed = parse_translation_json(raw, len(chunks))
+    if parsed is not None:
+        # 逐条比例校验：整篇比例对短正文不生效（<400 字符跳过），
+        # 但「12% 的压缩摘要」这种残缺必须在这一层拦下 —— 条数对不代表内容完整。
+        for item, chunk in zip(parsed, chunks, strict=True):
+            ratio = len(item) / len(chunk) if chunk else 0.0
+            if not (_TRANSLATE_MIN_RATIO <= ratio <= _TRANSLATE_MAX_RATIO):
+                return None
+        return parsed
+
+    if len(chunks) > 1:
+        middle = len(chunks) // 2
+        left = _translate_batch(client, prompts, chunks[:middle], budget=budget)
+        if left is None:
+            return None
+        right = _translate_batch(client, prompts, chunks[middle:], budget=budget)
+        if right is None:
+            return None
+        return left + right
+    return None
+
+
 def _rewrite_chunk(
     client: LLMClient, prompts: PromptsConfig, chunk: str, *,
     depth: int = 0, budget: dict[str, int] | None = None,
@@ -614,8 +760,10 @@ def _rewrite_chunk(
             client, render_translate_content_prompt(prompts, chunk), ""
         ).strip()
         ratio = len(translated) / len(chunk) if chunk else 0.0
-        # 太短=被截断/压成摘要，太长=在扩写复述；两种都不该写进库
-        if translated and _TRANSLATE_MIN_RATIO <= ratio <= _TRANSLATE_MAX_RATIO:
+        # 太短=被截断/压成摘要，太长=在扩写复述，电报体=被风格注入压缩；
+        # 三种都不该写进库
+        if (translated and _TRANSLATE_MIN_RATIO <= ratio <= _TRANSLATE_MAX_RATIO
+                and not looks_telegraphic(translated)):
             return translated, True
         translated = ""
 
@@ -647,9 +795,14 @@ def translate_to_chinese(
 ) -> str | None:
     """把英文原文正文整篇译成中文。
 
-    按段分组调用，逐组拼回去；某一组失败只丢那一组，不影响其它段
-    （长文很难一次成功，丢掉一段比整篇没有译文好）。
-    全程都是英文就原样返回，不浪费调用。
+    流程对齐 AIHOT 的 translate.ts：
+      1. 按字符预算切块（``TRANSLATE_CHUNK_CHARS``）；
+      2. **整批一次调用**（``_translate_batch``），条数校验通过就收；
+      3. 条数不对 → 对半拆批重试；仍失败 → 逐块递归兜底（``_rewrite_chunk``）；
+      4. 最后按**整篇**比例兜一道（``translation_is_usable``）。
+
+    全有或全无：任何一块最终没译出来，整篇不采用 —— 残篇比没有译文更糟
+    （没有译文时页面会明说「原文为英文，暂无中文译文」）。
     """
     text = (content or "").strip()
     if not text or not looks_english(text):
@@ -659,9 +812,32 @@ def translate_to_chinese(
     if not paragraphs:
         return None
     chunks = chunk_for_rewrite(paragraphs)
+    if not chunks:
+        return None
+    budget = {"left": TRANSLATE_MAX_CALLS}
+
+    # ① 批量调用（对齐 AIHOT 的 translateAll）：按 3500 字符分批，
+    #    每批一次调用 + 条数校验；批内条数不对时函数自己会对半拆批。
+    batched: list[str] = []
+    batch_ok = True
+    for group in _batch_groups(chunks):
+        got = _translate_batch(client, prompts, group, budget=budget)
+        if got is None:
+            batch_ok = False
+            break
+        batched.extend(got)
+        if budget["left"] <= 0:
+            batch_ok = False
+            break
+    if batch_ok and batched:
+        joined = "\n\n".join(batched)
+        if translation_is_usable(text, joined):
+            return joined
+        log.info("批量译文总长 %d 对原文 %d 比例不合格，转逐块兜底", len(joined), len(text))
+
+    # ② 逐块递归兜底：某块写不出来时对半拆，直到拆到能写下的尺寸
     out: list[str] = []
     failed = 0
-    budget = {"left": TRANSLATE_MAX_CALLS}
     for chunk in chunks:
         translated, ok = _rewrite_chunk(client, prompts, chunk, budget=budget)
         if ok:
@@ -813,6 +989,14 @@ def process_article(
         native_zh = resolves_native_zh(article, source_lang)
 
         summary = client.chat(render_summary_prompt(settings.prompts, topic, article.title, excerpt))
+        # 摘要被网关压缩成电报体时重试一次：这类回复**长度可能达标**，
+        # 只有虚词密度能识别（见 looks_telegraphic）。重试仍不行就接受 ——
+        # 摘要只影响列表页文案，不该让整篇文章失败降级。
+        if looks_telegraphic(summary):
+            log.warning("摘要疑似被网关压缩成电报体，重试一次：%s", article.title[:40])
+            retried = client.chat(render_summary_prompt(settings.prompts, topic, article.title, excerpt))
+            if not looks_telegraphic(retried):
+                summary = retried
         article.summary = truncate(summary, 500)
 
         # 速览：让读者在页内读完，不用跳原站
@@ -824,6 +1008,11 @@ def process_article(
             _fallback_digest(article, settings.prompts.fallback_digest_chars),
         )
         article.digest, digest_en = split_digest(digest)
+        # 导读同样挡电报体：命中就丢掉（展示层回退截断摘要），
+        # 不把压缩体写进库 —— 写进去就再也不会重试了
+        if article.digest and looks_telegraphic(article.digest):
+            log.warning("导读疑似被网关压缩成电报体，丢弃：%s", article.title[:40])
+            article.digest = _fallback_digest(article, settings.prompts.fallback_digest_chars)
         article.digest = truncate(article.digest, 400)
         if digest_en and not native_zh:
             article.digest_en = truncate(digest_en, 400)
@@ -834,6 +1023,9 @@ def process_article(
             render_reason_prompt(settings.prompts, topic, article.title, summary),
             _fallback_digest(article, settings.prompts.fallback_reason_chars),
         )
+        # 理由短（50 字以内），电报体判定可能不触发；命中也丢掉换回退
+        if reason and looks_telegraphic(reason):
+            reason = _fallback_digest(article, settings.prompts.fallback_reason_chars)
         article.reason = truncate(reason, 200)
 
         # 分类 + 主题：一次调用同时产出，失败只丢这两个字段

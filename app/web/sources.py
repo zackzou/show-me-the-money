@@ -418,6 +418,12 @@ async def sources_create(
             notice={"kind": "warn", "text": f"这个地址已经在源列表里了（{existing.name}）"},
             status=400,
         )
+    # 结束这次只读查询打开的事务快照，再去试抓。试抓是外部网络调用（最长 12 秒），
+    # 期间调度器几乎必然写库；带着旧快照回来做 INSERT 会撞 SQLITE_BUSY_SNAPSHOT
+    # —— 这种升级失败**不遵守 busy_timeout**，重试也没用（AGENTS.md 已知项）。
+    # 在这里提交/回滚一次（没有写操作，等价于结束事务），后面 session.add 起的是
+    # 全新事务，拿到的是最新快照，就不会再踩。
+    session.commit()
 
     probe = await run_in_threadpool(_probe, url)
     if not probe["ok"]:
@@ -564,7 +570,7 @@ async def sources_restore(
 @sources_router.post("/sources/{source_id}/probe", response_class=HTMLResponse)
 async def sources_probe(
     request: Request, source_id: IdParam, session: Session = Depends(get_session)
-) -> HTMLResponse:
+) -> Any:
     """手动试抓一个已存在的源：用于排查「最近没抓到东西」。
 
     JSON 路径带一份结构化的 ``probe`` 详情（耗时/条数/样例/识别语言/错误），
@@ -580,10 +586,11 @@ async def sources_probe(
     probe = await run_in_threadpool(_probe, row.url)
     probe["ms"] = int((time.time() - started) * 1000)
     if _wants_json(request):
-        if probe["ok"]:
-            text = f"{row.name}：正常，读到 {probe['count']} 条"
-        else:
-            text = f"{row.name}：{probe['error']}"
+        text = (
+            f"{row.name}：正常，读到 {probe['count']} 条"
+            if probe["ok"]
+            else f"{row.name}：{probe['error']}"
+        )
         return JSONResponse(
             {
                 "ok": probe["ok"],

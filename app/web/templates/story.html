@@ -20,7 +20,9 @@
 <div class="story">
 
   <aside class="side">
-    <a href="/" class="back">← 返回</a>
+    {# 返回按钮**只保留正文上方那一个**（.backtop）。这里原来还有一个，
+       桌面端两个「← 返回」同屏出现（左栏一个、正文上方一个），
+       手机上左栏被排到页底基本看不见 —— 纯重复，删掉。 #}
     {# 早报片段：不跳转，弹手机竖屏预览，供拼微信早报长图 #}
     {# 数据点开时再取：HTML 里不重复塞一遍摘要，页面也更干净 #}
     <button type="button" class="digest-btn" id="digest-btn" data-article-id="{{ item.id }}">
@@ -226,7 +228,7 @@
         <div class="cats" style="margin:0 0 8px">
           {% if item.category %}<span class="cat">{{ item.category }}</span>{% endif %}
           {% if item.score is not none %}
-            <span class="score {{ 'strong' if item.score >= 70 else '' }}">AI 评分 <b>{{ item.score }}</b></span>
+            <span class="score {{ 'strong' if item.score >= 70 else '' }}{{ ' hot' if item.score >= 85 else '' }}">AI 评分 <b>{{ item.score }}</b></span>
           {% endif %}
         </div>
         <p class="why">{{ item.reason }}</p>

@@ -304,6 +304,10 @@ def test_relative_time_formatting(client, settings: Settings, seeded_db):
 
     「小时前」直接验格式化函数，不往库里造：``now - 3 小时`` 在 00:0x 跑的时候
     会落到昨天，那篇文章根本不在今天的时间窗里，页面当然没有「小时前」。
+
+    「分钟前」那篇也做了跨午夜保护：00:0x 跑测试时 ``now - 3 分钟`` 会落到
+    昨天 23:5x，同样掉出今天的时间窗 —— 这个用例在午夜后必挂。把发布时间
+    钳进「今天」之内（取 now 和今天零点的较大者）。
     """
     from datetime import timedelta
 
@@ -311,14 +315,18 @@ def test_relative_time_formatting(client, settings: Settings, seeded_db):
     from app.web.routes import _relative
 
     now = now_local()
+    midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    just_now = max(now - timedelta(minutes=3), midnight)
     with session_scope() as session:
         make_article(session, title="刚刚的", link="https://example.com/just",
-                     published_at=now - timedelta(minutes=3))
+                     published_at=just_now)
     with session_scope() as session:
         generate_daily_report(_today(), session=session, settings=settings)
 
     text = client.get("/").text
-    assert "分钟前" in text
+    # 刚过午夜时 now-midnight 不足 1 分钟，文案会显示「刚刚」而不是「分钟前」——
+    # 两种都算「相对时间正常显示」。
+    assert ("分钟前" in text) or ("刚刚" in text)
     assert _relative(now - timedelta(hours=3), now) == "3 小时前"
     assert _relative(now - timedelta(days=2), now) == "2 天前"
 
@@ -371,13 +379,70 @@ def test_search_page_renders_results(client, settings: Settings, seeded_db):
     assert "OpenAI 发布新一代模型" in page.text
     assert "无关内容" not in page.text
     assert "找到" in page.text
-    # 分类 tab 与 最新/全文 切换都要在
+    # 分类 tab 与 最新/全文 切换都要在（标签对齐 AIHOT 的「最新（标题与摘要）/ 全文相关」）
     assert 'class="tabs"' in page.text
-    assert ">最新<" in page.text
-    assert ">全文<" in page.text
+    assert ">最新（标题与摘要）<" in page.text
+    assert ">全文相关<" in page.text
 
-    assert client.get("/search").status_code == 200
+    assert client.get("/search", follow_redirects=False).status_code == 303
     assert client.get("/search?q=绝对不存在的词").status_code == 200
+
+
+def test_empty_search_redirects_home(client, seeded_db):
+    """空关键词搜索回首页：一个「输入关键词开始搜索」的空白页看起来像坏了。
+
+    顶栏搜索框的 × 也是清空后回首页 —— 读者点 × 的意图是「我不搜了」，
+    该看到的是默认内容流。
+    """
+    response = client.get("/search", follow_redirects=False)
+    assert response.status_code == 303
+    assert response.headers["location"] == "/"
+    # 只有空白也算空
+    assert client.get("/search?q=%20%20", follow_redirects=False).status_code == 303
+
+
+def test_search_page_has_in_page_field(client, seeded_db):
+    """搜索页头带页内搜索框（对齐 AIHOT 的搜索页版式）。
+
+    AIHOT 皮肤下桌面顶栏被侧栏替代，页内搜索框是改词重搜的入口；
+    默认皮肤与窄屏由 CSS 隐藏它（顶栏那个一直可见），DOM 里始终存在。
+    """
+    page = client.get("/search?q=AI&scope=full")
+    assert page.status_code == 200
+    assert 'class="search-head"' in page.text
+    assert 'class="search-field"' in page.text
+    assert 'id="search-q"' in page.text
+    # 提交时保留当前范围（换词不丢筛选）
+    assert '<input type="hidden" name="scope" value="full">' in page.text
+    # 搜索页也走 / 快捷键；base.html 的候选顺序是 页内 → 顶栏
+    assert '"search-q", "q"' in page.text
+
+
+def test_search_tabs_keep_scope(client, seeded_db):
+    """分类 tab 链接要保留当前 scope，不能点一下就被弹回「最新」。
+
+    回归：早先 tabs 的 base 传的是 `/search?q=…&`，而 scope 不在里面 ——
+    在「全文相关」下点分类，范围被悄悄重置。
+    """
+    page = client.get("/search?q=AI&scope=full")
+    assert page.status_code == 200
+    # tab 链接里带 scope=full（拼在 base 上，不是另开一个参数）
+    assert "&scope=full" in page.text
+
+
+def test_search_tab_urls_have_no_double_ampersand(client, seeded_db):
+    """回归：tabs 的 base 不能再以 `&` 结尾，否则拼出 `&&`。
+
+    实测 /search?q=AI&scope=full&&cat=模型 —— 参数名变成 `&cat`，
+    服务端仍能解析，但链接脏、复制出去难看，日志里也不好读。
+    只检查 href（页面 JS 里的 `&&` 是逻辑运算符，不是 URL）。
+    """
+    import re
+
+    page = client.get("/search?q=AI&scope=full")
+    hrefs = re.findall(r'href="([^"]*)"', page.text)
+    assert hrefs
+    assert not [h for h in hrefs if "&&" in h], "href 里不应出现 `&&`"
 
 
 def test_home_category_filter(client, settings: Settings, seeded_db):
@@ -390,6 +455,27 @@ def test_home_category_filter(client, settings: Settings, seeded_db):
     page = client.get("/?cat=模型")
     assert "模型类文章" in page.text
     assert "行业类文章" not in page.text
+
+
+def test_story_has_single_back_button(client, settings: Settings, seeded_db):
+    """回归：文章页只有一个「← 返回」。
+
+    早先左栏与正文上方各有一个，桌面同屏出现两个一模一样的返回按钮，
+    手机上左栏被排到页底基本看不见 —— 纯重复。现在只保留正文上方那个。
+    """
+    import re
+
+    with session_scope() as session:
+        make_article(session, title="返回按钮测试", link="https://example.com/back",
+                     digest="导语", relevance=1, status="processed")
+
+    text = client.get("/story/1").text
+    # 数 <a> 元素而不是纯文本：注释里也会出现「← 返回」这几个字
+    links = re.findall(r'<a [^>]*>[^<]*←\s*返回[^<]*</a>', text)
+    assert len(links) == 1, f"文章页应只有一个返回按钮，实际 {len(links)}"
+    assert 'id="backtop"' in text
+    # 左栏的重复按钮已删除
+    assert 'class="back"' not in text
 
 
 def test_story_has_right_rail_with_topic_and_tags(client, settings: Settings, seeded_db):
@@ -1654,13 +1740,14 @@ def test_story_page_renders_pairs_when_translation_exists(client, settings: Sett
             title="双语交错", link="https://example.com/pairs",
             relevance=1, status="processed",
             content="中文正文" * 60,
-            content_zh="中文译文" * 60,
+            content_zh="这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。" * 12,
             body_sections=_json.dumps(
                 [{"h": "Intro", "t": "english one " * 40},
                  {"h": "Body", "t": "english two " * 40}], ensure_ascii=False),
             body_sections_zh=_json.dumps(
-                [{"h": "引子", "t": "中文第一段。" * 20},
-                 {"h": "正文", "t": "中文第二段。" * 20}], ensure_ascii=False),
+                [{"h": "引子", "t": "这是一段完整的译文内容，保留了原文的信息与细节，读起来自然顺畅。" * 6},
+                 {"h": "正文", "t": "这是一个完整的段落，译者按照中文的表达习惯重新组织了句子，没有逐词硬译。" * 6}],
+                ensure_ascii=False),
         )
     with session_scope() as session:
         aid = session.query(Article).filter(Article.link == "https://example.com/pairs").one().id
