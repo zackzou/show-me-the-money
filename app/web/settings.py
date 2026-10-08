@@ -393,6 +393,35 @@ def _split_models(raw: str) -> list[str]:
     return out
 
 
+def _same_host(left: str, right: str) -> bool:
+    """两个 API Base 是不是同一个站点（host 相同，忽略路径/端口大小写）。"""
+    from urllib.parse import urlsplit
+
+    try:
+        a, b = urlsplit(left), urlsplit(right)
+    except ValueError:
+        return False
+    return bool(a.hostname) and a.hostname == b.hostname and a.port == b.port
+
+
+def _resolve_key(settings: Settings, base: str, submitted: str) -> tuple[str, str]:
+    """决定这次探测用哪个 key。返回 ``(key, 错误说明)``。
+
+    留空 = 沿用已保存的 key，但**仅在 base 的 host 没变时**。换成别的
+    主机就必须显式给 key —— 否则把 api_base 改成攻击者的地址再留空，
+    服务端会把真实 key 当 Bearer 发过去（Key 泄露的最短路径）。
+    """
+    submitted = (submitted or "").strip()
+    if submitted:
+        return submitted, ""
+    stored_key = settings.llm.api_key
+    if stored_key and _same_host(base, settings.llm.api_base):
+        return stored_key, ""
+    if stored_key:
+        return "", "换 API 地址时必须重新填写 Key（不会把已保存的 Key 发到新主机）"
+    return "", "请填写 API Key"
+
+
 def _probe(settings: Settings, base: str, key: str, model: str,
            *, fallbacks: list[str] | None = None) -> dict[str, Any]:
     """真的发一次请求测连通性，并把用量（含 token 明细）记一条。
@@ -416,12 +445,16 @@ def _probe(settings: Settings, base: str, key: str, model: str,
         # 一次失败的连通性测试在日志里就成了两条，看着像跑了两次。
         captured.update(kwargs)
 
+    model_list = [model] + [m for m in (fallbacks or []) if m and m != model]
     client = LLMClient(
         base,
         key,
         model,
         timeout=60.0,
-        retries=0,
+        # 尝试次数 = 模型个数：每个模型各试一次，主模型坏、备用模型好时
+        # 也能测通并保存。原来固定 retries=0 只试主模型 —— 备用模型在
+        # 探测里从未生效，「主模型限流靠 fallback 跑」的配置根本存不进去。
+        retries=max(0, len(model_list) - 1),
         temperature=0.3,
         extra_headers=settings.llm.extra_headers,
         fallback_models=list(fallbacks or []),
@@ -475,6 +508,85 @@ async def _read_form(request: Request) -> dict[str, str]:
     raw = (await request.body()).decode("utf-8", "replace")
     parsed = parse_qs(raw, keep_blank_values=True)
     return {key: values[0] for key, values in parsed.items() if values}
+
+
+def _fetch_models(base: str, key: str, extra_headers: dict[str, str]) -> dict[str, Any]:
+    """GET {base}/models 读服务商支持的模型列表（OpenAI 兼容约定）。
+
+    各家实现差异很大，返回统一成 ``{"ok", "models": [{"id", "note"}]}``：
+    - 标准：``{"data": [{"id": "..."}]}``；
+    - 有的网关直接给数组；
+    - 有的给 ``{"data": [...]}`` 但元素是字符串。
+    读不到就返回 ``ok=False`` + 原因，前端据此提示「可手动输入模型名」。
+    """
+    import httpx
+
+    url = f"{base.rstrip('/')}/models"
+    headers = {"Authorization": f"Bearer {key}", **extra_headers}
+    try:
+        with httpx.Client(timeout=15.0, headers=headers, follow_redirects=True) as client:
+            response = client.get(url)
+    except httpx.HTTPError as exc:
+        return {"ok": False, "error": f"请求失败：{exc}"[:200]}
+    if response.status_code >= 400:
+        # 401/403 是最常见的（key 没填对）；把状态码和一小段响应带上，
+        # 但响应体可能含 key 回显，先过 redact
+        from app.ai.client import redact
+
+        detail = redact(response.text)[:200]
+        return {"ok": False, "error": f"HTTP {response.status_code}：{detail}"}
+    try:
+        payload = response.json()
+    except ValueError:
+        return {"ok": False, "error": "返回的不是 JSON（该地址可能不支持 /models）"}
+    raw_items: list[Any]
+    if isinstance(payload, list):
+        raw_items = payload
+    elif isinstance(payload, dict):
+        data = payload.get("data")
+        raw_items = data if isinstance(data, list) else []
+    else:
+        raw_items = []
+    models: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        if isinstance(item, str):
+            model_id, note = item, ""
+        elif isinstance(item, dict):
+            model_id = str(item.get("id") or item.get("name") or "").strip()
+            note = str(item.get("owned_by") or item.get("provider") or "").strip()
+        else:
+            continue
+        if not model_id or model_id in seen:
+            continue
+        seen.add(model_id)
+        models.append({"id": model_id, "note": note})
+    if not models:
+        return {"ok": False, "error": "接口通了但没解析出模型列表（可手动输入模型名）"}
+    models.sort(key=lambda m: m["id"].lower())
+    return {"ok": True, "models": models, "count": len(models)}
+
+
+@settings_router.post("/settings/models")
+async def settings_models(request: Request) -> JSONResponse:
+    """读取当前地址+key 下可用的模型列表（设置页「读取模型」按钮）。
+
+    允许两种用法：
+    - 表单里带 ``api_base``/``api_key``（正在编辑还没保存）：用表单值；
+    - 不带：用已保存的配置（key 从服务端取，页面不用回传明文）。
+    """
+    settings: Settings | None = getattr(request.app.state, "settings", None)
+    if settings is None:
+        raise HTTPException(status_code=500, detail="服务未初始化")
+    form = await _read_form(request)
+    base = (form.get("api_base") or "").strip().rstrip("/") or settings.llm.api_base
+    if not base.startswith(("http://", "https://")):
+        return JSONResponse({"ok": False, "error": "请先填写合法的 API Base URL"}, status_code=400)
+    key, key_error = _resolve_key(settings, base, form.get("api_key") or "")
+    if key_error:
+        return JSONResponse({"ok": False, "error": key_error}, status_code=400)
+    result = await run_in_threadpool(_fetch_models, base, key, settings.llm.extra_headers)
+    return JSONResponse(result)
 
 
 def _newest_first(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -594,12 +706,21 @@ async def settings_save(request: Request) -> HTMLResponse:
             request, notice={"kind": "error", "text": "；".join(problems)}, status=400
         )
 
-    key = new_key or settings.llm.api_key
     # 服务端兜底：万一有人（某个脚本、某个旧版本页面）把掩码当成 key 提交回来，
     # 不要拿 "sk-a**3456" 覆盖掉真 key —— 那会立刻把可用配置改坏，而且要等到
-    # 下一次调用大模型才报错。留空与提交掩码都按「不改动原 key」处理。
-    if _mask(key) == key.strip() and key.strip():
-        key = settings.llm.api_key
+    # 下一次调用大模型才报错。提交掩码按「沿用已保存的 key」处理（同主机才允许）。
+    if new_key and _mask(new_key) == new_key:
+        new_key = ""
+    if not new_key:
+        # 留空 = 沿用已保存的 key，但换主机时不允许（见 _resolve_key）：
+        # 否则把 api_base 指向攻击者地址再留空，真实 key 就被发出去了。
+        key, key_error = _resolve_key(settings, base, new_key)
+        if key_error:
+            return _page(
+                request, notice={"kind": "error", "text": key_error}, status=400
+            )
+    else:
+        key = new_key
     probe = await run_in_threadpool(_probe, settings, base, key, model, fallbacks=_split_models(fallback))
     if not probe["ok"]:
         return _page(
@@ -655,11 +776,13 @@ async def settings_test(request: Request) -> HTMLResponse:
     base = (form.get("api_base") or "").strip().rstrip("/")
     model = (form.get("model") or "").strip()
     fallback = (form.get("fallback_models") or "").strip()
-    key = (form.get("api_key") or "").strip() or settings.llm.api_key
     if not base or not model:
         return _page(
             request, notice={"kind": "error", "text": "请先填写 API Base URL 与模型名"}, status=400
         )
+    key, key_error = _resolve_key(settings, base, form.get("api_key") or "")
+    if key_error:
+        return _page(request, notice={"kind": "error", "text": key_error}, status=400)
     probe = await run_in_threadpool(_probe, settings, base, key, model, fallbacks=_split_models(fallback))
     if probe["ok"]:
         return _page(

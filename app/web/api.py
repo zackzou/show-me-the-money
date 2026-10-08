@@ -22,18 +22,13 @@ from app.fetcher.media_store import media_dir_for
 from app.models import Article, DailyReport, Source, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleDetailOut, ArticleOut, HealthOut, ReportDetail, ReportOut
-from app.utils.text import BRIEF_DIGEST_CHARS as _BRIEF_DIGEST_CHARS
-from app.utils.text import brief_digest, chinese_ratio, has_long_latin_run, now_local
+from app.utils.text import now_local
 
 api_router = APIRouter(prefix="/api")
 
 # SQLite 的 INTEGER 是有符号 64 位。裸 ``int`` 会照单全收 10**30，然后由驱动抛
 # OverflowError 变成 500；不存在的 id 本来就该是 404，所以直接挡在参数声明处。
 IdParam = Annotated[int, PathParam(ge=1, le=2**63 - 1)]
-
-
-# 早报汇总的下限：低于这个字数在手机上只有两行，推送里显得敷衍
-_BRIEF_MIN_CHARS = 70
 
 
 @api_router.get("/articles", response_model=list[ArticleOut])
@@ -62,9 +57,11 @@ def list_articles(
         .order_by(Article.published_at.desc(), Article.id.desc())
     )
     # limit=0 表示「一条也不要」。早先是 max(1, limit)，于是 ?limit=0 返回 1 条 ——
-    # 问「零条」得到一条，比报错更难排查。
-    if limit:
-        statement = statement.limit(min(limit, 1000))
+    # 问「零条」得到一条，比报错更难排查。再后来写成 `if limit:` 少加 LIMIT，
+    # 实际返回**全部** —— 与注释相反。0 直接返回空列表。
+    if limit <= 0:
+        return []
+    statement = statement.limit(min(limit, 1000))
     return list(session.execute(statement).scalars())
 
 
@@ -97,14 +94,6 @@ def _topics_json(raw: str | None) -> list[str]:
     return [str(x) for x in parsed if isinstance(x, str)] if isinstance(parsed, list) else []
 
 
-def _is_chinese_usable(text: str | None) -> bool:
-    """能不能当中文早报正文用：有汉字、且没有一长串没翻的英文。"""
-    clean = (text or "").strip()
-    if not clean:
-        return False
-    return chinese_ratio(clean) >= 0.4 and not has_long_latin_run(clean)
-
-
 def _digest_with_fallback(article: Article) -> str:
     """早报片段：一段**完整的中文**话。
 
@@ -119,44 +108,13 @@ def _digest_with_fallback(article: Article) -> str:
        最多只拿标题兜底，并且明说译文还没准备好。
 
     取值顺序：AI 写的推送语 → 中文导读 → 中文推荐理由 → 中文标题。
+    实现与早报页共用（``app/report/brief.py:brief_text``），两处不再各写一份。
+    单篇页允许占位文案（「中文译文还在整理中」），早报成稿不允许 ——
+    成稿里遇到没素材的条目直接剔除，而不是推一条占位符。
     """
-    stored = (getattr(article, "brief_zh", None) or "").strip()
-    if _is_chinese_usable(stored):
-        return stored
+    from app.report.brief import brief_text
 
-    # 只从「确实是中文」的字段里挑，英文原文不参与
-    for candidate in (article.digest_zh, article.digest, article.reason, article.summary):
-        if not _is_chinese_usable(candidate):
-            continue
-        brief = brief_digest(candidate)
-        if len(brief) >= _BRIEF_MIN_CHARS:
-            return brief
-        extra = brief_digest(
-            article.reason if candidate is not article.reason else article.summary or "",
-            limit=_BRIEF_DIGEST_CHARS,
-        )
-        if _is_chinese_usable(extra) and extra not in brief:
-            # 只去掉**句中的连接标点**，不能连句末的句号一起去掉。
-            # 去掉之后 joiner 又因为 brief 已以句号结尾而恒为 ""，拼出来的
-            # 段落就永远不以句末标点收尾 —— 正好是用户最反感的那种半句结尾
-            #（「…值得持续观察与评估」，后面本来还有内容）。
-            extra = extra.rstrip("，、；：,;: ")
-            if extra:
-                if extra[-1] in "。！？.!?":
-                    merged = f"{brief}{extra}"
-                else:
-                    joiner = "" if brief[-1] in "。！？.!?" else "。"
-                    merged = f"{brief}{joiner}{extra}。"
-                if len(merged) <= _BRIEF_DIGEST_CHARS + 20:
-                    return merged
-        if brief:
-            return brief
-
-    # 兜底：中文标题（英文源的 title_zh 由补译轮填）。宁可短，也不推英文。
-    title = (article.title_zh or article.title or "").strip()
-    if chinese_ratio(title) >= 0.4:
-        return brief_digest(title)
-    return f"（{title}）中文译文还在整理中。" if title else ""
+    return brief_text(article, allow_placeholder=True)
 
 
 # ── 重新获取：重抓原文 + 按当前配置重跑 AI 处理 ──────────────────────

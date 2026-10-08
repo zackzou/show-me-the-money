@@ -33,6 +33,7 @@ from app.fetcher.images import backfill_images, localize_missing_covers
 from app.fetcher.media_store import media_dir_for
 from app.fetcher.pipeline import run_fetch_pipeline
 from app.models import Article, DailyReport, visible_article_conditions
+from app.report.brief import build_and_save_brief
 from app.report.generator import STATUS_REPORTABLE, day_window, generate_daily_report
 from app.utils.logger import get_logger, setup_logging
 from app.utils.text import now_local
@@ -268,6 +269,18 @@ def run_media_job(settings: Settings) -> dict[str, Any]:
     return {"cover": stats, "inline": inline, "tail_stripped": strip_tail}
 
 
+def run_brief_job(settings: Settings) -> dict[str, Any]:
+    """每天早上制作早报并存档（成品在 /brief 配置页回看）。
+
+    纯选稿 + 拼装，零 LLM 调用（内容继承处理阶段写好的早报片段），
+    秒级完成；失败只记日志，不影响其它任务。
+    """
+    with session_scope() as session:
+        data, issue = build_and_save_brief(session)
+        log.info("早报已生成：%s（%d 节 / %d 条）", issue.date, issue.section_count, issue.article_count)
+        return {"date": issue.date, "sections": issue.section_count, "articles": issue.article_count}
+
+
 def run_report_job(settings: Settings) -> dict[str, Any]:
     """生成**昨天**的完整日报。
 
@@ -450,19 +463,6 @@ def run_cleanup_job(settings: Settings) -> dict[str, int]:
     with session_scope() as session:
         # 先把历史遗留的矛盾行修好，再谈删除
         repair_inconsistent_rows(session)
-        # 先断开指向「即将被删掉的文章」的 duplicate_of，再删。
-        # 不做这一步的话：主条目先到期被删掉、藏稿还留着，于是藏稿指向一个
-        # 虚空 id —— primary_of() 查不到，它就从主页、日报、搜索里彻底消失，
-        # 而且没有任何入口能找回。清理是按 created_at 删的，而合并窗口是
-        # 7 天，所以这种跨越保留期边界的主/藏稿组合是必然会出现的。
-        session.execute(
-            update(Article)
-            .where(
-                Article.duplicate_of.isnot(None),
-                Article.duplicate_of.notin_(select(Article.id)),
-            )
-            .values(duplicate_of=None)
-        )
         # created_at 是 DATETIME，cutoff_date 是 'YYYY-MM-DD' 字符串：直接比
         # 的话 SQLite 会把 '2026-09-05' 当成 '2026-09-05 00:00:00'，
         # 于是当天 00:00 整的那篇也被删掉 —— 实际保留期少了一天。
@@ -474,6 +474,18 @@ def run_cleanup_job(settings: Settings) -> dict[str, int]:
         reports_result = session.execute(delete(DailyReport).where(DailyReport.date < cutoff_date))
         removed_articles = int(getattr(articles_result, "rowcount", 0) or 0)
         removed_reports = int(getattr(reports_result, "rowcount", 0) or 0)
+        # 断开指向「已被删掉的文章」的 duplicate_of。必须在 DELETE **之后**：
+        # 先断的话，指向「本轮即将被删的主条目」的藏稿会被漏掉（notin 里那个
+        # id 当时还在），删完它指向虚空 id —— primary_of() 查不到，它就从主页、
+        # 日报、搜索里彻底消失，回收站也没有，没有任何入口能找回。
+        session.execute(
+            update(Article)
+            .where(
+                Article.duplicate_of.isnot(None),
+                Article.duplicate_of.notin_(select(Article.id)),
+            )
+            .values(duplicate_of=None)
+        )
         # 图片是按内容哈希落盘、从不清理的：实测一天涨约 11MB，
         # 保留期一过文章没了图还留着，纯浪费磁盘。清掉没人再引用的。
         removed_images = _prune_orphan_images(settings)
@@ -524,8 +536,17 @@ def _image_names(raw: str) -> set[str]:
 
 
 def _daily_trigger(hhmm: str) -> CronTrigger:
+    """每天 HH:MM 触发（北京时间）。
+
+    必须显式传 timezone：APScheduler 对**已实例化的 trigger** 不会套用
+    scheduler 的 timezone（``_create_trigger`` 原样返回），CronTrigger
+    内部用 ``get_localzone()``。不传的话，非北京时区的宿主机上日报 08:00 /
+    早报 06:00 / 清理 03:00 全按本机时区跑。
+    """
     hour, _, minute = hhmm.partition(":")
-    return CronTrigger(hour=int(hour or 8), minute=int(minute or 0))
+    return CronTrigger(
+        hour=int(hour or 8), minute=int(minute or 0), timezone="Asia/Shanghai"
+    )
 
 
 # 三个写库任务之间的错峰间隔（秒）。抓完等一会儿再补正文、补完再处理，
@@ -537,12 +558,50 @@ PROCESS_JOB_OFFSET_SECONDS = 300
 def _offset_trigger(
     trigger: CronTrigger | IntervalTrigger, seconds: int
 ) -> CronTrigger | IntervalTrigger:
-    """把一个触发器整体推迟若干秒，让几个任务不要挤在同一时刻。"""
-    try:
-        return trigger + timedelta(seconds=seconds)
-    except TypeError:  # pragma: no cover - APScheduler 换了实现时的兜底
-        log.warning("触发器不支持偏移，任务可能同时启动")
-        return trigger
+    """把一个触发器整体推迟若干秒，让几个任务不要挤在同一时刻。
+
+    APScheduler 3.x 的触发器没有 ``__add__``（``trigger + timedelta``
+    直接 TypeError，原来的实现因此**从未生效**，三个写库任务一直同时起跑）。
+    按类型分别处理：
+    - ``IntervalTrigger``：把 ``start_date`` 挪后 seconds，间隔不变；
+    - ``CronTrigger``：分钟数是普通数字时，把分钟往后推（进位到小时），
+      秒字段补余数；复杂表达式（``*`` / ``*/30``）原样返回 —— 这类本来
+      就分散触发，不存在同一秒起跑的问题。
+    """
+    if isinstance(trigger, IntervalTrigger):
+        anchor = trigger.start_date or now_local()
+        return IntervalTrigger(
+            seconds=trigger.interval.total_seconds(),
+            start_date=anchor + timedelta(seconds=seconds),
+            timezone=trigger.timezone,
+        )
+    if isinstance(trigger, CronTrigger):
+        fields = {field.name: str(field.expressions[0]) for field in trigger.fields}
+        minute_expr = fields.get("minute", "*")
+        hour_expr = fields.get("hour", "*")
+        if not minute_expr.isdigit():
+            return trigger
+        add_minutes, add_seconds = divmod(seconds, 60)
+        minute = int(minute_expr) + add_minutes
+        hour = int(hour_expr) if hour_expr.isdigit() else None
+        if minute >= 60:
+            if hour is None:
+                return trigger
+            hour = (hour + minute // 60) % 24
+            minute %= 60
+        second_expr = fields.get("second", "0")
+        second = (int(second_expr) + add_seconds) % 60 if second_expr.isdigit() else 0
+        return CronTrigger(
+            year=fields.get("year") or None,
+            month=fields.get("month") or None,
+            day=fields.get("day") or None,
+            day_of_week=fields.get("day_of_week") or None,
+            hour=hour if hour is not None else None,
+            minute=minute,
+            second=second,
+            timezone=trigger.timezone,
+        )
+    return trigger
 
 
 def _fetch_trigger(settings: Settings) -> CronTrigger | IntervalTrigger:
@@ -607,6 +666,15 @@ def build_scheduler(settings: Settings) -> BackgroundScheduler:
         id="report_job",
         replace_existing=True,
     )
+    # 早报制作：每天早上 06:00 按配置精选并存档（成品在 /brief 配置页回看）。
+    # 与日报（08:00）错开：早报要抢在通勤前出稿，日报是给前一日的定稿。
+    scheduler.add_job(
+        run_brief_job,
+        _daily_trigger(settings.schedule.brief_time),
+        args=[settings],
+        id="brief_job",
+        replace_existing=True,
+    )
     scheduler.add_job(
         run_cleanup_job,
         _daily_trigger(settings.schedule.cleanup_time),
@@ -626,9 +694,10 @@ def start_scheduler(settings: Settings, *, log_file: object | None = None) -> Ba
     _scheduler.start()
     fetch_plan = settings.schedule.fetch_cron.strip() or f"每 {settings.schedule.fetch_interval_hours} 小时"
     log.info(
-        "调度器已启动：抓取/处理 %s，处理后刷新今日日报；昨天日报定稿 %s；清理 %s",
+        "调度器已启动：抓取/处理 %s，处理后刷新今日日报；昨天日报定稿 %s；早报制作 %s；清理 %s",
         fetch_plan,
         settings.schedule.daily_report_time,
+        settings.schedule.brief_time,
         settings.schedule.cleanup_time,
     )
     return _scheduler

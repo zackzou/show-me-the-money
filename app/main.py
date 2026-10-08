@@ -31,7 +31,9 @@ from app.scheduler import (
     start_scheduler,
 )
 from app.utils.logger import get_logger, setup_logging
+from app.web.agent import agent_router
 from app.web.api import api_router
+from app.web.brief import brief_router
 from app.web.keywords import keywords_router
 from app.web.reports import reports_router
 from app.web.routes import page_router
@@ -166,6 +168,8 @@ def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> F
     app.include_router(trash_router)
     app.include_router(keywords_router)
     app.include_router(reports_router)
+    app.include_router(brief_router)
+    app.include_router(agent_router)
     return app
 
 

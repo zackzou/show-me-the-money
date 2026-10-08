@@ -3,6 +3,7 @@
    放不下「时间/模型/输入/输出/思考/耗时/结果」——用 base 的 .wrap.wide（1400px），
    右栏 ~640px，7 列都放得下，不用靠内部横向滚动。 #}
 {% block container_extra %} wide{% endblock %}
+{% block footer_extra %} wide{% endblock %}
 {% block content %}
 
 <div class="lead">
@@ -105,11 +106,21 @@
     </label>
 
     <label class="fld">
-      <span class="lbl">模型</span>
+      <span class="lbl">模型
+        <button type="button" class="mini-btn" id="m-load">读取模型</button>
+      </span>
       <input type="text" name="model" id="f-model" required list="model-list"
              value="{{ current.model }}" placeholder="gpt-4o" spellcheck="false">
       <datalist id="model-list"></datalist>
-      <em>要服务商控制台里的模型 <code>id</code>，不是显示名。</em>
+      <div class="m-pick" id="m-pick" hidden>
+        <div class="m-pick-bar">
+          <input type="search" id="m-search" placeholder="过滤模型名…" spellcheck="false">
+          <span class="m-pick-n" id="m-pick-n"></span>
+          <button type="button" class="mini-btn" id="m-close">收起</button>
+        </div>
+        <div class="m-pick-list" id="m-list" role="listbox" aria-label="可选模型"></div>
+      </div>
+      <em id="m-hint">要服务商控制台里的模型 <code>id</code>，不是显示名。点「读取模型」可从接口拉取，读不到就手动输入。</em>
     </label>
 
     <label class="fld">
@@ -287,9 +298,9 @@
                     font-size:10px; font-weight:700; padding:1px 6px; border-radius:999px;
                     background:var(--accent); color:#fff; }
   .preset { position:relative; }
-  .presets { display:flex; flex-wrap:wrap; gap:8px; }
-  .preset { display:flex; flex-direction:column; gap:3px; align-items:flex-start; cursor:pointer;
-            padding:10px 14px; border:1px solid var(--line); border-radius:10px;
+  .presets { display:flex; flex-wrap:wrap; gap:10px; margin-bottom:28px; }
+  .preset { display:flex; flex-direction:column; gap:4px; align-items:flex-start; cursor:pointer;
+            padding:12px 16px; border:1px solid var(--line); border-radius:11px;
             background:var(--surface); font-family:inherit; text-align:left;
             transition:border-color .15s, transform .15s; }
   .preset:hover { border-color:var(--accent); transform:translateY(-1px); }
@@ -297,25 +308,52 @@
   .preset em { font-size:11px; color:var(--faint); font-style:normal;
                font-family:ui-monospace,Menlo,monospace; }
 
-  .cfg { display:flex; flex-direction:column; gap:19px; max-width:760px; }
+  .cfg { display:flex; flex-direction:column; gap:26px; max-width:760px; }
   /* 宽屏两列：4 个字段并排放两行，按钮独占一行。单列排 4 个字段要 479px，
-     两列只要 ~270px，是「模型配置」一屏放下的关键。 */
+     两列只要 ~270px，是「模型配置」一屏放下的关键。
+     间距放宽到 26px：15px 时卡片贴着下一行字段（实测预设卡与表单间距 0、
+     字段之间也挤），用户反馈「太紧凑」。 */
   @media (min-width:1240px) {
-    .cfg { display:grid; grid-template-columns:1fr 1fr; gap:15px 18px; max-width:none; align-items:start; }
+    .cfg { display:grid; grid-template-columns:1fr 1fr; gap:26px 28px; max-width:none; align-items:start; }
     .cfg .btns { grid-column:1 / -1; }
+    /* 模型选择器展开时占满整行，两列宽才放得下长模型名 */
+    .cfg .fld.m-open { grid-column:1 / -1; }
   }
-  .fld { display:flex; flex-direction:column; gap:7px; }
+  .fld { display:flex; flex-direction:column; gap:9px; }
   .fld .lbl { display:flex; align-items:center; gap:8px; font-size:12.5px; font-weight:600; color:var(--muted); }
   .lbl .tag-ok { font-style:normal; font-size:10.5px; font-weight:500; color:#1f8a5a;
                 background:rgba(31,138,90,.1); border-radius:5px; padding:2px 7px; }
   .lbl .tag-opt { font-style:normal; font-size:10.5px; font-weight:400; color:var(--faint);
                  border:1px solid var(--line); border-radius:5px; padding:1px 6px; }
-  .fld input { padding:11px 14px; border:1px solid var(--line); border-radius:10px;
+  .fld input { padding:12px 14px; border:1px solid var(--line); border-radius:10px;
                background:var(--surface); color:var(--text); font-size:13.5px;
                font-family:ui-monospace,SFMono-Regular,Menlo,monospace; transition:border-color .15s; }
   .fld input:focus { outline:none; border-color:var(--accent); box-shadow:0 0 0 3px var(--accent-soft); }
   .fld em { font-size:11.5px; color:var(--faint); font-style:normal; line-height:1.65; }
   .fld code { background:var(--chip); padding:1px 5px; border-radius:4px; }
+
+  /* 读取模型：小按钮 + 可过滤的模型列表（点一条即填入） */
+  .mini-btn { font-family:inherit; font-size:11.5px; font-weight:600; cursor:pointer;
+              padding:4px 10px; border-radius:7px; border:1px solid var(--line);
+              background:var(--surface); color:var(--muted); transition:border-color .15s, color .15s; }
+  .mini-btn:hover { border-color:var(--accent); color:var(--accent); }
+  .mini-btn:disabled { opacity:.55; cursor:default; }
+  .m-pick { border:1px solid var(--line); border-radius:11px; background:var(--surface); overflow:hidden; }
+  .m-pick-bar { display:flex; align-items:center; gap:10px; padding:10px 12px;
+                border-bottom:1px solid var(--line-soft); background:var(--chip); }
+  .m-pick-bar input { flex:1; padding:7px 11px; font-size:12.5px; }
+  .m-pick-n { font-size:11.5px; color:var(--faint); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .m-pick-list { max-height:264px; overflow-y:auto; padding:6px; }
+  .m-opt { display:flex; align-items:baseline; gap:9px; width:100%; text-align:left;
+           font-family:ui-monospace,SFMono-Regular,Menlo,monospace; font-size:12.5px;
+           padding:9px 11px; border:0; border-radius:8px; background:transparent;
+           color:var(--text); cursor:pointer; }
+  .m-opt:hover { background:var(--accent-soft); color:var(--accent); }
+  .m-opt.on { background:var(--accent-soft); color:var(--accent); font-weight:700; }
+  .m-opt .own { font-size:11px; color:var(--faint); margin-left:auto; font-family:inherit; }
+  .m-opt.on .own { color:var(--accent); }
+  .m-empty { padding:16px 12px; font-size:12.5px; color:var(--faint); text-align:center; line-height:1.8; }
+  .m-err { padding:12px 14px; font-size:12.5px; color:var(--hot); line-height:1.7; }
 
   .keywrap { position:relative; display:block; }
   .keywrap input { width:100%; padding-right:82px; }
@@ -428,12 +466,117 @@
         document.getElementById("f-model").value = first;
       }
       models.innerHTML = list.map(function (m) {
-        return '<option value="' + m.replace(/"/g, "") + '"></option>';
+        var safe = m.replace(/&/g, "&amp;").replace(/"/g, "&quot;")
+                    .replace(/</g, "&lt;").replace(/>/g, "&gt;");
+        return '<option value="' + safe + '"></option>';
       }).join("");
+      // 换厂商后旧的「读取模型」列表已过期（属于上一家的地址），收起来
+      var picker = document.getElementById("m-pick");
+      if (picker && !picker.hidden) {
+        picker.hidden = true;
+        var openFld = document.querySelector(".fld.m-open");
+        if (openFld) openFld.classList.remove("m-open");
+      }
       // 点过的卡片高亮：让「当前用的是哪家」始终有视觉指示，
       // 而不是要靠对照输入框里的地址才知道
       markPreset(btn);
     });
+  });
+
+  // ── 读取模型：从 {base}/models 拉列表，点一条填入输入框 ──────────
+  // 读不到（网关不支持 /models、key 不对）不报死：给一句原因，
+  // 用户照旧可以手动输入模型名。
+  var mLoad = document.getElementById("m-load");
+  var mPick = document.getElementById("m-pick");
+  var mList = document.getElementById("m-list");
+  var mSearch = document.getElementById("m-search");
+  var mPickN = document.getElementById("m-pick-n");
+  var mHint = document.getElementById("m-hint");
+  var modelInput = document.getElementById("f-model");
+  var allModels = [];
+
+  function escHtml(s) {
+    return String(s == null ? "" : s)
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+
+  function renderModels() {
+    var needle = (mSearch.value || "").trim().toLowerCase();
+    var rows = allModels.filter(function (m) {
+      return !needle || m.id.toLowerCase().indexOf(needle) >= 0;
+    });
+    mPickN.textContent = rows.length + " / " + allModels.length;
+    if (!rows.length) {
+      mList.innerHTML = '<div class="m-empty">没有匹配的模型</div>';
+      return;
+    }
+    var current = (modelInput.value || "").trim();
+    mList.innerHTML = rows.map(function (m) {
+      return '<button type="button" class="m-opt' + (m.id === current ? " on" : "") +
+        '" data-model="' + escHtml(m.id) + '" role="option" title="' + escHtml(m.id) + '">' +
+        escHtml(m.id) + (m.note ? '<span class="own">' + escHtml(m.note) + "</span>" : "") +
+        "</button>";
+    }).join("");
+  }
+
+  function closePicker() {
+    mPick.hidden = true;
+    document.querySelector(".fld.m-open") && document.querySelector(".fld.m-open").classList.remove("m-open");
+  }
+
+  mLoad.addEventListener("click", function () {
+    var base = document.getElementById("f-base").value.trim();
+    if (!base) { mHint.textContent = "请先填写 API Base URL"; return; }
+    mLoad.disabled = true;
+    mLoad.textContent = "读取中…";
+    var body = new URLSearchParams();
+    body.set("api_base", base);
+    // key 留空时服务端会沿用已保存的（同主机）；填了就用手里的
+    body.set("api_key", key.value || "");
+    fetch("/settings/models", {
+      method: "POST",
+      headers: { "X-Requested-With": "settings", "Content-Type": "application/x-www-form-urlencoded" },
+      credentials: "same-origin",
+      body: body.toString()
+    }).then(function (r) { return r.json().catch(function () { return { ok: false, error: "服务返回异常" }; }); })
+      .then(function (data) {
+        mLoad.disabled = false;
+        mLoad.textContent = "读取模型";
+        if (!data.ok) {
+          closePicker();
+          mHint.innerHTML = "读取失败：" + escHtml(data.error || "未知原因") +
+            "（可手动输入模型名，或先点「仅测试连接」确认地址与 Key）";
+          return;
+        }
+        allModels = data.models || [];
+        mPick.hidden = false;
+        var fld = mLoad.closest(".fld");
+        if (fld) fld.classList.add("m-open");
+        mSearch.value = "";
+        renderModels();
+        mHint.textContent = "共 " + allModels.length + " 个模型，点一条填入；也可继续手动输入。";
+        mSearch.focus();
+      })
+      .catch(function () {
+        mLoad.disabled = false;
+        mLoad.textContent = "读取模型";
+        closePicker();
+        mHint.textContent = "读取失败：网络异常（可手动输入模型名）";
+      });
+  });
+
+  mSearch.addEventListener("input", renderModels);
+  document.getElementById("m-close").addEventListener("click", closePicker);
+  mList.addEventListener("click", function (e) {
+    var btn = e.target.closest(".m-opt");
+    if (!btn) return;
+    modelInput.value = btn.getAttribute("data-model");
+    modelInput.dispatchEvent(new Event("input", { bubbles: true }));
+    closePicker();
+  });
+  document.addEventListener("keydown", function (e) {
+    if (e.key === "Escape" && !mPick.hidden) closePicker();
   });
 
   // API Key：眼睛切换明文、复制到剪贴板
@@ -452,6 +595,16 @@
       .then(function (data) { return data && data.api_key ? data.api_key : null; });
   }
 
+  // 取 key 失败时给一句人话（原来只把焦点移回输入框，看着像按钮坏了）
+  function keyError() {
+    var tag = document.querySelector(".tag-ok");
+    if (!tag) return;
+    var old = tag.textContent;
+    tag.textContent = "取不到已保存的 Key，请刷新重试";
+    tag.style.color = "var(--hot)";
+    setTimeout(function () { tag.textContent = old; tag.style.color = ""; }, 2400);
+  }
+
   eye.addEventListener("click", function () {
     var shown = key.type === "text";
     if (shown) {
@@ -463,7 +616,7 @@
     }
     if (key.value) { show(); return; }   // 用户刚自己粘过，直接显示
     revealKey().then(function (value) {
-      if (!value) { key.focus(); return; }
+      if (!value) { key.focus(); keyError(); return; }
       key.value = value;
       show();
     });

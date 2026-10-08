@@ -65,9 +65,9 @@ def rss_guide(request: Request, session: Session = Depends(get_session)) -> HTML
     用纯文本窗口打开它，读者看到的是一堆 ``<item><title>…``，既不知道这是什么，
     也不知道怎么订阅。给一个专门页面说明「这是什么、怎么用、订阅了会推什么」。
     """
-    from app.web.routes import _ctx, templates
+    from app.web.routes import _ctx, public_base, templates
 
-    base = str(request.base_url).rstrip("/")
+    base = public_base(request)
     latest = session.execute(
         select(DailyReport).order_by(DailyReport.date.desc()).limit(1)
     ).scalar_one_or_none()
@@ -107,7 +107,9 @@ def rss(request: Request, date: str | None = None, session: Session = Depends(ge
     if report is None:
         raise HTTPException(status_code=404, detail="还没有日报")
 
-    base = str(request.base_url).rstrip("/")
+    from app.web.routes import public_base
+
+    base = public_base(request)
     updated = report.created_at or now_local()
     articles = _day_items(session, report.date)
 

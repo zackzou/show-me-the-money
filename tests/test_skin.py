@@ -45,20 +45,42 @@ def test_base_links_skin_and_has_shell(client: TestClient):
     assert 'localStorage.getItem("smtm-skin")' in text
 
 
+def test_theme_auto_by_time_is_default(client: TestClient):
+    """深浅色默认自适应：按电脑时间自动切换（夜里深色、白天浅色），
+    手动选择过深色/浅色则记住手动值。"""
+    text = client.get("/").text
+    assert "autoDark" in text
+    assert "new Date().getHours()" in text
+    # 自适应：19:00~07:00 深色
+    assert "hour < 7 || hour >= 19" in text
+
+
+def test_icon_buttons_have_instant_tooltips(client: TestClient):
+    """图标按钮的悬停文字：原生 title 在内嵌浏览器里不弹（用户反馈），
+    改为 data-tip + CSS 伪元素即时显示。"""
+    text = client.get("/").text
+    assert 'data-tip="切换深浅色"' in text
+    assert 'data-tip="切换风格（科技 / 经典）"' in text
+    assert 'data-tip="服务状态"' in text
+    assert 'content:attr(data-tip)' in text
+
+
 def test_skin_switch_is_persisted_and_reversible(client: TestClient):
     text = client.get("/").text
-    # 写入/移除 smtm-skin，两个方向都在
-    assert 'localStorage.setItem("smtm-skin", "aihot")' in text
+    # 科技风格是默认：只存显式的「经典」；写/清两个方向都在
+    assert 'localStorage.setItem("smtm-skin", "classic")' in text
     assert 'localStorage.removeItem("smtm-skin")' in text
-    # 换回默认风格的入口
+    # 启动脚本：非 classic 一律走科技风格（未设置 / 旧值 aihot 都落到默认）
+    assert 'localStorage.getItem("smtm-skin") !== "classic"' in text
+    # 换回经典风格的入口
     assert 'id="sk-back"' in text
 
 
 def test_default_skin_contract_unchanged(client: TestClient):
-    """默认皮肤的三件套一个都不能少：深浅色、语言、收藏。"""
+    """经典风格的三件套一个都不能少：深浅色、语言、收藏。"""
     text = client.get("/").text
     assert "smtm-theme" in text
-    assert 'classList.toggle("dark")' in text
+    assert 'classList.toggle("dark", dark)' in text
     assert 'localStorage.setItem("smtm-theme"' in text
     assert 'document.documentElement.setAttribute("data-lang", "zh")' in text
     assert "smtm-saved" in text

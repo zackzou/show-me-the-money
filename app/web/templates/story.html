@@ -648,10 +648,16 @@
       $("dg-foot-date").textContent = data.date || "";
       var tags = $("dg-tags");
       // 分类已经在 meta 行体现了，底部不再重复，只补一个 AI 评分
+      // topics 来自大模型输出（可被 RSS 提示注入操纵），必须转义后再拼 HTML
+      var esc = function (s) {
+        return String(s == null ? "" : s)
+          .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+          .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+      };
       var pills = [];
       if (data.score) pills.push("AI 评分 " + data.score);
       (data.topics || []).slice(0, 2).forEach(function (t) { pills.push(t); });
-      tags.innerHTML = pills.map(function (w) { return "<span>" + w + "</span>"; }).join("");
+      tags.innerHTML = pills.map(function (w) { return "<span>" + esc(w) + "</span>"; }).join("");
     }
 
     function load(id) {
@@ -888,3 +894,4 @@
 {% endblock %}
 
 {% block container_extra %} wide{% endblock %}
+{% block footer_extra %} wide{% endblock %}

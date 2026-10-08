@@ -1,0 +1,219 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">AGENT</div>
+  <h1>把 Show Me the Money 接进你的 Agent</h1>
+  <p class="meta">
+    Skill、MCP、REST、早报四种方式读的是同一份数据：热点、日报、早报与搜索。
+    全部<b>匿名只读</b>，不用注册，也不用 API Key。
+  </p>
+</div>
+
+<div class="ag-cards">
+  <a class="ag-card on" href="#hermes">
+    <span class="ag-ico">☤</span>
+    <b>Hermes 早报推送</b>
+    <em>复制提示词发给 Hermes，微信一条条收早报</em>
+  </a>
+  <a class="ag-card" href="#skill">
+    <span class="ag-ico">✦</span>
+    <b>Agent Skill</b>
+    <em>装一次，以后不用再更新</em>
+  </a>
+  <a class="ag-card" href="#mcp">
+    <span class="ag-ico">⇄</span>
+    <b>MCP</b>
+    <em>填一段配置，多个工具</em>
+  </a>
+  <a class="ag-card" href="#rest">
+    <span class="ag-ico">⌘</span>
+    <b>REST API</b>
+    <em>匿名 GET，自己写脚本取数</em>
+  </a>
+  <a class="ag-card" href="#brief">
+    <span class="ag-ico">▤</span>
+    <b>早报</b>
+    <em>精选 TOP N 的成稿文本</em>
+  </a>
+</div>
+
+{# ── Hermes 早报推送 ── #}
+<section class="sec" id="hermes">
+  <div class="sec-t">Hermes 早报推送 · 微信一条条收早报</div>
+  <p class="ag-p">
+    把下面这段提示词整段复制发给 Hermes，它会按你的<b>早报流水线</b>顺序
+    把文字与长图<b>一条一条</b>推送到微信（iLink 连续发送会触发 10 秒冷却，
+    所以必须图文分条、每条间隔发送）。天气节点是<b>纯文本</b>，只发文字不发图。
+  </p>
+  <div class="ag-copy">
+    <pre id="hermes-prompt">{{ hermes_prompt }}</pre>
+    <button type="button" class="mini ag-copy-btn" data-copy="hermes-prompt">复制提示词</button>
+  </div>
+  <div class="ag-step"><span class="ag-n">用</span><b>怎么用</b></div>
+  <ul class="ag-eps">
+    <li><code>早报</code><span>在微信 / 飞书 / TG 对 Hermes 说「早报」——立即收到今天的早报（图文分条）</span></li>
+    <li><code>早报 2026-10-07</code><span>说「早报 + 日期」——收指定那天的成品</span></li>
+    <li><code>早报任务</code><span>说「早报任务」——列出当前配置好的早报节点（名称 + 类型 + 条数）</span></li>
+    <li><code>早报配置</code><span>说「早报配置」——它会引导你到本页面的早报配置调整流水线</span></li>
+  </ul>
+  <p class="ag-tip">
+    图文数据源：文字 <a href="/api/brief" target="_blank">/api/brief</a>（每个节点的 text 字段）·
+    图片 <a href="/api/brief/image?section=0" target="_blank">/api/brief/image?section=N</a>（服务端渲染的 1080px 长图；weather 节点无图）。
+    流水线节点在 <a href="/brief">早报配置</a> 里管理。
+  </p>
+</section>
+
+{# ── Agent Skill ── #}
+<section class="sec" id="skill">
+  <div class="sec-t">Agent Skill · 装一次，以后不用再更新</div>
+  <p class="ag-p">
+    适合 Claude Code、Codex、Gemini CLI 这类支持 Agent Skills 的工具。
+    把下面这段话发给你的 Agent，它会自己读取 {{ base }}/skill.md 完成安装。
+  </p>
+  <div class="ag-step"><span class="ag-n">1</span><b>把这段话发给你的 Agent</b></div>
+  <div class="ag-copy">
+    <pre id="install-prompt">{{ install_prompt }}</pre>
+    <button type="button" class="mini ag-copy-btn" data-copy="install-prompt">复制</button>
+  </div>
+  <div class="ag-step"><span class="ag-n">2</span><b>开一个新会话</b>
+    <p>多数 Agent 只在会话开始时读取 Skill，当前对话里不一定看得到。</p>
+  </div>
+  <div class="ag-step"><span class="ag-n">3</span><b>问一句试试</b></div>
+  <div class="ag-copy">
+    <pre id="try-prompt">{{ try_prompt }}</pre>
+    <button type="button" class="mini ag-copy-btn" data-copy="try-prompt">复制</button>
+  </div>
+  <p class="ag-tip">
+    Skill 说明文件本体：<a href="/skill.md" target="_blank">{{ base }}/skill.md</a> ·
+    站点说明书（给大模型的）：<a href="/llms.txt" target="_blank">{{ base }}/llms.txt</a>
+  </p>
+</section>
+
+{# ── MCP ── #}
+<section class="sec" id="mcp">
+  <div class="sec-t">MCP · 填一段配置，多个工具</div>
+  <p class="ag-p">
+    项目自带一个零依赖的 stdio MCP server（<code>scripts/smtm_mcp.py</code>），
+    提供 <b>get_brief</b>（早报精选）、<b>list_articles</b>、<b>get_article</b>、
+    <b>get_daily_report</b>、<b>search_articles</b> 五个工具。
+    在支持 MCP 的客户端里加这段配置：
+  </p>
+  <div class="ag-copy">
+    <pre id="mcp-config">{
+  "mcpServers": {
+    "show-me-the-money": {
+      "command": "python3",
+      "args": ["/path/to/show-me-the-money/scripts/smtm_mcp.py"],
+      "env": { "SMTM_BASE": "{{ base }}" }
+    }
+  }
+}</pre>
+    <button type="button" class="mini ag-copy-btn" data-copy="mcp-config">复制</button>
+  </div>
+</section>
+
+{# ── REST API ── #}
+<section class="sec" id="rest">
+  <div class="sec-t">REST API · 匿名 GET，无需 Key</div>
+  <p class="ag-p">所有接口都是 GET，返回 JSON，直接可读。</p>
+  <ul class="ag-eps">
+    {% for ep in endpoints %}
+      <li>
+        <code>{{ ep.path }}</code>
+        <span>{{ ep.desc }}</span>
+        {% if '{' not in ep.path %}
+          <a href="{{ ep.path }}{{ '?q=AI' if 'search' in ep.path else '' }}" target="_blank">试一下 →</a>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+</section>
+
+{# ── 早报 ── #}
+<section class="sec" id="brief">
+  <div class="sec-t">早报 · 精选 TOP N 的成稿文本</div>
+  <p class="ag-p">
+    早报是按你配置好的规则（分类 / 主题 / 标签 / 关键词）精选的 TOP N 条，
+    内容直接继承每篇文章的<b>早报片段</b> —— 不用给文章再做一次汇总。
+    Agent 问「今天有什么重要的事」时读它最快。
+  </p>
+  <div class="ag-copy">
+    <pre id="brief-cmd">curl {{ base }}/api/brief | jq .text</pre>
+    <button type="button" class="mini ag-copy-btn" data-copy="brief-cmd">复制</button>
+  </div>
+  <p class="ag-tip">
+    规则调整在 <a href="/brief">早报配置</a> 页；纯文本 <a href="/brief.txt" target="_blank">/brief.txt</a>、
+    Markdown <a href="/brief.md" target="_blank">/brief.md</a> 打开即读。
+  </p>
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .ag-cards { display:grid; grid-template-columns:repeat(auto-fit, minmax(180px, 1fr));
+              gap:10px; margin-top:16px; }
+  .ag-card { display:flex; flex-direction:column; gap:4px; padding:14px 15px;
+             border:1px solid var(--line); border-radius:12px; background:var(--surface);
+             color:inherit; transition:border-color .14s, transform .14s; }
+  .ag-card:hover { border-color:var(--accent); transform:translateY(-1px); }
+  .ag-ico { width:28px; height:28px; display:grid; place-items:center; border-radius:8px;
+            background:var(--accent-soft); color:var(--accent); font-size:14px;
+            margin-bottom:4px; }
+  .ag-card b { font-size:13.5px; }
+  .ag-card em { font-style:normal; font-size:11.5px; color:var(--faint); }
+
+  .ag-p { font-size:13.5px; line-height:1.85; color:var(--muted); margin:0 0 12px; }
+  .ag-p code, .ag-eps code { background:var(--chip); border-radius:5px; padding:2px 7px;
+                             font-size:12px; font-family:ui-monospace,Menlo,monospace; }
+  .ag-step { display:flex; align-items:baseline; gap:9px; margin:14px 0 8px; font-size:13.5px; }
+  .ag-step p { margin:2px 0 0; font-size:12.5px; color:var(--faint); line-height:1.7; }
+  .ag-n { width:20px; height:20px; flex:none; display:grid; place-items:center;
+          border-radius:50%; background:var(--accent); color:#fff; font-size:11px;
+          font-weight:700; transform:translateY(2px); }
+  .ag-copy { position:relative; border:1px solid var(--line); border-radius:10px;
+             background:var(--surface); }
+  .ag-copy pre { margin:0; padding:12px 14px; font-size:12.5px; line-height:1.7;
+                 font-family:ui-monospace,Menlo,monospace; white-space:pre-wrap;
+                 overflow-wrap:anywhere; color:var(--text); }
+  .ag-copy-btn { position:absolute; top:8px; right:8px; }
+  .mini { padding:5px 11px; border:1px solid var(--line); border-radius:7px;
+          background:var(--chip); color:var(--muted); font-size:11.5px;
+          font-family:inherit; cursor:pointer; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .ag-tip { font-size:12px; color:var(--faint); line-height:1.8; margin:10px 0 0; }
+  .ag-tip a { color:var(--accent); }
+  .ag-eps { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+  .ag-eps li { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap;
+               padding:9px 12px; border:1px solid var(--line); border-radius:9px;
+               background:var(--surface); font-size:12.5px; }
+  .ag-eps span { color:var(--muted); flex:1 1 auto; }
+  .ag-eps a { color:var(--accent); font-size:12px; white-space:nowrap; }
+</style>
+<script>
+  (function () {
+    document.querySelectorAll(".ag-copy-btn").forEach(function (btn) {
+      btn.addEventListener("click", function () {
+        var box = document.getElementById(btn.getAttribute("data-copy"));
+        if (!box) return;
+        var text = box.textContent;
+        var done = function () {
+          btn.textContent = "已复制";
+          setTimeout(function () { btn.textContent = "复制"; }, 1500);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { legacy(text, done); });
+        } else { legacy(text, done); }
+      });
+    });
+    function legacy(text, done) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (err) { /* 失败不打扰 */ }
+      document.body.removeChild(ta);
+    }
+  })();
+</script>
+{% endblock %}

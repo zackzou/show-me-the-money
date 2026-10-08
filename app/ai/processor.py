@@ -1160,11 +1160,17 @@ def process_article(
         # 早报推送语：用中文标题 + 中文导读现写一段，手机上直接读。
         # 失败就留空，展示层回退旧的截断拼凑 —— 推送语是锦上添花，
         # 不能因为它让整篇处理多一次失败点（_optional_llm 本来就吞异常）。
+        # 导读太短时把中文正文也带上：素材多了才写得出有阅读价值的一段话。
+        brief_material = strip_markdown(article.digest_zh or article.digest or "")
+        if len(brief_material.strip()) < 60:
+            body = strip_markdown(article.content_zh or article.content_full or "")
+            if body and is_chinese_text(body):
+                brief_material = f"{brief_material}\n\n正文节选：{body[:600]}"
         article.brief_zh = generate_brief_zh(
             client,
             settings.prompts,
             article.title_zh or article.title or "",
-            strip_markdown(article.digest_zh or article.digest or ""),
+            brief_material,
         )
         article.status = STATUS_PROCESSED
         article.degraded_reason = None
@@ -1534,8 +1540,17 @@ def backfill_briefs(
         if not digest.strip() or not is_chinese_text(digest):
             continue
         stats["candidates"] += 1
+        # 导读太短（一两句就没了）时把正文也喂给模型 —— 用户反馈过
+        # 「早报里只有标题级别的信息，没有阅读价值」。正文能给出背景与
+        # 数字，模型才能写出一段像样的推送语；prompt 里的长度要求不变，
+        # 素材多了它会自己取舍。
+        material = digest
+        if len(digest.strip()) < 60:
+            body = strip_markdown(article.content_zh or article.content_full or "")
+            if body and is_chinese_text(body):
+                material = f"{digest}\n\n正文节选：{body[:600]}"
         brief = generate_brief_zh(
-            client, settings.prompts, article.title_zh or article.title or "", digest
+            client, settings.prompts, article.title_zh or article.title or "", material
         )
         if brief:
             article.brief_zh = brief

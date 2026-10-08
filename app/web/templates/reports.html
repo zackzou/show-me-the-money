@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% block container_extra %} wide{% endblock %}
+{% block footer_extra %} wide{% endblock %}
 {% block content %}
 
 <div class="lead">
@@ -48,6 +49,7 @@
   <div class="rp-trend">
     {% for point in series %}
       <a class="rp-col" href="/reports/breakdown?dimension=date&value={{ point.date }}&days={{ days }}"
+         data-value="{{ point.total }} 条"
          title="{{ point.date }} · {{ point.total }} 条{% if point.starred %}（关注 {{ point.starred }}）{% endif %}">
         <span class="rp-bar-wrap">
           {% if point.starred %}
@@ -56,11 +58,49 @@
             <i class="rp-bar" style="height:{{ point.pct }}%"></i>
           {% endif %}
         </span>
-        <span class="rp-col-label">{{ point.label }}</span>
+        {# X 轴标签按步长稀疏画（见 reports.py 的 show_label）：30/90 天时
+           全画会挤成一团。空位保留占位，柱子对齐不受影响。 #}
+        <span class="rp-col-label">{{ point.label if point.show_label else '' }}</span>
       </a>
     {% endfor %}
   </div>
 </section>
+
+<div class="rp-grid">
+  {# ── 标签 Top ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>标签 Top 20</h2><span class="rp-hint">点标签看明细</span></div>
+    {% if tags %}
+      <div class="rp-tags">
+        {% for tag in tags %}
+          <a class="rp-tag" href="/reports/breakdown?dimension=tag&value={{ tag.name|urlencode }}&days={{ days }}">
+            #{{ tag.name }} <b>{{ tag.count }}</b>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="rp-empty">这段时间没有标签数据。</p>{% endif %}
+  </section>
+
+  {# ── 关注命中 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>特别关注命中</h2><span class="rp-hint">关注词累计</span></div>
+    {% if watch %}
+      <ul class="rp-bars">
+        {# 全为 0 命中时不再画满格（除零防护 + 真实反映 0）；有命中才按比例 #}
+        {% set top_hits = watch[0].hits or 1 %}
+        {% for rule in watch %}
+          <li>
+            <a href="/reports/breakdown?dimension=starred&days={{ days }}">
+              <span class="rp-bar-label"><span class="rp-star">★</span>{{ rule.keyword }}</span>
+              <span class="rp-bar-track star"><i style="width:{{ (100 if loop.first else (rule.hits * 100 // top_hits)) if watch[0].hits else 0 }}%"></i></span>
+              <span class="rp-bar-num">{{ rule.hits }}</span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}<p class="rp-empty">还没有特别关注词。去「关键词」页添加，命中会自动统计。</p>{% endif %}
+  </section>
+</div>
 
 <div class="rp-grid">
   {# ── 分类分布 ── #}
@@ -123,46 +163,13 @@
     <div class="rp-hours">
       {% for h in hours %}
         <a class="rp-hour" href="/reports/breakdown?dimension=hour&value={{ h.hour }}&days={{ days }}"
+           data-value="{{ '%02d'|format(h.hour) }}:00 · {{ h.count }} 条"
            title="{{ '%02d'|format(h.hour) }}:00 · {{ h.count }} 条">
           <i style="height:{{ h.pct if h.pct > 3 else 3 }}%"></i>
           <span>{{ '%02d'|format(h.hour) }}</span>
         </a>
       {% endfor %}
     </div>
-  </section>
-</div>
-
-<div class="rp-grid">
-  {# ── 标签 Top ── #}
-  <section class="rp-card">
-    <div class="rp-head"><h2>标签 Top 20</h2><span class="rp-hint">点标签看明细</span></div>
-    {% if tags %}
-      <div class="rp-tags">
-        {% for tag in tags %}
-          <a class="rp-tag" href="/reports/breakdown?dimension=tag&value={{ tag.name|urlencode }}&days={{ days }}">
-            #{{ tag.name }} <b>{{ tag.count }}</b>
-          </a>
-        {% endfor %}
-      </div>
-    {% else %}<p class="rp-empty">这段时间没有标签数据。</p>{% endif %}
-  </section>
-
-  {# ── 关注命中 ── #}
-  <section class="rp-card">
-    <div class="rp-head"><h2>特别关注命中</h2><span class="rp-hint">关注词累计</span></div>
-    {% if watch %}
-      <ul class="rp-bars">
-        {% for rule in watch %}
-          <li>
-            <a href="/reports/breakdown?dimension=starred&days={{ days }}">
-              <span class="rp-bar-label"><span class="rp-star">★</span>{{ rule.keyword }}</span>
-              <span class="rp-bar-track star"><i style="width:{{ 100 if loop.first else (rule.hits * 100 // watch[0].hits) }}%"></i></span>
-              <span class="rp-bar-num">{{ rule.hits }}</span>
-            </a>
-          </li>
-        {% endfor %}
-      </ul>
-    {% else %}<p class="rp-empty">还没有特别关注词。去「关键词」页添加，命中会自动统计。</p>{% endif %}
   </section>
 </div>
 
@@ -173,7 +180,11 @@
     <div class="rp-reports">
       {% for row in reports %}
         <a class="rp-report" href="/daily/{{ row.date }}">
-          <b>{{ row.date }}</b><span>{{ row.count }} 篇</span>
+          <span class="rp-report-date">{{ row.date }}</span>
+          <span class="rp-report-meta">
+            <span class="rp-report-week">{{ row.weekday }}</span>
+            <span class="rp-report-count">{{ row.count }} 篇</span>
+          </span>
         </a>
       {% endfor %}
     </div>
@@ -210,46 +221,103 @@
   .rp-hint { font-size:11.5px; color:var(--faint); }
   .rp-empty { margin:0; font-size:12.5px; color:var(--faint); }
 
-  /* 趋势柱状图（纯 CSS） */
-  .rp-trend { display:flex; align-items:flex-end; gap:2px; height:140px;
-              overflow-x:auto; padding-bottom:2px; }
-  .rp-col { flex:1 0 10px; min-width:10px; display:flex; flex-direction:column;
-            align-items:center; justify-content:flex-end; height:100%; gap:4px; }
-  .rp-bar-wrap { width:100%; height:100%; display:flex; align-items:flex-end; }
+  /* 趋势柱状图（纯 CSS）
+     滚动条闪烁修复：早先 hover 时给柱子加 scaleX(1.35)、气泡也向外扩，
+     两者都会把可滚动区域撑大 —— overflow-x:auto 会把 overflow-y 一并算成
+     auto，于是指针停在图右下角时横向/纵向滚动条反复出现又消失（闪烁）。
+     现在：
+       · 容器显式 overflow-y:hidden，纵向永不出现滚动条；
+       · hover 不再改宽度（用亮度 + 描边光晕替代「变粗」），不撑大滚动区；
+       · 左右各留 26px 内边距，气泡与光晕都落在 padding 盒内，不产生横向溢出；
+       · 日期标签改为水平排布（不再 -45° 旋转），固定在标签行内，完整可读、
+         不再被容器底边裁掉。 */
+  .rp-trend { display:flex; align-items:flex-end; gap:2px; height:178px;
+              padding:26px 26px 4px; overflow-x:auto; overflow-y:hidden;
+              scrollbar-width:thin; scrollbar-color:var(--line) transparent; }
+  .rp-trend::-webkit-scrollbar { height:8px; }
+  .rp-trend::-webkit-scrollbar-thumb { background:var(--line); border-radius:999px; }
+  .rp-trend::-webkit-scrollbar-track { background:transparent; }
+  .rp-col { position:relative; flex:1 0 10px; min-width:10px; display:flex;
+            flex-direction:column; justify-content:flex-end;
+            height:100%; border-radius:6px 6px 0 0; padding:0 1px;
+            transition:background-color .14s; }
+  .rp-col:hover { background:var(--accent-soft); }
+  .rp-bar-wrap { flex:1 1 auto; min-height:0; width:100%; display:flex;
+                 align-items:flex-end; }
   .rp-bar { display:block; width:100%; min-height:2px; border-radius:3px 3px 0 0;
-            background:var(--accent); opacity:.75; transition:opacity .12s; }
-  .rp-bar.star { background:#b8873a; opacity:1; }
-  .rp-col:hover .rp-bar { opacity:1; }
-  .rp-col-label { font-size:9px; color:var(--faint); writing-mode:horizontal-tb;
-                  white-space:nowrap; transform:rotate(-45deg); transform-origin:center;
-                  height:14px; }
+            background:var(--accent); opacity:.72;
+            transition:opacity .14s, filter .14s, box-shadow .14s; }
+  .rp-bar.star { background:#b8873a; opacity:.95; }
+  .rp-col:hover .rp-bar { opacity:1; filter:saturate(1.3) brightness(.96);
+                          box-shadow:0 0 0 2px var(--bg), 0 0 12px -2px var(--accent); }
+  .rp-col:hover .rp-bar.star { box-shadow:0 0 0 2px var(--bg), 0 0 12px -2px #b8873a; }
+  /* 数值气泡：hover 时浮在柱子上方。用 data-value 而不是 title 属性 ——
+     title 是浏览器原生提示（有 1 秒延迟、样式不可控），这里要即时反馈。 */
+  .rp-col::after { content:attr(data-value); position:absolute; top:-4px; left:50%;
+                   transform:translate(-50%,-100%) scale(.9); transform-origin:bottom center;
+                   background:var(--text); color:var(--bg); font-size:10.5px;
+                   font-weight:600; line-height:1; padding:4px 7px; border-radius:5px;
+                   white-space:nowrap; opacity:0; pointer-events:none;
+                   transition:opacity .12s, transform .12s; z-index:3; }
+  .rp-col:hover::after { opacity:1; transform:translate(-50%,-100%) scale(1); }
+  /* 日期标签：水平一行完整显示；服务端按 show_label 稀疏输出，间距安全 */
+  .rp-col-label { flex:none; margin-top:7px; height:13px; line-height:13px;
+                  font-size:9px; color:var(--faint); text-align:center;
+                  white-space:nowrap; font-variant-numeric:tabular-nums;
+                  overflow:visible; }
   .rp-trend { margin-bottom:14px; }
 
-  /* 横向条形 */
+  /* 横向条形：hover 时整行浅底 + 条变亮变粗 + 数字强调（原来只把标签变色） */
   .rp-bars { list-style:none; margin:0; padding:0; display:flex;
              flex-direction:column; gap:7px; }
-  .rp-bars a { display:flex; align-items:center; gap:10px; padding:3px 0; color:inherit; }
+  .rp-bars a { display:flex; align-items:center; gap:10px; padding:4px 8px;
+               margin:0 -8px; border-radius:7px; color:inherit;
+               transition:background-color .14s; }
+  .rp-bars a:hover { background:var(--accent-soft); }
   .rp-bars a:hover .rp-bar-label { color:var(--accent); }
   .rp-bar-label { flex:0 0 96px; font-size:12.5px; color:var(--muted);
-                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
+                  transition:color .14s; }
   .rp-bar-track { flex:1 1 auto; height:8px; border-radius:999px;
-                  background:var(--line-soft); overflow:hidden; min-width:40px; }
+                  background:var(--line-soft); overflow:hidden; min-width:40px;
+                  transition:height .14s; }
+  .rp-bars a:hover .rp-bar-track { height:12px; }
   .rp-bar-track i { display:block; height:100%; border-radius:999px;
-                    background:var(--accent); opacity:.8; }
+                    background:var(--accent); opacity:.8;
+                    transition:opacity .14s, box-shadow .14s; }
+  .rp-bars a:hover .rp-bar-track i { opacity:1;
+                                     box-shadow:0 0 8px -1px var(--accent); }
   .rp-bar-track.star i { background:#b8873a; opacity:1; }
+  .rp-bars a:hover .rp-bar-track.star i { box-shadow:0 0 8px -1px #b8873a; }
   .rp-bar-track .score-1 { background:#b3402a; }
   .rp-bar-track .score-2 { background:var(--accent); }
   .rp-bar-num { flex:0 0 44px; text-align:right; font-size:12px; color:var(--muted);
-                font-variant-numeric:tabular-nums; }
+                font-variant-numeric:tabular-nums; transition:color .14s, font-weight .14s; }
+  .rp-bars a:hover .rp-bar-num { color:var(--accent); font-weight:700; }
   .rp-star { color:#b8873a; margin-right:4px; }
 
-  /* 时段柱 */
-  .rp-hours { display:flex; align-items:flex-end; gap:3px; height:110px; }
-  .rp-hour { flex:1; display:flex; flex-direction:column; align-items:center;
-             justify-content:flex-end; height:100%; gap:3px; }
+  /* 时段柱：hover 同样加气泡与高亮（原来只有 opacity）。与趋势图一样
+     顶部留 26px 给气泡，避免浮层被上方元素盖住。 */
+  .rp-hours { display:flex; align-items:flex-end; gap:3px; height:136px;
+              padding-top:26px; }
+  .rp-hour { position:relative; flex:1; display:flex; flex-direction:column;
+             align-items:center; justify-content:flex-end; height:100%; gap:3px;
+             border-radius:5px 5px 0 0; padding:0 1px;
+             transition:background-color .14s; }
+  .rp-hour:hover { background:var(--accent-soft); }
   .rp-hour i { display:block; width:100%; border-radius:2px 2px 0 0;
-               background:var(--accent); opacity:.55; transition:opacity .12s; }
-  .rp-hour:hover i { opacity:1; }
+               background:var(--accent); opacity:.55;
+               transition:opacity .14s, transform .14s, box-shadow .14s;
+               transform-origin:bottom center; }
+  .rp-hour:hover i { opacity:1; filter:saturate(1.3) brightness(.96);
+                     box-shadow:0 0 0 2px var(--bg), 0 0 10px -2px var(--accent); }
+  .rp-hour::after { content:attr(data-value); position:absolute; top:-2px; left:50%;
+                    transform:translate(-50%,-100%) scale(.9); transform-origin:bottom center;
+                    background:var(--text); color:var(--bg); font-size:10.5px;
+                    font-weight:600; line-height:1; padding:4px 7px; border-radius:5px;
+                    white-space:nowrap; opacity:0; pointer-events:none;
+                    transition:opacity .12s, transform .12s; z-index:3; }
+  .rp-hour:hover::after { opacity:1; transform:translate(-50%,-100%) scale(1); }
   .rp-hour span { font-size:8.5px; color:var(--faint); font-variant-numeric:tabular-nums; }
 
   /* 标签云 */
@@ -260,21 +328,32 @@
   .rp-tag:hover { background:var(--accent-soft); color:var(--accent); }
   .rp-tag:hover b { color:var(--accent); }
 
-  /* 日报 */
-  .rp-reports { display:flex; flex-wrap:wrap; gap:8px; }
-  .rp-report { display:flex; flex-direction:column; gap:2px; padding:9px 14px;
-               border:1px solid var(--line); border-radius:10px; color:inherit; }
-  .rp-report b { font-size:13px; font-variant-numeric:tabular-nums; }
-  .rp-report span { font-size:11px; color:var(--faint); }
-  .rp-report:hover { border-color:var(--accent); }
-  .rp-report:hover b { color:var(--accent); }
+  /* 日报定稿：固定卡片网格。
+     早先每个日期是一个随内容宽度的自由流式小卡，日期一多（几十个）就
+     参差成一片。现在改成固定列宽的自适应网格：每张卡日期独占一行、
+     周几与篇数分列底部，列数随宽度自动增减，多少天都排得整齐。 */
+  .rp-reports { display:grid; grid-template-columns:repeat(auto-fill,minmax(148px,1fr));
+                gap:9px; }
+  .rp-report { display:flex; flex-direction:column; justify-content:space-between;
+               gap:10px; min-height:74px; padding:12px 14px;
+               border:1px solid var(--line); border-radius:11px; color:inherit;
+               background:var(--surface); transition:border-color .14s, background-color .14s; }
+  .rp-report-date { font-size:13.5px; font-weight:650; letter-spacing:-.1px;
+                    font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .rp-report-meta { display:flex; align-items:baseline; justify-content:space-between;
+                    gap:8px; font-size:11.5px; color:var(--faint); }
+  .rp-report-count { font-variant-numeric:tabular-nums; }
+  .rp-report:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .rp-report:hover .rp-report-date { color:var(--accent); }
 
   .rp-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
   .rp-grid .rp-card { margin:0; }
   @media (max-width:900px) { .rp-grid { grid-template-columns:1fr; } }
   @media (max-width:640px) {
     .rp-bar-label { flex-basis:74px; font-size:12px; }
-    .rp-trend { height:110px; }
+    .rp-trend { height:140px; }
+    /* 手机上没有 hover，气泡不出现；柱子本身也窄，缩放会互相压 —— 关掉 */
+    .rp-col:hover .rp-bar, .rp-hour:hover i { transform:none; }
   }
 </style>
 {% endblock %}

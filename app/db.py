@@ -75,6 +75,8 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     "articles.starred": "INTEGER NOT NULL DEFAULT 0",
     # 软删除（回收站）
     "articles.deleted_at": "DATETIME",
+    # 早报分节配置（JSON 数组：每节 = 一张长图，各自带筛选条件）
+    "brief_config.sections": "TEXT",
 }
 
 # 索引迁移表：跟 _COLUMN_MIGRATIONS 同一个理由，但补的是索引。

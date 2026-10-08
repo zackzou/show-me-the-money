@@ -167,3 +167,60 @@ class DailyReport(Base):
     content_html: Mapped[str] = mapped_column(Text, nullable=False)
     article_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
+
+
+class BriefConfig(Base):
+    """早报配置（单行表，id 恒为 1）。
+
+    早报与「日报」是两种产物：日报是整天全量快照，早报是**按用户口味精选的
+    TOP N**（分类 / 主题 / 标签 / 关键词自由定制），内容直接继承每篇文章的
+    「早报片段」（``Article.brief_zh``，处理阶段就写好了），拼装成稿时不再
+    调用模型。配置存表而不是 JSON 文件：与关键词规则同一套「网页可改、
+    即时生效」的模式，而且后续要加字段时走列迁移就行。
+    """
+
+    __tablename__ = "brief_config"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 精选条数（1~50，默认 10）
+    top_n: Mapped[int] = mapped_column(Integer, nullable=False, default=10)
+    # 取最近多少天内的文章（1~7，默认 1 = 今天）
+    days: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # 以下过滤条件都是 JSON 数组字符串（空 = 不限）
+    categories: Mapped[str | None] = mapped_column(Text)
+    topics: Mapped[str | None] = mapped_column(Text)
+    tags: Mapped[str | None] = mapped_column(Text)
+    # 命中关键词（标题/摘要/导读/片段任一包含即入选）
+    keywords: Mapped[str | None] = mapped_column(Text)
+    # 排除词（命中任一即剔除）
+    exclude: Mapped[str | None] = mapped_column(Text)
+    # 1 = 只收「特别关注」命中过的文章
+    starred_only: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 组内排序：score（评分优先）或 time（时间优先）；特别关注永远排最前
+    sort: Mapped[str] = mapped_column(String(10), nullable=False, default="score")
+    # 分节配置（JSON 数组）：每节 = 一张微信长图 / 一组新闻，各自带
+    # 名称、条数与筛选（分类/主题/标签/关键词）。空 = 用全局筛选出单节。
+    # 例：[{"name":"AI 大模型","top_n":5,"categories":["模型"],"topics":[],
+    #      "tags":[],"keywords":[]}]
+    sections: Mapped[str | None] = mapped_column(Text)
+    updated_at: Mapped[datetime | None] = mapped_column(DateTime)
+
+
+class BriefIssue(Base):
+    """早报成品：每天早上定时生成的一份存档（按日期唯一）。
+
+    与 ``BriefConfig``（规则）分开存：规则随时可改，成品是「当时按那套
+    规则产出的内容」快照 —— 配置页要能回看每一天的早报，改规则不能
+    改写历史。内容存 JSON（分节 + 条目），text/markdown 是渲染好的成品。
+    """
+
+    __tablename__ = "brief_issues"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    date: Mapped[str] = mapped_column(String(10), nullable=False, unique=True, index=True)
+    content_json: Mapped[str] = mapped_column(Text, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    markdown: Mapped[str] = mapped_column(Text, nullable=False)
+    section_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    article_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)

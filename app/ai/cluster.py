@@ -288,9 +288,19 @@ def merge_duplicates(
 
 
 def duplicates_of(session: Session, article_id: int) -> list[Article]:
-    """主条目下挂了哪些重复稿（详情页底部列出来，一条内容都不丢）。"""
+    """主条目下挂了哪些重复稿（详情页底部列出来，一条内容都不丢）。
+
+    软删（回收站）的稿子不列 —— 否则主条目页会把用户刚删掉的重复稿
+    标题重新展示出来。注意这里**不能**用 ``visible_article_conditions()``：
+    它要求 ``duplicate_of IS NULL``，而重复稿天生不满足。
+    """
     return list(
-        session.execute(select(Article).where(Article.duplicate_of == article_id)).scalars()
+        session.execute(
+            select(Article).where(
+                Article.duplicate_of == article_id,
+                Article.deleted_at.is_(None),
+            )
+        ).scalars()
     )
 
 
@@ -300,13 +310,16 @@ def primary_of(session: Session, article: Article) -> Article | None:
     只解析一跳是不够的：库里出现过 53 → 35 → 61 这样的链，一跳会让 53 指到
     35（它自己也是藏稿），于是 53 页面上的「另一篇更完整的报道」点进去还是
     一篇藏稿，而 61 的来源列表里又没有 53。走到末端才是一条扁平的结构。
+
+    链上的主条目如果已被软删/进入回收站，视作没有主条目（返回 None）——
+    否则详情页会链到一个 404 的已删文章。
     """
     seen: set[int] = set()
     current = article
     while current.duplicate_of and current.duplicate_of not in seen:
         seen.add(current.duplicate_of)
         nxt = session.get(Article, current.duplicate_of)
-        if nxt is None:
+        if nxt is None or nxt.deleted_at is not None:
             return None
         current = nxt
     return current if current.id != article.id else None

@@ -39,6 +39,7 @@ from app.web.search import (
 )
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "templates"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 templates = Jinja2Templates(directory=str(TEMPLATE_DIR))
 log = logging.getLogger(__name__)
 
@@ -68,6 +69,40 @@ def skin_css():
         return PlainTextResponse("not found", status_code=404)
     return FileResponse(path, media_type="text/css",
                         headers={"Cache-Control": "public, max-age=31536000, immutable"})
+
+
+# 站点图标：Z 字母 + 青绿配色。SVG 是矢量（现代浏览器），ICO/PNG 兜底
+# （老浏览器与「添加到主屏幕」）。文件名白名单化，防止目录穿越。
+_ICON_TYPES = {
+    "favicon.svg": "image/svg+xml",
+    "favicon.ico": "image/x-icon",
+    "favicon-16.png": "image/png",
+    "favicon-32.png": "image/png",
+    "apple-touch-icon.png": "image/png",
+    "icon-192.png": "image/png",
+    "icon-512.png": "image/png",
+}
+
+
+@page_router.get("/favicon.svg")
+@page_router.get("/favicon.ico")
+@page_router.get("/favicon-16.png")
+@page_router.get("/favicon-32.png")
+@page_router.get("/apple-touch-icon.png")
+@page_router.get("/icon-192.png")
+@page_router.get("/icon-512.png")
+def site_icon(request: Request) -> Response:
+    """站点图标（Z 字母）。名字走白名单，文件缺失 404。"""
+    name = request.url.path.lstrip("/")
+    media_type = _ICON_TYPES.get(name)
+    path = STATIC_DIR / name if media_type else None
+    if media_type is None or path is None or not path.is_file():
+        return PlainTextResponse("not found", status_code=404)
+    return FileResponse(
+        path,
+        media_type=media_type,
+        headers={"Cache-Control": "public, max-age=604800"},
+    )
 
 
 @page_router.get("/img/{name}")
@@ -518,6 +553,21 @@ def paginate(cards: list[dict[str, Any]], page: int, size: int = PAGE_SIZE) -> t
 
 def _settings(request: Request) -> Settings | None:
     return getattr(request.app.state, "settings", None)
+
+
+def public_base(request: Request) -> str:
+    """站点对外地址（给 Hermes 提示词 / llms.txt / RSS 用）。
+
+    显式配置（``SMTM_PUBLIC_URL``）优先；否则按请求的 Host 推导 ——
+    用户在浏览器里用什么地址访问，生成的就是什么地址（内网 IP:端口
+    会原样带上）。反代 https 终止在 nginx/Caddy、或浏览器走内网而
+    Hermes 走公网时，推导结果不是 Hermes 能用的地址，用配置覆盖。
+    """
+    settings = _settings(request)
+    configured = (getattr(settings, "public_url", "") or "").strip().rstrip("/")
+    if configured:
+        return configured
+    return str(request.base_url).rstrip("/")
 
 
 def _topics(request: Request) -> list[str]:

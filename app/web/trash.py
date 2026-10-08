@@ -191,7 +191,10 @@ async def _read_form(request: Request) -> dict[str, str]:
             data = await request.json()
         except ValueError:
             return {}
-        return {str(k): str(v) for k, v in (data or {}).items()}
+        # body 是数组/字符串（如 ["x"]）时 .items() 会 AttributeError 变 500
+        if not isinstance(data, dict):
+            return {}
+        return {str(k): str(v) for k, v in data.items()}
     from urllib.parse import parse_qs
 
     raw = (await request.body()).decode("utf-8", "replace")

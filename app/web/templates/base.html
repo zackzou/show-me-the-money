@@ -6,14 +6,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>{{ title }} · Show Me the Money</title>
   <meta name="description" content="按调研方向自动筛选的行业热点资讯">
+  {# 站点图标：Z 字母 + 青绿配色。SVG 优先（矢量清晰），ICO/PNG 兜底 #}
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="icon" href="/favicon.ico" sizes="any">
+  <link rel="icon" href="/favicon-32.png" type="image/png" sizes="32x32">
+  <link rel="apple-touch-icon" href="/apple-touch-icon.png">
   <script>
-    // 深浅色：跟随系统，可手动切换并记住
+    // 深浅色：默认自适应 —— 按电脑时间自动切换（19:00~07:00 深色，其余浅色），
+    // 手动选过深色/浅色则记住手动选择。
     (function () {
       var saved = localStorage.getItem("smtm-theme");
-      var prefersDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
-      if (saved === "dark" || (!saved && prefersDark)) document.documentElement.classList.add("dark");
-      // 皮肤：默认 / AIHOT 风格。属性先于 CSS 落地，避免闪一下默认皮肤。
-      if (localStorage.getItem("smtm-skin") === "aihot") {
+      var hour = new Date().getHours();
+      var autoDark = hour < 7 || hour >= 19;
+      if (saved === "dark" || (saved !== "light" && autoDark)) {
+        document.documentElement.classList.add("dark");
+      }
+      // 皮肤：科技风格（默认）/ 经典风格。属性先于 CSS 落地，避免闪一下。
+      // 只认显式选择的「经典」；其余（未设置 / 旧值 aihot）都走科技风格。
+      if (localStorage.getItem("smtm-skin") !== "classic") {
         document.documentElement.setAttribute("data-skin", "aihot");
       }
       // 语言：每页（每篇文章）打开都默认中文。以前这里恢复上次的 smtm-lang
@@ -59,6 +69,10 @@
     .wrap { max-width:960px; margin:0 auto; padding:0 20px; }
     /* 详情页三栏，正文列需要更多宽度 */
     .wrap.wide { max-width:1400px; }
+    /* 顶栏比内容区宽：品牌 + 10 项导航 + 搜索 + 工具按钮在 960px 里
+       塞不下（搜索框会被压到打不了字，用户实测反馈）。顶栏单独放宽到
+       1200px，内容区保持 960px —— 两者都居中，视觉上仍是同一条中轴。 */
+    .hd .wrap { max-width:1200px; }
     .hd { position:sticky; top:0; z-index:30; background:color-mix(in srgb, var(--bg) 88%, transparent);
           backdrop-filter:saturate(1.6) blur(10px); border-bottom:1px solid var(--line); }
     /* 头部是四段：品牌 / 导航 / 搜索 / 工具。
@@ -66,7 +80,7 @@
        width:250px 的子元素，而父级被挤窄后子元素**溢出**，于是搜索框压在
        导航上（实测把「RSS」压成「RS」）。现在搜索框改成可伸缩 + min-width:0，
        窄了就自己变窄，永远不会溢出到导航上。 */
-    .hd-in { display:flex; align-items:center; gap:clamp(14px,1.8vw,24px); height:58px; }
+    .hd-in { display:flex; align-items:center; gap:clamp(10px,.8vw,12px); height:58px; }
     .brand { font-weight:700; font-size:16px; letter-spacing:-.2px; white-space:nowrap; flex:0 0 auto; }
     .brand em { font-style:normal; color:var(--accent); }
     /* flex:0 0 auto —— 导航**不许被压窄**。
@@ -75,19 +89,43 @@
        搜索框上（1181px 起就能测到，到 1440px 时「RSS」被盖掉 34px，elementFromPoint
        命中的是搜索框而不是链接）。不给收缩就没有溢出可言 —— 放不下时由下面
        那几条媒体查询按重要性逐个隐藏导航项。 */
-    .nav { display:flex; gap:clamp(12px,1.4vw,20px); font-size:13.5px; color:var(--muted);
-           flex:0 0 auto; white-space:nowrap; }
-    .nav a { flex:0 0 auto; }
+    /* align-items:baseline —— 导航里混着中文与拉丁（RSS），stretch 下两者的
+       文字盒不同高（中文 16px、拉丁 15px），RSS 整体高出 1px；基线对齐后
+       所有文字坐在同一条线上（用户反馈「RSS 高低不一致」的根因）。
+       line-height 固定值 —— 拉丁行盒比中文矮 2~3px，不锁死的话 RSS 这一格
+       的悬停底色会比相邻项矮一截（移动端菜单同此）。 */
+    .nav { display:flex; align-items:baseline; gap:clamp(10px,1vw,12px); font-size:13.5px;
+           color:var(--muted); flex:0 0 auto; white-space:nowrap; }
+    .nav a { flex:0 0 auto; line-height:19px; }
     .nav a:hover { color:var(--text); }
     .nav .on { color:var(--text); font-weight:600; }
+    /* 搜索框必须有可用宽度：它前面是品牌 + 9 项导航，`flex:1 1 260px` 在
+       960px 容器里被压到 102px（输入区只剩 39px，打不了字）。改成
+       `flex:1 1 280px` + min-width:150px —— 有富余就长到 280px（上限 400px），
+       拥挤时收缩，最窄也留出约 90px 输入区。 */
     .sp { margin-left:auto; display:flex; align-items:center; gap:10px;
-          flex:1 1 260px; min-width:0; max-width:400px; justify-content:flex-end; }
+          flex:1 1 280px; min-width:150px; max-width:400px; justify-content:flex-end; }
     .tools { display:flex; align-items:center; gap:8px; flex:0 0 auto; }
     .ico { width:32px; height:32px; flex:0 0 auto; display:grid; place-items:center;
            border:1px solid var(--line); border-radius:9px; background:var(--surface);
-           color:var(--muted); cursor:pointer; font-size:14px;
+           color:var(--muted); cursor:pointer; font-size:14px; position:relative;
            transition:color .15s, border-color .15s; }
     .ico:hover { color:var(--accent); border-color:var(--accent); }
+    /* 图标按钮悬停即时文字提示。原生 title 有 ~1 秒延迟、样式不可控，
+       内嵌浏览器里甚至完全不弹（用户反馈「悬停什么都没有」）。
+       用 data-tip + CSS 伪元素做即时提示，pointer-events:none 不挡点击。
+       气泡右对齐到按钮右缘（不是居中）：工具区贴着视口右缘，居中的气泡会
+       伸出屏幕 —— 绝对定位元素即使 opacity:0 也计入 scrollWidth，页面被
+       撑出横向滚动条（实测 1px）。右对齐后任何宽度下都不会越界。 */
+    .ico[data-tip]::after { content:attr(data-tip); position:absolute; top:calc(100% + 8px);
+                            right:0; transform:translateY(-4px); z-index:50;
+                            background:var(--text); color:var(--bg); font-size:11.5px;
+                            font-weight:500; line-height:1; padding:6px 9px;
+                            border-radius:6px; white-space:nowrap;
+                            opacity:0; pointer-events:none;
+                            transition:opacity .13s, transform .13s; }
+    .ico[data-tip]:hover::after, .ico[data-tip]:focus-visible::after {
+      opacity:1; transform:translateY(0); }
     /* 语言切换。基础规则必须写在上面那组窄屏 @media 之前 ——
        .lang button 的窄屏缩小（680px/460px 两档）与这里同优先级，
        若基础规则排在后面，窄屏覆盖会被悄悄顶回去。 */
@@ -271,15 +309,17 @@
     .dg-foot-brand { font-weight:600; }
     .dg-tip { margin:12px 2px 0; font-size:11.5px; line-height:1.6; color:var(--faint); text-align:center; }
 
-    /* 窄屏收缩顺序：搜索框 → RSS → 导航 */
-    /* 按重要性递减地隐藏，而不是等放不下了一刀切：RSS 最先让位，然后是
-       收藏/信源，最后才整条导航。 */
-    @media (max-width:1240px) { .nav a[href="/rss-guide"] { display:none; } }
-    @media (max-width:1100px) { .nav a[href="/saved"] { display:none; } }
-    @media (max-width:980px)  { .nav a[href="/sources"] { display:none; } }
-    @media (max-width:860px)  { .nav a[href="/archive"] { display:none; } }
+    /* 窄屏收缩顺序：搜索框 → Agent → RSS → 回收站 → 收藏 → 信源 → 历史日报。
+       按重要性递减地隐藏，而不是等放不下了一刀切。顶栏容器是 1200px 固定宽
+       （见 .hd .wrap），阈值按「视口 ≥1240px 时容器恒为 1200px」反推。 */
+    @media (max-width:1520px) { .nav a[href="/agent"] { display:none; } }
+    @media (max-width:1400px) { .nav a[href="/rss-guide"] { display:none; } }
+    @media (max-width:1290px) { .nav a[href="/trash"] { display:none; } }
+    @media (max-width:1190px) { .nav a[href="/saved"] { display:none; } }
+    @media (max-width:1080px) { .nav a[href="/sources"] { display:none; } }
+    @media (max-width:980px)  { .nav a[href="/archive"] { display:none; } }
     @media (max-width:820px)  { .brand { font-size:0; } .brand em { font-size:16px; } }
-    @media (max-width:760px)  { .sp { max-width:none; flex:1 1 130px; } }
+    @media (max-width:760px)  { .sp { max-width:none; flex:1 1 130px; min-width:130px; } }
     /* 手机上「/」快捷键提示是纯装饰，却占掉搜索框 16px —— 320px 下输入框只剩
        4px，根本没法用。窄屏直接不画它，把宽度还给输入框。 */
     @media (max-width:680px)  { .s-key { display:none; } }
@@ -320,7 +360,10 @@
       .nav-tg { display:grid; }
       .m-nav.open { display:grid; gap:2px; padding:8px 14px calc(12px + env(safe-area-inset-bottom));
                     border-top:1px solid var(--line); background:var(--bg); }
-      .m-nav a { padding:11px 12px; border-radius:9px; font-size:14.5px; color:var(--muted); }
+      /* line-height 固定 —— 拉丁文本（RSS）的默认行盒比中文矮 2~3px，
+         同排的菜单项高度会参差（42px vs 39px）。 */
+      .m-nav a { padding:11px 12px; border-radius:9px; font-size:14.5px; line-height:20px;
+                 color:var(--muted); }
       .m-nav a:hover { color:var(--text); background:var(--surface); }
       .m-nav a.on { color:var(--accent); background:var(--accent-soft); font-weight:600; }
     }
@@ -334,7 +377,23 @@
        不跟主文案抢视线，但足够让人知道下一步该干什么。 */
     .empty-note { display:block; margin-top:14px; font-size:12.5px; line-height:1.8;
                   color:var(--muted); max-width:44em; margin-inline:auto; }
-    .ft { border-top:1px solid var(--line); color:var(--faint); font-size:12px; padding:22px 0 34px; }
+    /* 页尾：与内容区拉开空隙（原来紧贴最后一个卡片/列表，尤其报告页的
+       最后一张卡与分割线零距离），分割线上下都留白；文案拆成两段 ——
+       品牌句在左、运行节奏在右，窄屏自动叠行。全站所有页面共用。 */
+    .ft { margin-top:34px; border-top:1px solid var(--line); color:var(--faint); font-size:12px; }
+    .ft-in { display:flex; align-items:baseline; justify-content:space-between;
+             gap:6px 24px; flex-wrap:wrap; padding:20px 0 34px; }
+    .ft-brand b { color:var(--muted); font-weight:600; }
+    .ft-meta { display:flex; flex-wrap:wrap; gap:4px 18px; }
+    .ft-meta span { position:relative; }
+    .ft-meta span + span::before { content:""; position:absolute; left:-9px; top:50%;
+                                   width:3px; height:3px; border-radius:50%;
+                                   background:var(--line-strong, var(--line));
+                                   transform:translateY(-50%); }
+    @media (max-width:640px) {
+      .ft { margin-top:26px; }
+      .ft-meta { gap:4px 14px; }
+    }
 
     /* 键盘焦点必须看得见。原来全站没有任何 :focus 样式 —— 逐个量过 38 个
        可聚焦元素，focus() 之后 outline 与 box-shadow 全是初始值，键盘用户
@@ -620,11 +679,13 @@
       <a href="/" class="{{ 'on' if nav == 'home' else '' }}">热点资讯</a>
       <a href="/archive" class="{{ 'on' if nav == 'archive' else '' }}">历史日报</a>
       <a href="/reports" class="{{ 'on' if nav == 'reports' else '' }}">报告</a>
+      <a href="/brief" class="{{ 'on' if nav == 'brief' else '' }}">早报</a>
       <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
       <a href="/sources" class="{{ 'on' if nav == 'sources' else '' }}">信源</a>
       <a href="/keywords" class="{{ 'on' if nav == 'keywords' else '' }}">关键词</a>
       <a href="/trash" class="{{ 'on' if nav == 'trash' else '' }}">回收站</a>
       <a href="/settings" class="{{ 'on' if nav == 'settings' else '' }}">设置</a>
+      <a href="/agent" class="{{ 'on' if nav == 'agent' else '' }}">Agent</a>
       <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
     </nav>
     <form class="sp" action="/search" method="get" role="search">
@@ -642,12 +703,12 @@
       </div>
     </form>
     <div class="tools">
-      <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
-      <button class="ico" id="skin" title="切换外观风格（默认 / AIHOT）" aria-label="切换外观风格">✦</button>
+      <button class="ico" id="theme" data-tip="切换深浅色" title="切换深浅色" aria-label="切换深浅色">◐</button>
+      <button class="ico" id="skin" data-tip="切换风格（科技 / 经典）" title="切换风格（科技 / 经典）" aria-label="切换外观风格">✦</button>
       {# 原来是 /api/health —— 点开是浏览器里一屏黑底 JSON，与全站风格割裂。
-         改成 /status 页面（同一份数据，站点样式渲染）。 #}
-      <a class="ico" href="/status" title="服务状态" aria-label="服务状态">⋯</a>
-      <button class="ico nav-tg" id="nav-tg" aria-expanded="false" aria-controls="m-nav" aria-label="站内导航菜单">☰</button>
+          改成 /status 页面（同一份数据，站点样式渲染）。 #}
+      <a class="ico" href="/status" data-tip="服务状态" title="服务状态" aria-label="服务状态">⋯</a>
+      <button class="ico nav-tg" id="nav-tg" data-tip="站内导航" aria-expanded="false" aria-controls="m-nav" aria-label="站内导航菜单">☰</button>
     </div>
   </div>
   {# 手机导航面板：≤680px 桌面导航整条让位给搜索（上面的既有规则），原先手机上
@@ -657,11 +718,13 @@
     <a href="/" class="{{ 'on' if nav == 'home' else '' }}">热点资讯</a>
     <a href="/archive" class="{{ 'on' if nav == 'archive' else '' }}">历史日报</a>
     <a href="/reports" class="{{ 'on' if nav == 'reports' else '' }}">报告</a>
+    <a href="/brief" class="{{ 'on' if nav == 'brief' else '' }}">早报</a>
     <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
     <a href="/sources" class="{{ 'on' if nav == 'sources' else '' }}">信源</a>
     <a href="/keywords" class="{{ 'on' if nav == 'keywords' else '' }}">关键词</a>
     <a href="/trash" class="{{ 'on' if nav == 'trash' else '' }}">回收站</a>
     <a href="/settings" class="{{ 'on' if nav == 'settings' else '' }}">设置</a>
+    <a href="/agent" class="{{ 'on' if nav == 'agent' else '' }}">Agent 接入</a>
     <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
     <a href="/status" class="{{ 'on' if nav == 'status' else '' }}">服务状态</a>
   </nav>
@@ -677,22 +740,25 @@
     <a class="sk-link {{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home') }}热点资讯</a>
     <a class="sk-link {{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive') }}历史日报</a>
     <a class="sk-link {{ 'on' if nav == 'reports' else '' }}" href="/reports">{{ ic('chart') }}数据报告</a>
+    <a class="sk-link {{ 'on' if nav == 'brief' else '' }}" href="/brief">{{ ic('brief') }}早报配置</a>
     <a class="sk-link {{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved') }}收藏</a>
     <div class="sk-sec-t">管理</div>
     <a class="sk-link {{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources') }}信源</a>
     <a class="sk-link {{ 'on' if nav == 'keywords' else '' }}" href="/keywords">{{ ic('filter') }}关键词</a>
     <a class="sk-link {{ 'on' if nav == 'trash' else '' }}" href="/trash">{{ ic('trash') }}回收站</a>
     <a class="sk-link {{ 'on' if nav == 'settings' else '' }}" href="/settings">{{ ic('settings') }}设置</a>
+    <div class="sk-sec-t">接入</div>
+    <a class="sk-link {{ 'on' if nav == 'agent' else '' }}" href="/agent">{{ ic('agent') }}Agent 接入</a>
     <a class="sk-link {{ 'on' if nav == 'rss' else '' }}" href="/rss-guide">{{ ic('rss') }}RSS 订阅</a>
   </nav>
   <div class="sk-foot">
     <div class="sk-seg" id="sk-seg" role="radiogroup" aria-label="外观">
       <span class="sk-seg-thumb" aria-hidden="true"></span>
       <button type="button" data-sk-theme="dark" role="radio" title="深色" aria-label="深色">{{ ic('moon', 14) }}</button>
-      <button type="button" data-sk-theme="system" role="radio" title="跟随系统" aria-label="跟随系统">{{ ic('monitor', 14) }}</button>
+      <button type="button" data-sk-theme="system" role="radio" title="自适应（按时间）" aria-label="自适应（按时间）">{{ ic('monitor', 14) }}</button>
       <button type="button" data-sk-theme="light" role="radio" title="浅色" aria-label="浅色">{{ ic('sun', 14) }}</button>
     </div>
-    <button type="button" class="sk-skin-toggle" id="sk-back">换回默认风格</button>
+    <button type="button" class="sk-skin-toggle" id="sk-back">换回经典风格</button>
     {# 原来指向 /api/health（裸 JSON）；改成站内状态页，风格与全站一致 #}
     <a class="sk-status" href="/status">服务状态</a>
   </div>
@@ -701,6 +767,7 @@
   <a class="{{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home', 22) }}热点</a>
   <a class="{{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive', 22) }}日报</a>
   <a class="{{ 'on' if nav == 'reports' else '' }}" href="/reports">{{ ic('chart', 22) }}报告</a>
+  <a class="{{ 'on' if nav == 'brief' else '' }}" href="/brief">{{ ic('brief', 22) }}早报</a>
   <a class="{{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved', 22) }}收藏</a>
   <a class="{{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources', 22) }}信源</a>
   <a class="{{ 'on' if nav == 'keywords' else '' }}" href="/keywords">{{ ic('filter', 22) }}关键词</a>
@@ -711,8 +778,14 @@
 {% block content %}{% endblock %}
 </main>
 
-<footer class="wrap ft">
-  由 Show Me the Money 自动生成 · 每天 08:00 定稿前一日日报 · 当天每 2 小时滚动刷新
+<footer class="wrap{% block footer_extra %}{% endblock %} ft">
+  <div class="ft-in">
+    <span class="ft-brand">由 <b>Show Me the Money</b> 自动生成</span>
+    <span class="ft-meta">
+      <span>每天 08:00 定稿前一日日报</span>
+      <span>当天每 2 小时滚动刷新</span>
+    </span>
+  </div>
 </footer>
 
 <div class="lb" id="lb">
@@ -721,26 +794,31 @@
   <span class="lb-n" id="lb-n"></span>
 </div>
 <script>
-  // 深浅色切换
+  // 深浅色：在「自适应 → 深色 → 浅色」间循环。
+  // 自适应 = 按电脑时间自动切换（19:00~07:00 深色，其余浅色）。
   var themeBtn = document.getElementById("theme");
   if (themeBtn) themeBtn.onclick = function () {
-    var dark = document.documentElement.classList.toggle("dark");
-    localStorage.setItem("smtm-theme", dark ? "dark" : "light");
-    syncSeg();
+    var order = ["dark", "light", "system"];
+    var next = order[(order.indexOf(currentThemeChoice()) + 1) % order.length];
+    applyThemeChoice(next);
   };
-  // ── 皮肤（默认 / AIHOT 风格）与三态外观（深色 / 跟随系统 / 浅色） ──
-  // AIHOT 皮肤下的外观控件是「轨道 + 滑块」三选一：dark 写 smtm-theme=dark、
-  // light 写 light、system 删掉键（回到跟随系统）。两种入口（顶栏 ◐ 与
+  // ── 皮肤（科技 / 经典）与三态外观（深色 / 自适应 / 浅色） ──
+  // 科技风格下的外观控件是「轨道 + 滑块」三选一：dark 写 smtm-theme=dark、
+  // light 写 light、system 删掉键（回到自适应）。两种入口（顶栏 ◐ 与
   // 侧栏三态）操作同一份 localStorage，互相同步。
   function currentThemeChoice() {
     var saved = localStorage.getItem("smtm-theme");
     return saved === "dark" ? "dark" : (saved === "light" ? "light" : "system");
   }
+  // 自适应：按电脑本地时间决定深浅（夜里深色、白天浅色）
+  function autoDark() {
+    var hour = new Date().getHours();
+    return hour < 7 || hour >= 19;
+  }
   function applyThemeChoice(choice) {
     if (choice === "system") localStorage.removeItem("smtm-theme");
     else localStorage.setItem("smtm-theme", choice);
-    var dark = choice === "dark" ||
-      (choice === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+    var dark = choice === "dark" || (choice === "system" && autoDark());
     document.documentElement.classList.toggle("dark", dark);
     syncSeg();
   }
@@ -765,29 +843,31 @@
       });
     }
     var back = document.getElementById("sk-back");
-    if (back) back.addEventListener("click", function () { applySkin("default"); });
+    if (back) back.addEventListener("click", function () { applySkin("classic"); });
     var skinBtn = document.getElementById("skin");
     if (skinBtn) skinBtn.addEventListener("click", function () {
-      applySkin(document.documentElement.getAttribute("data-skin") === "aihot" ? "default" : "aihot");
+      applySkin(document.documentElement.getAttribute("data-skin") === "aihot" ? "classic" : "tech");
     });
     syncSeg();
   })();
   // 皮肤切换：支持 View Transitions 的浏览器整页交叉淡入（AIHOT 的做法），
   // 不支持的直接换。换完刷新高亮控件。
+  // 内部标识仍是 "aihot"（CSS 全部锁在 data-skin="aihot" 下），
+  // localStorage 只存显式的 "classic" —— 未设置 = 科技风格（默认）。
   function applySkin(skin) {
-    var next = skin === "aihot" ? "aihot" : "default";
+    var next = skin === "classic" ? "classic" : "tech";
     var apply = function () {
-      if (next === "aihot") {
+      if (next === "tech") {
         document.documentElement.setAttribute("data-skin", "aihot");
-        localStorage.setItem("smtm-skin", "aihot");
+        localStorage.removeItem("smtm-skin");
       } else {
         document.documentElement.removeAttribute("data-skin");
-        localStorage.removeItem("smtm-skin");
+        localStorage.setItem("smtm-skin", "classic");
       }
       var b = document.getElementById("skin");
       if (b) {
-        b.classList.toggle("on", next === "aihot");
-        b.setAttribute("aria-pressed", next === "aihot" ? "true" : "false");
+        b.classList.toggle("on", next === "tech");
+        b.setAttribute("aria-pressed", next === "tech" ? "true" : "false");
       }
       syncSeg();
     };

@@ -3,6 +3,8 @@ schedule:
   fetch_interval_hours: 2
   # 「昨天」日报的定稿时间 HH:MM（默认昨天已不再变化，出的是定稿）
   daily_report_time: "08:00"
+  # 早报制作时间 HH:MM（每天按 /brief 的配置精选并存档，成品可在配置页回看）
+  brief_time: "06:00"
   # 清理时间 HH:MM
   cleanup_time: "03:00"
 

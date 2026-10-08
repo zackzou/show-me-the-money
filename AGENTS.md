@@ -47,6 +47,9 @@ python -m app.main
 | `SMTM_DISABLE_STARTUP_FETCH` | 设 `1` 则启动不抓取（离线部署、CI、只想看界面时用） |
 
 其余可选：`FETCH_ON_STARTUP` / `CONFIG_DIR` / `DB_PATH`（默认 `config`、`data/smtm.db`）。
+`SMTM_PUBLIC_URL`：站点对外地址，默认按浏览器访问的 Host 自动推导
+（内网 `http://192.168.x.x:8000` 原样带上）；反代 https 终止、或浏览器走内网
+而 Hermes 走公网时显式设置（Hermes 提示词 / llms.txt / RSS 都用它）。
 
 ## 配完之后：这些网页是主要入口
 
@@ -54,7 +57,11 @@ python -m app.main
 - `/keywords` —— 屏蔽词（不收集）与特别关注词（加星标 + 优先排序），即时生效
 - `/trash` —— 回收站：恢复 / 批量永久删除 / 清空
 - `/reports` —— 数据报告：KPI、趋势与分布图表，每个元素可下钻明细
-- `/settings` —— 换模型、填 Key（点眼睛才取明文）、测连通性、看 Token 用量与调用日志
+- `/brief` —— 早报配置：分节（每节一张微信长图）+ 筛选；每天 06:00 自动存档；
+  输出 `/brief.txt`、`/brief.md`、`/api/brief`、`/api/brief/generate`（立即生成）
+- `/agent` —— Agent 接入：Skill（`/skill.md`）/ MCP（`scripts/smtm_mcp.py`）/ REST / 早报；`/llms.txt` 是站点说明书
+- `/settings` —— 换模型、填 Key（点眼睛才取明文）、读模型列表（`POST /settings/models`
+  调 `{base}/models`，读不到可手动输入）、测连通性、看 Token 用量与调用日志
 - `/status` —— 服务状态（人看）；`/api/health` 是给脚本的 JSON
 - `/rss-guide` —— RSS 订阅说明页
 
@@ -75,26 +82,58 @@ python -m app.main
     `tests/test_manage.py::test_keyword_matches_latin_word_boundary`。
 - **报告页纯服务端聚合 + CSS 图表**（`app/web/reports.py`），不引图表库；
   下钻统一走 `/reports/breakdown?dimension=&value=`。
+- **早报**（`app/report/brief.py` + `app/web/brief.py`）：配置存 `brief_config`
+  单行表（整表覆盖语义：字段缺席 = 清空，**例外是 `sections`** —— 缺席保留
+  现有流水线，旧版页面/脚本不带这个字段时不会把节点清空；`sections` 存节点 JSON 数组，
+  节点类型 news/text/weather，带 enabled 开关；停用节点不进产出但保留配置）。
+  产出形态：news/text 节点 = 长图；**weather 节点 = 纯文本**（早安问候 +
+  天气 + 穿衣建议，直接发手机）—— `/api/brief/image` 对 weather 返回 404
+  是设计如此，Hermes 提示词据此只发文字；每个节点的 `text` 字段是一节一条
+  的成稿（`build_brief` 里 `section_text()` 生成，存档时随 sections 落库，
+  旧存档由 `issue_view` 补算）。成品存 `brief_issues`（每天一份，
+  `run_brief_job` 在 06:00 生成，配置页可回看）。内容用 `brief_text()`
+  （`Article.brief_zh` 优先，中文导读/推荐理由/正文节选兜底；
+  `allow_placeholder=False` 时没素材的条目**剔除**），拼装零 LLM 调用。
+  `app/web/api.py:_digest_with_fallback` 与它共用同一实现
+  （单篇页传 `allow_placeholder=True`），别写第二份。
+  长图渲染在 `brief.html` 的 `drawCard()`（Canvas 1080px，翻页跳过 weather）
+  —— `wrapText` 的逐字累积是渲染正确性的关键，改动后必须肉眼验收长图。
+  服务端另有一份渲染（`app/report/longimage.py`，`/api/brief/image`，
+  Hermes 微信直发用）：Docker 里 emoji 字体是位图字体（NotoColorEmoji
+  只有 109px 原生字面），`_emoji_tile` 先画原生大小再裁缩到正文行高，
+  不能直接 `draw.text`；改动后跑 `tests/test_brief.py -k emoji` 并
+  在容器里 curl 一张长图肉眼验收（本地 macOS 字体和容器行为不同）。
+- **站点图标**：`app/web/static/` 下的 Z 字母图标（svg/ico/png），路由在
+  `routes.py:site_icon`（白名单防目录穿越）。换图标直接替换 static 下的文件
+  （svg 是矢量源，其余尺寸是它的栅格导出），并同步 `_ICON_TYPES` 白名单。
+- **天气**（`app/report/weather.py`）：Open-Meteo 地理编码 + 预报（免费无 Key），
+  WMO 码 → emoji + 中文描述，穿衣建议/大风台风提醒模板化生成；结果按
+  「城市+小时」内存缓存 1 小时。取不到城市时如实输出「暂时取不到」。
+- **Agent 接入**（`app/web/agent.py` + `scripts/smtm_mcp.py`）：llms.txt / skill.md 的
+  内容在 `agent.py` 里生成（页面与文件共用，避免两处漂移）；MCP 是零依赖 stdio server，
+  协议为行分隔 JSON-RPC（initialize / tools/list / tools/call）。
 
-## 外观：两套皮肤
+## 外观：两套皮肤（科技 / 经典）
 
-- **默认风格**：顶栏横导航 + 顶栏搜索框，蓝主色。
-- **AIHOT 皮肤**：`app/web/templates/_skin_aihot.css`（走 `/skin/aihot.css` 强缓存）+
+- **科技风格（默认）**：`app/web/templates/_skin_aihot.css`（走 `/skin/aihot.css` 强缓存）+
   `base.html` 里的 `.sk-side` / `.sk-tabbar` 壳层。桌面 = 左侧栏（搜索框在内容区右上角），
-  手机 = 顶栏 + 底部标签栏，暖白 + 青绿配色。
-- 切换是**纯前端偏好**（`localStorage` 的 `smtm-skin`），服务端不渲染 `data-skin`。
+  手机 = 顶栏 + 底部标签栏，暖白 + 青绿配色。深浅色默认「自适应」（按电脑时间，19:00~07:00 深色）。
+- **经典风格**：顶栏横导航 + 顶栏搜索框，蓝主色。用户显式选择才启用。
+- 切换是**纯前端偏好**（`localStorage` 的 `smtm-skin`，只存显式 `classic`；未设置 = 科技风格），
+  服务端不渲染 `data-skin`。
 - 两条硬约束（有测试守着，见 `tests/test_skin.py`）：
-  1. 皮肤全部选择器锁在 `html[data-skin="aihot"]` 下，默认皮肤零影响；
+  1. 皮肤全部选择器锁在 `html[data-skin="aihot"]` 下，经典风格零影响；
   2. 只改样式不改行为 —— 新功能必须两种皮肤都能用。
+- 图标按钮的悬停提示用 `data-tip` + CSS 伪元素（原生 title 在内嵌浏览器里不弹）。
 - 加页面时注意：搜索框样式（`.search-field`）在 `base.html` 里统一维护，
-  首页与搜索页共用；页内搜索框在「默认皮肤桌面」与「窄屏」由 CSS 隐藏（顶栏那个可见）。
+  首页与搜索页共用；页内搜索框在「经典风格桌面」与「窄屏」由 CSS 隐藏（顶栏那个可见）。
 
 ## 质量门（改代码后必须全过）
 
 ```bash
 ruff check app tests scripts
 mypy app scripts
-pytest                      # 当前基线：418 passed
+pytest                      # 当前基线：490 passed
 ```
 
 ## 会让你踩坑的几件事
@@ -142,19 +181,24 @@ python scripts/repair_telegraphic.py         # 被网关风格注入压成「电
 app/main.py          create_app 工厂 + 中间件
 app/config.py        .env / config/*.yaml 加载与校验
 app/db.py            引擎、WAL、启动自愈迁移
-app/models.py        Article / Source / DailyReport / KeywordRule · visible_article_conditions
+app/models.py        Article / Source / DailyReport / KeywordRule / BriefConfig / BriefIssue
+                     · visible_article_conditions
 app/scheduler.py     APScheduler 任务编排 · apply_keyword_rules（正文级关键词规则）
 app/fetcher/         rss 抓取 · content 正文抽取 · images 配图 · lang 语种判定
                      guard 元数据拦截 · dedup 去重 · media_store 图片本地化 · pipeline 主流程
                      keywords 关键词规则（匹配口径与执行）
 app/ai/              client（HTTP+降级）· prompts · processor 处理流水线 · cluster 同题合并
-app/report/          generator 日报生成与时间窗口
+app/report/          generator 日报生成与时间窗口 · brief 早报精选与渲染
+                     weather 天气文案 · longimage 服务端长图（Pillow）
 app/web/             routes 页面 · sources 信源管理 · settings 设置 · api JSON（含重新获取）
                      search · rss 订阅 · keywords 关键词管理 · trash 回收站 · reports 数据报告
+                     brief 早报配置/输出 · agent llms.txt/skill.md/接入页
 app/web/templates/   Jinja2；base.html 持有全站 CSS 与公共 JS
-                     _skin_aihot.css AIHOT 皮肤（/skin/aihot.css）· _icons.html 皮肤图标
+                     _skin_aihot.css 科技风格皮肤（/skin/aihot.css）· _icons.html 皮肤图标
+app/web/static/      站点图标（favicon / apple-touch-icon / icon-192/512）
 config/              可直接改的默认配置（挂载进容器，改完重启即生效）
 scripts/             init_check（自检）· cleanup_native_zh · repair_half_translated · repair_telegraphic
+                     smtm_mcp.py MCP server（零依赖 stdio）
 tests/               pytest；tests/fixtures/bad_schedule 是「配置坏了」的测试夹具
 ```
 

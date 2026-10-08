@@ -198,6 +198,32 @@ def test_cleanup_removes_expired_rows(seeded_db, settings: Settings):
         assert session.query(DailyReport).count() == 0
 
 
+def test_cleanup_unlinks_duplicates_of_deleted_primary(seeded_db, settings: Settings):
+    """回归：主条目过期被删、藏稿还新鲜时，藏稿必须解除 duplicate_of。
+
+    旧实现「先断链再删」：断链时主条目 id 还在（notin 命中不了），删完
+    藏稿指向虚空 id —— visible_article_conditions 要求 duplicate_of IS NULL，
+    于是它从所有入口消失且回收站也没有，永久黑洞。
+    """
+    from app.models import Article
+
+    old = now_local() - timedelta(days=settings.storage.retention_days + 5)
+    with session_scope() as session:
+        primary = _seed(session, title="过期主条目", link="https://example.com/cl-p",
+                        published_at=old, created_at=old)
+        twin = _seed(session, title="新鲜藏稿", link="https://example.com/cl-t")
+        twin.duplicate_of = primary.id
+        twin_id = twin.id
+
+    run_cleanup_job(settings)
+
+    with session_scope() as session:
+        row = session.get(Article, twin_id)
+        assert row is not None
+        assert row.duplicate_of is None      # 解除隐藏，重新可见
+        assert row.deleted_at is None
+
+
 def test_scheduler_defaults_to_interval_triggers(settings: Settings):
     jobs = {job.id: type(job.trigger).__name__ for job in build_scheduler(settings).get_jobs()}
     assert jobs == {
@@ -207,6 +233,8 @@ def test_scheduler_defaults_to_interval_triggers(settings: Settings):
         # 补译独立成 30 分钟一跳的任务，不再排队等整轮处理
         "translate_backfill_job": "IntervalTrigger",
         "report_job": "CronTrigger",
+        # 早报每天早上 06:00 制作并存档
+        "brief_job": "CronTrigger",
         "cleanup_job": "CronTrigger",
     }
 
@@ -233,10 +261,41 @@ def test_scheduler_switches_to_daily_cron_when_configured(settings: Settings):
     assert jobs["fetch_job"] == "CronTrigger"
     assert jobs["content_job"] == "CronTrigger"
     assert jobs["process_job"] == "CronTrigger"
-    # 抓取每天 07:00、处理 07:30，日报仍在 08:00
+    # 抓取每天 07:00，日报仍在 08:00。
     assert "hour='7', minute='0'" in str(scheduler.get_job("fetch_job").trigger)
-    assert "hour='7', minute='30'" in str(scheduler.get_job("process_job").trigger)
     assert "hour='8', minute='0'" in str(scheduler.get_job("report_job").trigger)
+    # content/process 在配置时刻基础上顺延偏移（+2 / +5 分钟）：
+    # 保证「抓取 → 补正文 → 处理」的先后顺序，不在同一分钟抢写锁。
+    assert "hour='7', minute='2'" in str(scheduler.get_job("content_job").trigger)
+    assert "hour='7', minute='35'" in str(scheduler.get_job("process_job").trigger)
+
+
+def test_offset_trigger_actually_offsets(settings: Settings):
+    """错峰偏移必须真的生效（回归：APScheduler 触发器没有 __add__，
+    旧实现直接 TypeError 被吞，三个写库任务一直同时起跑）。"""
+    from apscheduler.triggers.cron import CronTrigger
+    from apscheduler.triggers.interval import IntervalTrigger
+
+    from app.scheduler import (
+        CONTENT_JOB_OFFSET_SECONDS,
+        PROCESS_JOB_OFFSET_SECONDS,
+        _offset_trigger,
+    )
+
+    base = IntervalTrigger(seconds=7200)
+    shifted = _offset_trigger(base, CONTENT_JOB_OFFSET_SECONDS)
+    assert isinstance(shifted, IntervalTrigger)
+    assert shifted.interval == base.interval
+    assert shifted.start_date is not None
+
+    cron = CronTrigger(hour=7, minute=0, timezone="Asia/Shanghai")
+    moved = _offset_trigger(cron, PROCESS_JOB_OFFSET_SECONDS)
+    assert "hour='7', minute='5'" in str(moved)
+
+    # 跨小时进位：07:58 + 5 分钟 → 08:03
+    late = CronTrigger(hour=7, minute=58, timezone="Asia/Shanghai")
+    carried = _offset_trigger(late, PROCESS_JOB_OFFSET_SECONDS)
+    assert "hour='8', minute='3'" in str(carried)
 
 
 def test_backfill_reports_fills_missing_days(seeded_db, settings: Settings):

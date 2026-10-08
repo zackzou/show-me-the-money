@@ -139,7 +139,7 @@ html[data-skin="aihot"] .sk-status:hover { color:var(--text); }
     backdrop-filter:blur(20px) saturate(150%); }
   html[data-skin="aihot"] body { padding-bottom:calc(50px + env(safe-area-inset-bottom)); }
   html[data-skin="aihot"] .sk-tabbar {
-    display:grid; grid-template-columns:repeat(7,1fr);
+    display:grid; grid-template-columns:repeat(8,1fr);
     position:fixed; left:0; right:0; bottom:0; z-index:45;
     height:calc(50px + env(safe-area-inset-bottom)); padding-bottom:env(safe-area-inset-bottom);
     background:color-mix(in srgb, var(--surface) 90%, transparent);
@@ -267,7 +267,7 @@ html[data-skin="aihot"] .badge, html[data-skin="aihot"] .warn { background:var(-
   color:var(--amber-ink); border-radius:999px; padding:2px 8px; font-size:11px; }
 html[data-skin="aihot"] .star-badge { background:var(--amber-soft); color:var(--amber-ink);
   border-radius:999px; padding:2px 8px; }
-html[data-skin="aihot"] .item.is-starred { border-left:3px solid var(--amber); }
+html[data-skin="aihot"] .item.is-starred { border-left:3px solid var(--amber-ink); }
 html[data-skin="aihot"] .tag { background:var(--accent-soft); color:var(--accent);
   border-radius:999px; padding:2px 8px; }
 html[data-skin="aihot"] .cat, html[data-skin="aihot"] .rail-chip, html[data-skin="aihot"] .rail-tag {

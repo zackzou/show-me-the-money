@@ -25,8 +25,17 @@ ENV = {
 
 
 @pytest.fixture
-def settings() -> Settings:
-    return load_settings(env=ENV, config_dir=CONFIG_DIR)
+def settings(tmp_path: Path) -> Settings:
+    """测试用配置：db 指到临时目录，把派生的文件也一起隔离。
+
+    不隔离的话 ``load_stored()`` / ``_settings_path()`` 会读到真实的
+    ``data/llm_settings.json`` —— 开发机上有这个文件时，设置页测试会
+    读写真实配置（实测把 api_base 写成了测试里的 attacker.example），
+    测试之间也会互相污染。
+    """
+    resolved = load_settings(env=ENV, config_dir=CONFIG_DIR)
+    resolved.storage.db_path = str(tmp_path / "settings.db")
+    return resolved
 
 
 @pytest.fixture

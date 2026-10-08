@@ -265,7 +265,7 @@ def test_images_only_on_story_page(client, settings: Settings, seeded_db):
 
 def test_dark_mode_toggle_present(client):
     assert "smtm-theme" in client.get("/").text
-    assert 'classList.toggle("dark")' in client.get("/").text
+    assert 'classList.toggle("dark", dark)' in client.get("/").text
 
 
 def test_story_images_are_small_grid(client, settings: Settings, seeded_db):
@@ -1215,6 +1215,40 @@ def test_primary_article_lists_the_other_sources(client, settings: Settings, see
     text = client.get(f"/story/{primary_id}").text
     assert "其他来源也报道了" in text
     assert f"/story/{twin_id}" in text
+
+
+def test_soft_deleted_duplicate_is_not_listed_again(client, settings: Settings, seeded_db):
+    """回归：软删（回收站）的重复稿不该从主条目页「其他来源也报道了」漏出。"""
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        primary = make_article(session, title="主条目标题AAA", link="https://example.com/sd-p")
+        twin = make_article(session, title="重复稿标题BBB", link="https://example.com/sd-t")
+        twin.duplicate_of = primary.id
+        primary_id, twin_id = primary.id, twin.id
+
+    assert "重复稿标题BBB" in client.get(f"/story/{primary_id}").text
+    with session_scope() as session:
+        session.get(Article, twin_id).deleted_at = now_local()
+    assert "重复稿标题BBB" not in client.get(f"/story/{primary_id}").text
+
+
+def test_duplicate_page_does_not_link_to_deleted_primary(client, settings: Settings, seeded_db):
+    """回归：主条目进回收站后，重复稿页面不该再链到它（点开是 404）。"""
+    from app.utils.text import now_local
+
+    with session_scope() as session:
+        primary = make_article(session, title="主条目标题CCC", link="https://example.com/dp-p")
+        twin = make_article(session, title="重复稿标题DDD", link="https://example.com/dp-t")
+        twin.duplicate_of = primary.id
+        primary_id, twin_id = primary.id, twin.id
+
+    assert f"/story/{primary_id}" in client.get(f"/story/{twin_id}").text
+    with session_scope() as session:
+        session.get(Article, primary_id).deleted_at = now_local()
+    page = client.get(f"/story/{twin_id}").text
+    assert "这条与另一条是同一则新闻" not in page
+    assert f"/story/{primary_id}" not in page
 
 
 def test_degraded_card_does_not_repeat_the_digest_as_reason(client, settings: Settings, seeded_db):
@@ -2264,10 +2298,45 @@ def test_settings_keeps_existing_key_when_left_blank(client, settings: Settings,
     import app.web.settings as mod
 
     original = settings.llm.api_key
+    original_base = settings.llm.api_base
     monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 1})
-    client.post("/settings", data={"api_base": "https://x/v1", "model": "m", "api_key": ""},
+    # 同一个主机：留空沿用已保存的 key
+    client.post("/settings", data={"api_base": original_base, "model": "m", "api_key": ""},
                 follow_redirects=False)
     assert settings.llm.api_key == original
+
+
+def test_settings_rejects_key_reuse_on_different_host(client, settings: Settings, monkeypatch):
+    """换 API 主机时不许沿用已保存的 key —— 否则把 base 指向攻击者地址
+    就能让服务端把真实 key 当 Bearer 发出去（Key 泄露的最短路径）。"""
+    import app.web.settings as mod
+
+    original = settings.llm.api_key
+    probed: list[str] = []
+    monkeypatch.setattr(
+        mod, "_probe",
+        lambda s, base, key, model, **kw: probed.append(key) or {"ok": True, "reply": "ok", "ms": 1},
+    )
+    page = client.post("/settings", data={"api_base": "https://attacker.example/v1",
+                                          "model": "m", "api_key": ""},
+                       follow_redirects=False)
+    assert page.status_code == 400
+    assert "重新填写 Key" in page.text
+    assert probed == []                     # 根本没发请求
+    assert settings.llm.api_key == original  # 原配置未被改动
+    # 提交掩码形状的值也一样按「没填」处理，不能绕过
+    masked = mod._mask(settings.llm.api_key)
+    page2 = client.post("/settings", data={"api_base": "https://attacker.example/v1",
+                                           "model": "m", "api_key": masked},
+                        follow_redirects=False)
+    assert page2.status_code == 400
+    assert probed == []
+    # 显式带上 key 就允许换主机
+    page3 = client.post("/settings", data={"api_base": "https://attacker.example/v1",
+                                           "model": "m", "api_key": "sk-explicit"},
+                        follow_redirects=False)
+    assert page3.status_code == 200
+    assert probed == ["sk-explicit"]
 
 
 def test_settings_rejects_bad_config_without_saving(client, settings: Settings, monkeypatch):
@@ -2299,11 +2368,117 @@ def test_settings_test_endpoint_does_not_save(client, settings: Settings, monkey
     import app.web.settings as mod
 
     monkeypatch.setattr(mod, "_probe", lambda s, base, key, model, **kw: {"ok": True, "reply": "ok", "ms": 5})
-    page = client.post("/settings/test", data={"api_base": "https://y/v1", "model": "mm"},
+    # 换主机时必须带 key（见 test_settings_rejects_key_reuse_on_different_host）
+    page = client.post("/settings/test", data={"api_base": "https://y/v1", "model": "mm",
+                                               "api_key": "sk-probe"},
                        follow_redirects=False)
     assert page.status_code == 200
     assert "连接正常" in page.text
     assert mod.load_stored(settings).get("model") != "mm"
+
+
+def test_probe_tries_fallback_models(settings: Settings, monkeypatch):
+    """回归：主模型坏、备用模型好时，探测必须能测通。
+
+    原来固定 retries=0 只试主模型 —— 备用模型在探测里从未生效，
+    「主模型限流靠 fallback 跑」的配置根本存不进去。
+    """
+    import httpx
+
+    import app.web.settings as mod
+
+    tried: list[str] = []
+
+    def fake_post(self, url, **kwargs):  # noqa: ANN001
+        model = (kwargs.get("json") or {}).get("model")
+        tried.append(model)
+        if model == "broken-model":
+            return httpx.Response(404, text='{"error":"model_not_found"}',
+                                  request=httpx.Request("POST", url))
+        return httpx.Response(
+            200,
+            json={"choices": [{"message": {"content": "备用模型答话"}}], "usage": {}},
+            request=httpx.Request("POST", url),
+        )
+
+    monkeypatch.setattr(httpx.Client, "post", fake_post)
+    result = mod._probe(settings, "https://api.example.com/v1", "sk-x",
+                        "broken-model", fallbacks=["good-model"])
+    assert result["ok"] is True
+    assert "broken-model" in tried
+    assert "good-model" in tried
+
+
+# ── 读取模型（/settings/models） ────────────────────────────────────────
+
+
+def test_settings_models_lists_from_gateway(client, settings: Settings, monkeypatch):
+    """读取模型：把 {base}/models 的结果解析成 [{id, note}]，去重排序。"""
+    import httpx
+
+
+    def fake_get(self, url, **kwargs):  # noqa: ANN001
+        assert url.endswith("/models")
+        assert "Bearer" in self.headers.get("Authorization", "")
+        return httpx.Response(200, json={"object": "list", "data": [
+            {"id": "z-model", "owned_by": "zz"},
+            {"id": "a-model", "owned_by": "aa"},
+            {"id": "a-model", "owned_by": "dup"},
+            "s-model",
+        ]}, request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", fake_get)
+    response = client.post("/settings/models",
+                           data={"api_base": settings.llm.api_base, "api_key": ""},
+                           headers={"X-Requested-With": "settings"})
+    data = response.json()
+    assert data["ok"] is True
+    assert [m["id"] for m in data["models"]] == ["a-model", "s-model", "z-model"]
+    assert data["models"][0]["note"] == "aa"
+
+
+def test_settings_models_reports_failure_without_crashing(client, settings: Settings, monkeypatch):
+    """读不到模型不是错误状态：返回 ok=false + 原因，用户可手动输入。"""
+    import httpx
+
+
+    def fake_get(self, url, **kwargs):  # noqa: ANN001
+        return httpx.Response(404, text="not found", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(httpx.Client, "get", fake_get)
+    response = client.post("/settings/models",
+                           data={"api_base": settings.llm.api_base, "api_key": ""},
+                           headers={"X-Requested-With": "settings"})
+    assert response.status_code == 200
+    data = response.json()
+    assert data["ok"] is False
+    assert "404" in data["error"]
+
+
+def test_settings_models_requires_key_on_new_host(client, settings: Settings, monkeypatch):
+    """换主机读取模型同样不允许沿用旧 key（与保存/测试同一口径）。"""
+    import httpx
+
+
+    called = []
+    monkeypatch.setattr(httpx.Client, "get",
+                        lambda self, url, **kw: called.append(url) or httpx.Response(
+                            200, json={"data": []}, request=httpx.Request("GET", url)))
+    response = client.post("/settings/models",
+                           data={"api_base": "https://attacker.example/v1", "api_key": ""},
+                           headers={"X-Requested-With": "settings"})
+    assert response.status_code == 400
+    assert "重新填写 Key" in response.json()["error"]
+    assert called == []
+
+
+def test_settings_page_has_model_loader(client, settings: Settings):
+    """设置页有「读取模型」按钮与选择器容器。"""
+    page = client.get("/settings")
+    assert 'id="m-load"' in page.text
+    assert 'id="m-pick"' in page.text
+    assert 'id="m-list"' in page.text
+    assert "读取模型" in page.text
 
 
 def test_settings_usage_log_is_recorded(client, settings: Settings, monkeypatch, tmp_path):
@@ -2579,6 +2754,21 @@ def test_api_limit_zero_returns_nothing(client):
     response = client.get("/api/articles?limit=0")
     assert response.status_code == 200
     assert response.json() == []
+
+
+def test_api_limit_zero_with_articles_returns_nothing(client, seeded_db):
+    """回归：库里**有**文章时 ?limit=0 也必须返回空（旧实现漏了 LIMIT 返回全部）。"""
+    from app.db import session_scope
+    from tests.conftest import make_article
+
+    with session_scope() as session:
+        for i in range(3):
+            make_article(session, title=f"文章{i}", link=f"https://example.com/lim-{i}")
+    response = client.get("/api/articles?limit=0")
+    assert response.status_code == 200
+    assert response.json() == []
+    # 对照：limit=1 有且只有一条
+    assert len(client.get("/api/articles?limit=1").json()) == 1
 
 
 def test_image_404_does_not_claim_html(client):

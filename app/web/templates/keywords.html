@@ -50,57 +50,60 @@
   </p>
 </div>
 
-{# ── 屏蔽列表 ── #}
-<section class="sec">
-  <div class="sec-t plain">屏蔽列表
-    <span class="sec-h">命中即不收集（正文级命中会移入回收站）</span>
-  </div>
-  {% if block_rules %}
-    <ul class="kw-list">
-      {% for rule in block_rules %}
-        <li class="kw-row {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
-          <span class="kw-name">{{ rule.keyword }}</span>
-          <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
-          <span class="kw-when">{{ rule.created_at }}</span>
-          <span class="kw-actions">
-            <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
-              {{ '停用' if rule.enabled else '启用' }}
-            </button>
-            <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
-          </span>
-        </li>
-      {% endfor %}
-    </ul>
-  {% else %}
-    <div class="empty small">还没有屏蔽词。<span class="empty-note">例：输入 <code>Muse</code> 可以把所有包含 Muse 的新闻拦在门外。</span></div>
-  {% endif %}
-</section>
+{# ── 两个列表左右并排：屏蔽在左、关注在右（窄屏自动叠成一列） ── #}
+<div class="kw-cols">
+  {# ── 屏蔽列表 ── #}
+  <section class="sec">
+    <div class="sec-t plain">屏蔽列表
+      <span class="sec-h">命中即不收集（正文级命中会移入回收站）</span>
+    </div>
+    {% if block_rules %}
+      <ul class="kw-list">
+        {% for rule in block_rules %}
+          <li class="kw-row {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
+            <span class="kw-name">{{ rule.keyword }}</span>
+            <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
+            <span class="kw-when">{{ rule.created_at }}</span>
+            <span class="kw-actions">
+              <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
+                {{ '停用' if rule.enabled else '启用' }}
+              </button>
+              <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty small">还没有屏蔽词。<span class="empty-note">例：输入 <code>Muse</code> 可以把所有包含 Muse 的新闻拦在门外。</span></div>
+    {% endif %}
+  </section>
 
-{# ── 关注列表 ── #}
-<section class="sec">
-  <div class="sec-t plain">特别关注
-    <span class="sec-h">命中即加星标，列表优先排序</span>
-  </div>
-  {% if star_rules %}
-    <ul class="kw-list">
-      {% for rule in star_rules %}
-        <li class="kw-row star {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
-          <span class="kw-name"><span class="kw-star" aria-hidden="true">★</span>{{ rule.keyword }}</span>
-          <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
-          <span class="kw-when">{{ rule.created_at }}</span>
-          <span class="kw-actions">
-            <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
-              {{ '停用' if rule.enabled else '启用' }}
-            </button>
-            <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
-          </span>
-        </li>
-      {% endfor %}
-    </ul>
-  {% else %}
-    <div class="empty small">还没有关注词。<span class="empty-note">例：输入 <code>OpenAI</code>，相关新闻会在列表最前面并带星标。</span></div>
-  {% endif %}
-</section>
+  {# ── 关注列表 ── #}
+  <section class="sec">
+    <div class="sec-t plain">特别关注
+      <span class="sec-h">命中即加星标，列表优先排序</span>
+    </div>
+    {% if star_rules %}
+      <ul class="kw-list">
+        {% for rule in star_rules %}
+          <li class="kw-row star {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
+            <span class="kw-name"><span class="kw-star" aria-hidden="true">★</span>{{ rule.keyword }}</span>
+            <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
+            <span class="kw-when">{{ rule.created_at }}</span>
+            <span class="kw-actions">
+              <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
+                {{ '停用' if rule.enabled else '启用' }}
+              </button>
+              <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
+            </span>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <div class="empty small">还没有关注词。<span class="empty-note">例：输入 <code>OpenAI</code>，相关新闻会在列表最前面并带星标。</span></div>
+    {% endif %}
+  </section>
+</div>
 
 {% endblock %}
 
@@ -147,6 +150,15 @@
   /* 列表 */
   .sec-h { float:right; font-size:11.5px; font-weight:400; color:var(--faint);
            letter-spacing:0; margin-top:2px; }
+  /* 屏蔽 / 关注两栏并排：宽屏左右各一栏，窄屏（≤900px）自动叠成一列。
+     两栏各自独立排版，不再是一上一下的大块留白。 */
+  .kw-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin-top:16px;
+             align-items:start; }
+  .kw-cols .sec { margin-top:0; }
+  .kw-cols .sec-t.plain { display:flex; flex-wrap:wrap; align-items:baseline;
+                          justify-content:space-between; gap:2px 10px; margin-bottom:12px; }
+  .kw-cols .sec-h { float:none; margin-top:0; }
+  @media (max-width:900px) { .kw-cols { grid-template-columns:1fr; gap:26px; } }
   .kw-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; }
   .kw-row { display:flex; align-items:center; gap:14px; padding:10px 14px;
             border:1px solid var(--line); border-radius:10px; background:var(--surface); }

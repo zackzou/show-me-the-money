@@ -1,63 +1,41 @@
 {% extends "base.html" %}
+{% from "_articles.html" import timeline %}
 {% block content %}
 
-<div class="lead">
-  <div class="kicker">BREAKDOWN</div>
-  <h1>{{ dimension_label }}{% if value %} · {{ value }}{% endif %}</h1>
-  <p class="meta">
-    近 <b>{{ days }}</b> 天 · 共 <b>{{ total }}</b> 篇
-    · <a href="/reports?days={{ days }}" style="color:var(--accent)">← 返回报告</a>
-  </p>
+{# 下钻明细页：版式与首页/搜索结果**完全一致**（同一套时间轴卡片），
+   读者从图表点进来不会觉得掉进了另一个站点。
+   返回按钮做成显眼的药丸（原来是一个小号文字链接，几乎看不见）。 #}
+<div class="bd-head">
+  <a class="bd-back" href="/reports?days={{ days }}">← 返回报告</a>
+  <div class="bd-head-text">
+    <div class="kicker">BREAKDOWN</div>
+    <h1>{{ dimension_label }}{% if value %} · {{ value }}{% endif %}</h1>
+    <p class="meta">近 <b>{{ days }}</b> 天 · 共 <b>{{ total }}</b> 篇</p>
+  </div>
 </div>
 
-{% if rows %}
-  <ul class="bd-list">
-    {% for row in rows %}
-      <li class="bd-row">
-        <div class="bd-main">
-          <a class="bd-title" href="/story/{{ row.id }}">
-            {% if row.starred %}<span class="bd-star" title="特别关注">★</span>{% endif %}{{ row.title }}
-          </a>
-          <div class="bd-meta">
-            <span>{{ row.source }}</span>
-            {% if row.category %}<span class="bd-cat">{{ row.category }}</span>{% endif %}
-            {% for tag in row.tags[:4] %}<span class="bd-tag">#{{ tag }}</span>{% endfor %}
-            <span class="bd-time">{{ row.published }}</span>
-          </div>
-        </div>
-        {% if row.score is not none %}
-          <span class="bd-score {{ 'hot' if row.score >= 85 else ('strong' if row.score >= 70 else '') }}">{{ row.score }}</span>
-        {% endif %}
-      </li>
-    {% endfor %}
-  </ul>
-{% else %}
-  <div class="empty">这个维度下没有数据。</div>
-{% endif %}
+{{ timeline(groups, '这个维度下没有数据。') }}
 
 {% endblock %}
 
 {% block extra %}
 <style>
-  .bd-list { list-style:none; margin:14px 0 40px; padding:0;
-             display:flex; flex-direction:column; gap:8px; }
-  .bd-row { display:flex; align-items:center; gap:12px; padding:12px 15px;
-            border:1px solid var(--line); border-radius:10px; background:var(--surface); }
-  .bd-main { flex:1; min-width:0; }
-  .bd-title { font-size:14px; font-weight:600; color:var(--text); display:block;
-              overflow-wrap:anywhere; }
-  .bd-title:hover { color:var(--accent); }
-  .bd-star { color:#b8873a; margin-right:4px; }
-  .bd-meta { display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:5px;
-             font-size:11.5px; color:var(--faint); }
-  .bd-cat { padding:1px 8px; border-radius:5px; background:var(--chip); color:var(--muted); }
-  .bd-tag { color:var(--faint); }
-  .bd-score { flex:none; display:inline-flex; align-items:center; justify-content:center;
-              min-width:34px; height:22px; padding:0 8px; border-radius:999px;
-              font-size:12px; font-weight:700; font-variant-numeric:tabular-nums;
-              color:var(--faint); box-shadow:inset 0 0 0 1px var(--line-soft); }
-  .bd-score.strong { background:var(--accent-soft); color:var(--accent); box-shadow:none; }
-  .bd-score.hot { background:rgba(179,64,42,.08); color:#b3402a; box-shadow:none; }
-  html.dark .bd-score.hot { background:rgba(216,106,82,.12); color:#d86a52; }
+  .bd-head { display:flex; align-items:flex-start; gap:16px; padding:20px 0 4px; }
+  /* 返回按钮：药丸造型、描边 + 图标，和正文页的「← 返回」同款。
+     原来是小号文字链接（12px、无边框），在图表点进来时几乎找不到。 */
+  .bd-back { flex:none; display:inline-flex; align-items:center; gap:7px;
+             margin-top:4px; padding:9px 18px 9px 14px;
+             border:1px solid var(--line); border-radius:999px;
+             background:var(--surface); color:var(--muted);
+             font-size:13px; font-weight:600; white-space:nowrap;
+             transition:color .15s, border-color .15s, transform .12s; }
+  .bd-back:hover { color:var(--accent); border-color:var(--accent);
+                   transform:translateX(-2px); }
+  .bd-back:active { transform:translateX(-2px) scale(.98); }
+  .bd-head-text { min-width:0; }
+  @media (max-width:640px) {
+    .bd-head { flex-direction:column; gap:10px; }
+    .bd-back { order:-1; }
+  }
 </style>
 {% endblock %}

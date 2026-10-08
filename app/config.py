@@ -46,6 +46,11 @@ class UserSettings(BaseSettings):
     fetch_on_startup: bool = True
     config_dir: str = "config"
     db_path: str = ""
+    # 站点对外地址（可留空）。留空时按请求的 Host 自动推导 —— 你在浏览器里
+    # 用什么地址访问，Hermes 提示词/llms.txt/RSS 里就是什么地址。
+    # 反代（https 终止在 nginx/Caddy）或「浏览器走内网、Hermes 走公网」时
+    # 自动推导会给出错误的协议/主机名，显式设置这个覆盖。
+    smtm_public_url: str = ""
 
 
 class LLMSettings(BaseModel):
@@ -115,6 +120,8 @@ class ScheduleSettings(BaseModel):
     fetch_interval_hours: float = 2.0
     daily_report_time: str = "08:00"
     cleanup_time: str = "03:00"
+    # 早报制作时间 HH:MM（每天按配置精选并存档，成品在 /brief 页回看）
+    brief_time: str = "06:00"
     # 想按「每天固定时刻」跑（而不是按小时轮询）就填 cron 表达式，例如 "0 7 * * *"；
     # 留空则退回 fetch_interval_hours 的间隔触发。
     fetch_cron: str = ""
@@ -207,6 +214,8 @@ class Settings(BaseModel):
     fetch_on_startup: bool = True
     config_dir: Path = Field(default=DEFAULT_CONFIG_DIR)
     project_root: Path = Field(default=PROJECT_ROOT)
+    # 站点对外地址覆盖（空 = 按请求 Host 推导；见 UserSettings.public_url）
+    public_url: str = ""
 
     @property
     def db_file(self) -> Path:
@@ -341,13 +350,25 @@ def load_settings(
     except (ValidationError, TypeError) as exc:
         raise ConfigError(f"config/*.yaml 内容不合法：{exc}") from exc
 
-    for label, value in (("daily_report_time", schedule.daily_report_time), ("cleanup_time", schedule.cleanup_time)):
+    for label, value in (
+        ("daily_report_time", schedule.daily_report_time),
+        ("cleanup_time", schedule.cleanup_time),
+        ("brief_time", schedule.brief_time),
+    ):
         hour, _, minute = value.partition(":")
         if not (hour.isdigit() and minute.isdigit() and 0 <= int(hour) < 24 and 0 <= int(minute) < 60):
             raise ConfigError(f"config/settings.yaml 里 {label} 不是合法的 HH:MM：{value!r}")
 
     if user.db_path.strip():
         storage.db_path = user.db_path.strip()
+
+    public_url = user.smtm_public_url.strip().rstrip("/")
+    if public_url:
+        parsed_url = urlparse(public_url)
+        if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+            raise ConfigError(
+                f"SMTM_PUBLIC_URL 不是合法 URL：{public_url!r}（示例：https://news.example.com）"
+            )
 
     llm = LLMSettings(
         api_base=user.llm_api_base.strip(),
@@ -381,4 +402,5 @@ def load_settings(
         fetch_on_startup=bool(user.fetch_on_startup) and os.environ.get("SMTM_DISABLE_STARTUP_FETCH") != "1",
         config_dir=cfg_dir,
         project_root=PROJECT_ROOT,
+        public_url=public_url,
     )

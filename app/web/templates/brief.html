@@ -1,0 +1,1189 @@
+{% extends "base.html" %}
+{% block container_extra %} wide{% endblock %}
+{% block footer_extra %} wide{% endblock %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">BRIEF</div>
+  <h1>早报配置</h1>
+  <p class="meta">
+    每天 <b>06:00</b> 自动制作并存档 · 流水线式编排：新闻/文字节点各是一张微信长图，
+    <b>天气节点直接发文字</b>（早安问候 + 天气 + 穿衣建议） ·
+    内容继承每篇文章的<b>早报片段</b>，出稿不再调用模型
+  </p>
+</div>
+
+{% if notice and notice.text %}
+  <p class="notice {{ notice.kind }}">
+    <span class="ico" aria-hidden="true">{{ '✓' if notice.kind == 'ok' else '!' }}</span>{{ notice.text }}
+  </p>
+{% endif %}
+
+{# ── 操作行：立即生成 + 保存 + 输出 ── #}
+<div class="bf-bar">
+  <div class="bf-bar-left">
+    <button type="button" class="btn-add" id="bf-save-top">保存配置</button>
+    <button type="button" class="mini" id="bf-generate">立即生成早报</button>
+    <span class="bf-bar-note" id="bf-gen-note">{% if updated_at %}上次保存 {{ updated_at }}{% endif %}</span>
+  </div>
+  <div class="bf-bar-right">
+    <a class="bf-out-link" href="/brief.txt" target="_blank">纯文本</a>
+    <a class="bf-out-link" href="/brief.md" target="_blank">Markdown</a>
+    <a class="bf-out-link" href="/api/brief" target="_blank">JSON</a>
+    <button type="button" class="bf-out-link bf-copy" id="bf-copy">复制成稿</button>
+  </div>
+</div>
+
+<form class="bf-form" method="post" action="/brief" id="bf-form">
+  {# tojson 的输出含未转义的双引号，直接放进 value="..." 会把属性截断。
+     用 forceescape 转成实体后再放。 #}
+  <input type="hidden" name="sections" id="bf-sections-json" value="{{ cfg.sections|tojson|forceescape }}">
+
+  <div class="bf-grid">
+
+    {# ── 左栏：全局规则 + 流水线（节点树） ── #}
+    <section class="sec">
+      <div class="sec-t plain">全局规则
+        <span class="sec-h">时间范围与排序对所有新闻节点生效</span>
+      </div>
+
+      <div class="bf-row">
+        <label class="bf-fld">
+          <span>时间范围</span>
+          <select name="days">
+            {% for d in range(1, max_days + 1) %}
+              <option value="{{ d }}" {{ 'selected' if cfg.days == d else '' }}>
+                {{ '今天' if d == 1 else '近 ' ~ d ~ ' 天' }}
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <label class="bf-fld">
+          <span>组内排序</span>
+          <select name="sort">
+            <option value="score" {{ 'selected' if cfg.sort == 'score' else '' }}>评分优先</option>
+            <option value="time" {{ 'selected' if cfg.sort == 'time' else '' }}>时间优先</option>
+          </select>
+        </label>
+      </div>
+
+      <label class="bf-check">
+        <input type="checkbox" name="starred_only" value="1" {{ 'checked' if cfg.starred_only else '' }}>
+        <span>只收「特别关注」命中的文章</span>
+      </label>
+
+      <label class="bf-fld wide">
+        <span>全局排除词<span class="bf-hint">命中任一即剔除，所有新闻节点生效，逗号分隔</span></span>
+        <input type="text" name="exclude" value="{{ cfg.exclude|join(', ') }}"
+               placeholder="如 招聘, 促销">
+      </label>
+
+      {# ── 流水线：树形节点流 ── #}
+      <div class="sec-t plain bf-sec-head">早报流水线
+        <span class="sec-h">新闻/文字节点 = 长图，天气节点 = 纯文本 · 最多 {{ max_sections }} 个 · 点节点编辑</span>
+      </div>
+
+      <div class="bf-flow" id="bf-flow"></div>
+      <div class="bf-flow-actions">
+        <button type="button" class="mini" id="bf-add-news">+ 新闻节点</button>
+        <button type="button" class="mini" id="bf-add-text">+ 文字节点</button>
+        <button type="button" class="mini" id="bf-add-weather">+ 天气节点</button>
+      </div>
+      <p class="bf-flow-hint">没有节点时：整份早报用「默认单节」的全局筛选（见下方）。</p>
+      {# 默认单节（没有配置节点时使用）：保持与旧版一致的全局筛选 #}
+      <div class="bf-default-sec" id="bf-default-sec">
+        <div class="bf-label">默认单节筛选<span class="bf-hint">未配置节点时，整份早报用这些条件</span></div>
+        <div class="bf-row">
+          <label class="bf-fld">
+            <span>条数 TOP N</span>
+            <input type="number" name="top_n" min="1" max="{{ max_top_n }}" value="{{ cfg.top_n }}">
+          </label>
+        </div>
+        <div class="bf-chips">
+          {% for name in options.categories %}
+            <label class="bf-chip">
+              <input type="checkbox" name="categories" value="{{ name }}"
+                     {{ 'checked' if name in cfg.categories else '' }}>
+              <span>{{ name }}</span>
+            </label>
+          {% endfor %}
+          {% if not options.categories %}<span class="bf-empty">暂时没有分类数据</span>{% endif %}
+        </div>
+        <div class="bf-chips">
+          {% for name in options.topics %}
+            <label class="bf-chip">
+              <input type="checkbox" name="topics" value="{{ name }}"
+                     {{ 'checked' if name in cfg.topics else '' }}>
+              <span>{{ name }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <div class="bf-chips">
+          {% for name in options.tags %}
+            <label class="bf-chip">
+              <input type="checkbox" name="tags" value="{{ name }}"
+                     {{ 'checked' if name in cfg.tags else '' }}>
+              <span>#{{ name }}</span>
+            </label>
+          {% endfor %}
+        </div>
+        <label class="bf-fld wide">
+          <span>关键词<span class="bf-hint">命中标题/摘要/导读/片段任一即入选</span></span>
+          <input type="text" name="keywords" value="{{ cfg.keywords|join(', ') }}"
+                 placeholder="如 OpenAI, 芯片, Agent">
+        </label>
+        {% if star_keywords %}
+          <div class="bf-suggest">
+            关注词一键填入：
+            {% for kw in star_keywords %}
+              <button type="button" class="bf-kw" data-target="keywords" data-kw="{{ kw }}">{{ kw }}</button>
+            {% endfor %}
+          </div>
+        {% endif %}
+      </div>
+
+      <div class="bf-actions">
+        <button type="submit" class="btn-add">保存配置</button>
+        <span class="bf-note">保存后右侧预览同步更新</span>
+      </div>
+    </section>
+    {# ── 右栏：节点 tab + 预览 ── #}
+    <section class="sec">
+      <div class="sec-t plain">预览
+        <span class="sec-h" id="bf-preview-count">{{ preview.sections|length }} 节 · {{ preview.total }} 条</span>
+      </div>
+
+      <nav class="bf-tabs" id="bf-tabs" role="tablist"></nav>
+
+      <div id="bf-panes"></div>
+
+      {% if preview.total == 0 and not preview.sections %}
+        <div class="empty small">
+          当前规则下没有选到文章。
+          <span class="empty-note">放宽时间范围（如「近 3 天」）、取消部分筛选，或等下一轮抓取处理完成。</span>
+        </div>
+      {% endif %}
+    </section>
+
+  </div>
+</form>
+
+{# ── 历史成品：每天一份 ── #}
+<section class="sec bf-history">
+  <div class="sec-t plain">历史早报
+    <span class="sec-h">每天早上 06:00 自动存档 · 点开在页内查看当天成品</span>
+  </div>
+  {% if issues %}
+    <div class="bf-issues">
+      {% for row in issues %}
+        <button type="button" class="bf-issue" data-issue="{{ row.date }}">
+          <b>{{ row.date }}</b>
+          <span>{{ row.section_count }} 节 · {{ row.article_count }} 条</span>
+          <em>{{ row.created_at }}</em>
+        </button>
+      {% endfor %}
+    </div>
+  {% else %}
+    <div class="empty small">还没有历史成品。<span class="empty-note">每天早上 06:00 自动生成；也可以点上方「立即生成早报」。</span></div>
+  {% endif %}
+</section>
+
+{# ── 节点编辑弹窗（小窗口） ── #}
+<div class="bf-mask" id="bf-edit-mask" hidden>
+  <div class="bf-modal bf-modal-sm">
+    <div class="bf-modal-bar">
+      <span id="bf-edit-title">编辑节点</span>
+      <div class="bf-modal-actions">
+        <button type="button" class="mini" id="bf-edit-close">关闭</button>
+      </div>
+    </div>
+    <div class="bf-modal-body bf-edit-body" id="bf-edit-body"></div>
+  </div>
+</div>
+
+{# ── 长图预览弹窗（可翻页） ── #}
+<div class="bf-mask" id="bf-mask" hidden>
+  <div class="bf-modal">
+    <div class="bf-modal-bar">
+      <span id="bf-modal-title">长图预览</span>
+      <div class="bf-modal-actions">
+        <button type="button" class="mini" id="bf-prev">上一张</button>
+        <button type="button" class="mini" id="bf-next">下一张</button>
+        <button type="button" class="mini" id="bf-download">下载 PNG</button>
+        <button type="button" class="mini" id="bf-close">关闭</button>
+      </div>
+    </div>
+    <div class="bf-modal-body" id="bf-modal-body"></div>
+  </div>
+</div>
+
+{# ── 历史成品弹窗（页内查看，不再新标签页） ── #}
+<div class="bf-mask" id="bf-issue-mask" hidden>
+  <div class="bf-modal bf-issue-modal">
+    <div class="bf-modal-bar">
+      <span id="bf-issue-title">历史早报</span>
+      <div class="bf-modal-actions">
+        <button type="button" class="mini" id="bf-issue-copy">复制成稿</button>
+        <button type="button" class="mini" id="bf-issue-close">关闭</button>
+      </div>
+    </div>
+    <div class="bf-modal-body bf-issue-body" id="bf-issue-body"></div>
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .notice { margin:16px 0 0; padding:12px 15px; border-radius:9px; font-size:13.5px;
+            line-height:1.7; border:1px solid var(--line); display:flex; gap:10px;
+            align-items:flex-start; }
+  .notice .ico { width:18px; height:18px; border-radius:50%; flex:none; margin-top:1px;
+                 display:grid; place-items:center; font-size:11px; font-weight:700; color:#fff; }
+  .notice.ok { border-color:rgba(31,138,90,.4); background:rgba(31,138,90,.06); }
+  .notice.ok .ico { background:#1f8a5a; }
+  .notice.warn { border-color:rgba(190,140,20,.45); background:rgba(190,140,20,.08); }
+  .notice.warn .ico { background:#b8873a; }
+
+  .bf-bar { display:flex; align-items:center; justify-content:space-between; gap:12px;
+            flex-wrap:wrap; margin:16px 0 0; padding:12px 14px; border:1px solid var(--line);
+            border-radius:12px; background:var(--surface); }
+  .bf-bar-left, .bf-bar-right { display:flex; align-items:center; gap:10px; flex-wrap:wrap; }
+  .bf-bar-note { font-size:12px; color:var(--faint); }
+  .bf-out-link { font-size:12.5px; color:var(--accent); }
+  .bf-copy { padding:4px 10px; border:1px solid var(--line); border-radius:7px;
+             background:var(--chip); color:var(--muted); font-size:11.5px;
+             font-family:inherit; cursor:pointer; }
+  .bf-copy:hover { color:var(--accent); border-color:var(--accent); }
+
+  .bf-grid { display:grid; grid-template-columns:minmax(0,5fr) minmax(0,6fr);
+             gap:0 34px; align-items:start; margin-top:16px; }
+  @media (max-width:980px) { .bf-grid { grid-template-columns:1fr; gap:26px; } }
+  .bf-grid .sec { margin-top:0; }
+
+  .bf-form { display:flex; flex-direction:column; }
+  .bf-row { display:flex; gap:10px; flex-wrap:wrap; }
+  .bf-fld { display:flex; flex-direction:column; gap:6px; flex:1 1 120px; min-width:0; }
+  .bf-fld.wide { flex-basis:100%; }
+  .bf-fld > span { font-size:12px; color:var(--muted); display:flex;
+                   align-items:baseline; gap:8px; flex-wrap:wrap; }
+  .bf-fld input[type="text"], .bf-fld input[type="number"], .bf-fld select,
+  .bf-edit-body input[type="text"], .bf-edit-body input[type="number"],
+  .bf-edit-body select, .bf-edit-body textarea {
+    padding:9px 12px; font-size:13.5px; font-family:inherit; border:1px solid var(--line);
+    border-radius:9px; background:var(--surface); color:var(--text); min-width:0; }
+  .bf-fld input:focus, .bf-fld select:focus, .bf-edit-body input:focus,
+  .bf-edit-body textarea:focus { outline:none; border-color:var(--accent); }
+  .bf-hint { font-size:11px; color:var(--faint); }
+  .bf-check { display:flex; align-items:center; gap:9px; font-size:13px; color:var(--muted);
+              cursor:pointer; }
+  .bf-check input { accent-color:var(--accent); }
+
+  .bf-label { font-size:12px; color:var(--muted); display:flex; align-items:baseline;
+              gap:8px; flex-wrap:wrap; }
+  .bf-chips { display:flex; flex-wrap:wrap; gap:7px; }
+  .bf-chip { display:inline-flex; align-items:center; gap:6px; padding:5px 11px;
+             border:1px solid var(--line); border-radius:999px; background:var(--surface);
+             font-size:12.5px; color:var(--muted); cursor:pointer;
+             transition:border-color .14s, background-color .14s, color .14s; }
+  .bf-chip:hover { border-color:var(--accent); color:var(--accent); }
+  .bf-chip input { display:none; }
+  .bf-chip:has(input:checked) { border-color:var(--accent); background:var(--accent-soft);
+                                color:var(--accent); font-weight:600; }
+  .bf-empty { font-size:12px; color:var(--faint); }
+  .bf-suggest { font-size:11.5px; color:var(--faint); display:flex; align-items:center;
+                gap:6px; flex-wrap:wrap; }
+  .bf-kw { padding:3px 9px; border:1px dashed var(--line); border-radius:999px;
+           background:transparent; color:var(--muted); font-size:11.5px; font-family:inherit;
+           cursor:pointer; }
+  .bf-kw:hover { color:var(--accent); border-color:var(--accent); }
+
+  .bf-actions { display:flex; align-items:center; gap:12px; flex-wrap:wrap; padding-top:2px; }
+  .btn-add { padding:10px 20px; border:1px solid var(--accent); border-radius:9px;
+             background:var(--accent); color:#fff; font-size:13.5px; font-weight:600;
+             cursor:pointer; font-family:inherit; }
+  .btn-add:hover { filter:brightness(1.07); }
+  .btn-add:disabled { opacity:.6; cursor:wait; }
+  .bf-note { font-size:11.5px; color:var(--faint); }
+
+  /* ── 流水线（树形节点流） ── */
+  .bf-sec-head { margin-top:10px; }
+  .bf-flow { position:relative; display:flex; flex-direction:column; gap:0; padding-left:26px; }
+  /* 连接线：从每个节点左侧连到下一个节点 */
+  .bf-flow::before { content:""; position:absolute; left:9px; top:18px; bottom:18px;
+                     width:2px; background:var(--line); border-radius:2px; }
+  .bf-node { position:relative; margin-bottom:10px; }
+  .bf-node::before { content:""; position:absolute; left:-21px; top:22px; width:12px; height:12px;
+                     border-radius:50%; background:var(--surface); border:2px solid var(--accent);
+                     box-shadow:0 0 0 3px var(--bg); z-index:1; }
+  .bf-node.off::before { border-color:var(--line); }
+  .bf-node.drag-over { outline:2px dashed var(--accent); outline-offset:3px; border-radius:12px; }
+  .bf-node-card { display:flex; align-items:center; gap:10px; padding:10px 12px;
+                  border:1px solid var(--line); border-radius:11px; background:var(--surface);
+                  cursor:pointer; transition:border-color .14s, box-shadow .14s; }
+  .bf-node-card:hover { border-color:var(--accent); box-shadow:0 2px 10px -6px var(--accent); }
+  .bf-node.off .bf-node-card { opacity:.55; }
+  .bf-node-handle { cursor:grab; color:var(--faint); font-size:13px; flex:none;
+                    padding:2px 3px; user-select:none; }
+  .bf-node-handle:active { cursor:grabbing; }
+  .bf-node-ico { width:26px; height:26px; flex:none; display:grid; place-items:center;
+                 border-radius:8px; background:var(--accent-soft); color:var(--accent);
+                 font-size:13px; }
+  .bf-node-body { flex:1 1 auto; min-width:0; }
+  .bf-node-name { font-size:13.5px; font-weight:650; color:var(--text);
+                  overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bf-node-sub { font-size:11.5px; color:var(--faint); margin-top:2px;
+                 overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bf-node-acts { display:flex; gap:4px; flex:none; }
+  .bf-node-btn { width:26px; height:26px; display:grid; place-items:center; border:1px solid transparent;
+                 border-radius:7px; background:transparent; color:var(--faint); font-size:12px;
+                 font-family:inherit; cursor:pointer; }
+  .bf-node-btn:hover { color:var(--accent); border-color:var(--line); background:var(--bg); }
+  .bf-node-btn.danger:hover { color:#c0392b; border-color:#c0392b; }
+  .bf-flow-actions { display:flex; gap:7px; flex-wrap:wrap; margin-top:4px; }
+  .bf-flow-hint { font-size:11.5px; color:var(--faint); margin:8px 0 0; }
+  .bf-default-sec { display:flex; flex-direction:column; gap:10px; padding:12px 14px;
+                    border:1px dashed var(--line); border-radius:12px; margin-top:12px; }
+  .bf-default-sec.hidden { display:none; }
+
+  /* ── 预览 tab ── */
+  .bf-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:12px; }
+  .bf-tab { padding:6px 14px; border:1px solid var(--line); border-radius:999px;
+            background:var(--surface); color:var(--muted); font-size:12.5px;
+            font-family:inherit; cursor:pointer; transition:all .14s; }
+  .bf-tab:hover { border-color:var(--accent); color:var(--accent); }
+  .bf-tab.on { border-color:var(--accent); background:var(--accent-soft);
+               color:var(--accent); font-weight:600; }
+  .bf-tab .n { font-size:11px; color:var(--faint); margin-left:4px; }
+  .bf-tab.on .n { color:var(--accent); }
+  .bf-pane { display:none; }
+  .bf-pane.on { display:block; }
+  .bf-pane-head { display:flex; align-items:center; justify-content:space-between;
+                  gap:10px; margin-bottom:8px; }
+  .bf-pane-title { font-size:13px; font-weight:650; color:var(--text); }
+  .bf-pane-title em { font-style:normal; font-size:11.5px; color:var(--faint);
+                      font-weight:400; margin-left:6px; }
+  .bf-pane-sub { display:block; margin:3px 0 0 !important; color:var(--muted) !important;
+                 font-size:11.5px; }
+  .bf-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:10px; }
+  .bf-item { border:1px solid var(--line); border-radius:11px; background:var(--surface);
+             padding:12px 14px; }
+  .bf-item-head { display:flex; align-items:baseline; gap:7px; }
+  .bf-star { color:#b8873a; flex:none; }
+  .bf-title { font-size:14px; font-weight:650; color:var(--text); line-height:1.5; }
+  .bf-title:hover { color:var(--accent); }
+  .bf-brief { margin:7px 0 0; font-size:13px; line-height:1.8; color:var(--muted); }
+  .bf-meta { display:flex; align-items:center; gap:9px; flex-wrap:wrap; margin-top:8px;
+             font-size:11.5px; color:var(--faint); }
+  .bf-cat { background:var(--chip); border-radius:5px; padding:1px 7px; color:var(--muted); }
+  .bf-score { background:var(--accent-soft); color:var(--accent); border-radius:999px;
+              padding:1px 8px; font-weight:600; font-variant-numeric:tabular-nums; }
+  .bf-fixed { border:1px solid var(--line); border-radius:11px; background:var(--surface);
+              padding:14px 16px; }
+  .bf-fixed h3 { margin:0 0 8px; font-size:14px; }
+  .bf-fixed p { margin:0; font-size:13px; line-height:1.8; color:var(--muted);
+                white-space:pre-wrap; }
+  .empty.small { padding:22px; font-size:13px; }
+
+  /* ── 历史成品 ── */
+  .bf-history { margin-top:24px; }
+  .bf-issues { display:grid; grid-template-columns:repeat(auto-fill,minmax(150px,1fr)); gap:9px; }
+  .bf-issue { display:flex; flex-direction:column; gap:3px; padding:11px 13px; text-align:left;
+              border:1px solid var(--line); border-radius:10px; background:var(--surface);
+              color:inherit; font-family:inherit; cursor:pointer;
+              transition:border-color .14s, background-color .14s; }
+  .bf-issue:hover { border-color:var(--accent); background:var(--accent-soft); }
+  .bf-issue b { font-size:13px; font-variant-numeric:tabular-nums; }
+  .bf-issue span { font-size:11.5px; color:var(--muted); }
+  .bf-issue em { font-style:normal; font-size:11px; color:var(--faint); }
+  .bf-issue:hover b { color:var(--accent); }
+
+  /* 历史成品弹窗：站内风格（与长图预览同一套壳），内容滚动。
+     选择器带 .bf-modal-body 前缀提高优先级：.bf-modal-body 的
+     display:flex 定义在后面，同级选择器会被它盖掉（实测内容被挤成一列）。 */
+  .bf-modal.bf-issue-modal { max-width:760px; }
+  .bf-modal-body.bf-issue-body { display:block; background:var(--bg); padding:18px 22px; }
+  .bf-issue-body h2 { font-size:16px; margin:0 0 4px; }
+  .bf-issue-body .iss-meta { font-size:12px; color:var(--faint); margin-bottom:14px; }
+  .bf-issue-body h3 { font-size:14px; margin:20px 0 10px; padding-left:10px;
+                      border-left:3px solid var(--accent); }
+  .bf-issue-body .iss-item { border:1px solid var(--line); border-radius:10px;
+                             background:var(--surface); padding:11px 13px; margin-bottom:9px; }
+  .bf-issue-body .iss-t { font-size:13.5px; font-weight:650; }
+  .bf-issue-body .iss-b { font-size:13px; color:var(--muted); line-height:1.8; margin:6px 0 0; }
+  .bf-issue-body .iss-m { font-size:11.5px; color:var(--faint); margin-top:7px; }
+
+  /* ── 弹窗 ── */
+  .bf-mask { position:fixed; inset:0; z-index:90; display:grid; place-items:center;
+             padding:24px 16px; background:rgba(16,24,40,.5); backdrop-filter:blur(3px); }
+  .bf-mask[hidden] { display:none; }
+  .bf-modal { width:100%; max-width:520px; max-height:calc(100vh - 48px); display:flex;
+              flex-direction:column; background:var(--bg); border:1px solid var(--line);
+              border-radius:14px; overflow:hidden; }
+  .bf-modal-sm { max-width:460px; }
+  /* 新闻节点候选多（分类+主题+标签三组），弹窗加宽成两栏网格；
+     文字/天气节点保持窄窗。 */
+  .bf-modal:has(.bf-edit-body.wide) { max-width:920px; }
+  .bf-edit-body.wide .bf-edit-grid { display:grid; grid-template-columns:1fr 1fr;
+                                     gap:12px; align-items:start; }
+  .bf-edit-grid .bf-edit-row:last-child:nth-child(odd) { grid-column:1 / -1; }
+  .bf-modal-bar { display:flex; align-items:center; justify-content:space-between; gap:10px;
+                  padding:10px 12px 10px 14px; border-bottom:1px solid var(--line);
+                  font-size:12.5px; color:var(--muted); flex:none; }
+  .bf-modal-actions { display:flex; gap:6px; }
+  .bf-modal-body { flex:1; min-height:0; overflow:auto; padding:14px; background:var(--chip);
+                   display:flex; justify-content:center; align-items:flex-start; }
+  /* flex:none 是必须的：默认 align-items:stretch 会把图片纵向拉伸到容器高度，
+     1080×3810 的长图被压成 490×1070（文字严重变形，用户实测截图）。
+     flex:none + align-items:flex-start 后图片保持原始宽高比。 */
+  .bf-modal-body img { flex:none; max-width:100%; height:auto; border-radius:8px;
+                       box-shadow:0 8px 30px -12px rgba(16,24,40,.4); }
+  /* align-items:stretch / justify-content:flex-start 必须显式写：
+     .bf-edit-body 与 .bf-modal-body 是同一个元素，后者定义了
+     align-items:flex-start 与 justify-content:center（为图片预览设计的），
+     子项（输入框、操作条）因此收缩到内容宽 —— 操作条的 flex-end 失效、
+     输入框不拉满、内容还可能垂直居中。这里全部改回编辑器要的行为。 */
+  .bf-edit-body { display:flex; flex-direction:column; gap:12px; background:var(--bg);
+                  align-items:stretch; justify-content:flex-start; }
+  .bf-edit-row { display:flex; flex-direction:column; gap:6px; }
+  .bf-edit-row > span { font-size:12px; color:var(--muted); }
+  .bf-edit-body textarea { min-height:110px; resize:vertical; line-height:1.7; }
+  /* 编辑弹窗底部操作条：占满整行 + 右对齐（早先没有 width:100%，
+     作为列向 flex 的子项宽度收缩到内容宽，flex-end 无从生效 ——
+     按钮全挤在左下角，用户反馈「保存按钮位置非常奇怪」）。 */
+  .bf-edit-acts { display:flex; gap:10px; justify-content:flex-end; align-items:center;
+                  width:100%; padding-top:6px; border-top:1px solid var(--line-soft); }
+  .bf-edit-acts .btn-add { padding:9px 22px; }
+  .mini { padding:6px 12px; border:1px solid var(--line); border-radius:7px; background:var(--chip);
+          color:var(--muted); font-size:12px; font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .mini:disabled { opacity:.5; cursor:default; }
+</style>
+<script>
+  (function () {
+    "use strict";
+
+    var FACETS = {
+      categories: {{ options.categories|tojson }},
+      topics: {{ options.topics|tojson }},
+      tags: {{ options.tags|tojson }}
+    };
+    var MAX_SECTIONS = {{ max_sections }};
+    var PREVIEW = {{ preview.sections|tojson }};
+    var hidden = document.getElementById("bf-sections-json");
+    var flow = document.getElementById("bf-flow");
+    var defaultSec = document.getElementById("bf-default-sec");
+    var state = [];
+    try { state = JSON.parse(hidden.value || "[]") || []; } catch (e) { state = []; }
+
+    function esc(s) {
+      return String(s == null ? "" : s)
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+    }
+
+    var TYPE_META = {
+      news:    {label: "新闻", ico: "▤"},
+      text:    {label: "文字", ico: "✎"},
+      weather: {label: "天气", ico: "☁"}
+    };
+
+    function nodeSub(node) {
+      if (node.type === "news") {
+        var parts = [];
+        if (node.top_n) parts.push(node.top_n + " 条");
+        if (node.categories && node.categories.length) parts.push("分类：" + node.categories.join("/"));
+        if (node.tags && node.tags.length) parts.push("#" + node.tags.slice(0, 3).join(" #"));
+        if (node.keywords && node.keywords.length) parts.push(node.keywords.slice(0, 2).join(" "));
+        return parts.join(" · ") || "全部相关新闻";
+      }
+      if (node.type === "text") return (node.title || node.text || "").slice(0, 40) || "（空）";
+      var cities = node.cities || [];
+      return (cities.length ? "城市：" + cities.join(" / ") : "未设置城市") +
+             (node.text ? " · " + node.text.slice(0, 24) : "");
+    }
+
+    function syncHidden() {
+      hidden.value = JSON.stringify(state);
+      defaultSec.classList.toggle("hidden", state.length > 0);
+    }
+
+    function renderFlow() {
+      flow.innerHTML = state.map(function (node, i) {
+        var meta = TYPE_META[node.type] || TYPE_META.news;
+        var off = node.enabled === false ? " off" : "";
+        return '<div class="bf-node' + off + '" data-index="' + i + '" draggable="true">' +
+          '<div class="bf-node-card" data-open="' + i + '">' +
+            '<span class="bf-node-handle" title="拖动排序">⠿</span>' +
+            '<span class="bf-node-ico">' + meta.ico + '</span>' +
+            '<span class="bf-node-body">' +
+              '<span class="bf-node-name">' + esc(node.name || "第 " + (i + 1) + " 节") +
+                ' <span class="bf-hint">' + meta.label + '</span></span>' +
+              '<span class="bf-node-sub">' + esc(nodeSub(node)) + '</span>' +
+            '</span>' +
+            '<span class="bf-node-acts">' +
+              '<button type="button" class="bf-node-btn" data-act="up" data-index="' + i + '" title="上移">↑</button>' +
+              '<button type="button" class="bf-node-btn" data-act="down" data-index="' + i + '" title="下移">↓</button>' +
+              '<button type="button" class="bf-node-btn" data-act="toggle" data-index="' + i + '" title="' +
+                (node.enabled === false ? "启用" : "停用") + '">' + (node.enabled === false ? "○" : "◉") + '</button>' +
+              '<button type="button" class="bf-node-btn danger" data-act="del" data-index="' + i + '" title="删除">✕</button>' +
+            '</span>' +
+          '</div>' +
+        '</div>';
+      }).join("");
+      syncHidden();
+      renderTabs();
+    }
+
+    // 极简 Markdown 渲染（天气/文字节点用）：**加粗**、换行。刻意不引库。
+    function miniMd(text) {
+      var safe = esc(text || "");
+      safe = safe.replace(/\*\*([^*]+)\*\*/g, "<b>$1</b>");
+      return safe.replace(/\n/g, "<br>");
+    }
+
+    function renderTabs() {
+      var tabs = document.getElementById("bf-tabs");
+      var panes = document.getElementById("bf-panes");
+      if (!PREVIEW.length) { tabs.innerHTML = ""; panes.innerHTML = ""; return; }
+      tabs.innerHTML = PREVIEW.map(function (sec, i) {
+        var label = sec.name || "全部";
+        return '<button type="button" class="bf-tab' + (i === 0 ? " on" : "") +
+               '" data-tab="' + i + '" role="tab">' + esc(label) +
+               '<span class="n">' + sec.total + '</span></button>';
+      }).join("");
+      panes.innerHTML = PREVIEW.map(function (sec, i) {
+        var kind = sec.type === "news" ? sec.total + " 条"
+                 : (sec.type === "weather" ? "纯文本 · 直接发" : "固定内容");
+        var sub = (sec.meta && sec.meta.subtitle) || "";
+        // 天气节点没有长图（纯文本推送），给「复制文字」而不是「预览长图」
+        var act = sec.type === "weather"
+          ? '<button type="button" class="mini bf-copy-sec" data-section="' + i +
+            '">复制文字</button>'
+          : '<button type="button" class="mini bf-img-btn" data-section="' + i +
+            '">预览长图</button>';
+        var head = '<div class="bf-pane-head"><span class="bf-pane-title">' +
+          esc(sec.name || "全部") + '<em>' + kind + '</em>' +
+          (sub ? '<em class="bf-pane-sub">' + esc(sub) + '</em>' : "") +
+          '</span>' + act + '</div>';
+        var body = "";
+        if (sec.type === "news") {
+          if (sec.entries.length) {
+            body = '<ol class="bf-list">' + sec.entries.map(function (item) {
+              return '<li class="bf-item">' +
+                '<div class="bf-item-head">' + (item.starred ? '<span class="bf-star">★</span>' : "") +
+                  '<a class="bf-title" href="/story/' + item.id + '">' + esc(item.title) + '</a></div>' +
+                '<p class="bf-brief">' + esc(item.brief) + '</p>' +
+                '<div class="bf-meta"><span>' + esc(item.source) + '</span>' +
+                  (item.category ? '<span class="bf-cat">' + esc(item.category) + '</span>' : "") +
+                  (item.score != null ? '<span class="bf-score">' + item.score + '</span>' : "") +
+                  '<span class="bf-time">' + esc(item.published) + '</span></div>' +
+              '</li>';
+            }).join("") + "</ol>";
+          } else {
+            // 空节点给明确原因（数据库没有匹配 / 时间窗太窄 / 条件太严），
+            // 而不是一片空白（用户反馈）。
+            body = '<div class="empty small">这一节没有选到文章。' +
+              (sec.hint ? '<span class="empty-note">' + esc(sec.hint) + "</span>" : "") +
+              "</div>";
+          }
+        } else if (sec.type === "weather") {
+          var wm = sec.meta || {};
+          body = '<div class="bf-fixed bf-weather"><p>' +
+                 miniMd(wm.text || "（未设置城市）") + "</p></div>";
+        } else {
+          var m = sec.meta || {};
+          var t = m.title || "";
+          body = '<div class="bf-fixed">' + (t ? "<h3>" + esc(t) + "</h3>" : "") +
+                 '<p>' + esc(m.text || "（空）") + '</p></div>';
+        }
+        return '<div class="bf-pane' + (i === 0 ? " on" : "") + '" data-pane="' + i + '">' + head + body + "</div>";
+      }).join("");
+    }
+
+    document.getElementById("bf-tabs").addEventListener("click", function (e) {
+      var btn = e.target.closest(".bf-tab");
+      if (!btn) return;
+      var i = btn.getAttribute("data-tab");
+      document.querySelectorAll(".bf-tab").forEach(function (t) { t.classList.toggle("on", t === btn); });
+      document.querySelectorAll(".bf-pane").forEach(function (p) {
+        p.classList.toggle("on", p.getAttribute("data-pane") === i);
+      });
+    });
+
+    // 节点动作：上移/下移/启停/删除
+    flow.addEventListener("click", function (e) {
+      var actBtn = e.target.closest("[data-act]");
+      if (actBtn) {
+        e.stopPropagation();
+        var i = +actBtn.getAttribute("data-index");
+        var act = actBtn.getAttribute("data-act");
+        if (act === "up" && i > 0) { state.splice(i - 1, 0, state.splice(i, 1)[0]); }
+        if (act === "down" && i < state.length - 1) { state.splice(i + 1, 0, state.splice(i, 1)[0]); }
+        if (act === "toggle") { state[i].enabled = state[i].enabled === false; }
+        if (act === "del") {
+          if (!confirm("删除节点「" + (state[i].name || "第 " + (i + 1) + " 节") + "」？")) return;
+          state.splice(i, 1);
+        }
+        renderFlow();
+        return;
+      }
+      var open = e.target.closest("[data-open]");
+      if (open) openEditor(+open.getAttribute("data-open"));
+    });
+
+    // 拖动排序
+    var dragIndex = null;
+    flow.addEventListener("dragstart", function (e) {
+      var node = e.target.closest(".bf-node");
+      if (!node) return;
+      dragIndex = +node.getAttribute("data-index");
+      e.dataTransfer.effectAllowed = "move";
+    });
+    flow.addEventListener("dragover", function (e) {
+      var node = e.target.closest(".bf-node");
+      if (!node) return;
+      e.preventDefault();
+      document.querySelectorAll(".bf-node").forEach(function (n) {
+        n.classList.toggle("drag-over", n === node && +n.getAttribute("data-index") !== dragIndex);
+      });
+    });
+    flow.addEventListener("drop", function (e) {
+      var node = e.target.closest(".bf-node");
+      if (!node || dragIndex === null) return;
+      e.preventDefault();
+      var target = +node.getAttribute("data-index");
+      if (target !== dragIndex) {
+        var moved = state.splice(dragIndex, 1)[0];
+        state.splice(target, 0, moved);
+      }
+      dragIndex = null;
+      renderFlow();
+    });
+    flow.addEventListener("dragend", function () {
+      dragIndex = null;
+      document.querySelectorAll(".bf-node").forEach(function (n) { n.classList.remove("drag-over"); });
+    });
+
+    // ── 节点编辑弹窗 ───────────────────────────────────────────
+    var editMask = document.getElementById("bf-edit-mask");
+    var editBody = document.getElementById("bf-edit-body");
+    var editTitle = document.getElementById("bf-edit-title");
+    var editIndex = -1;
+
+    function chipEditor(label, field, node) {
+      var options = FACETS[field] || [];
+      var selected = node[field] || [];
+      var chips = options.map(function (name) {
+        var on = selected.indexOf(name) >= 0 ? " checked" : "";
+        var text = field === "tags" ? "#" + name : name;
+        return '<label class="bf-chip"><input type="checkbox" data-edit-field="' + field +
+               '" value="' + esc(name) + '"' + on + '><span>' + esc(text) + '</span></label>';
+      }).join("");
+      return '<div class="bf-edit-row"><span>' + label + '<span class="bf-hint"> 不选 = 不限</span></span>' +
+             '<div class="bf-chips">' + (chips || '<span class="bf-empty">暂无候选</span>') + "</div></div>";
+    }
+
+    function openEditor(index) {
+      var node = state[index];
+      if (!node) return;
+      editIndex = index;
+      var meta = TYPE_META[node.type] || TYPE_META.news;
+      editTitle.textContent = "编辑节点 · " + meta.label;
+      editBody.classList.toggle("wide", node.type === "news");
+      var html = '<div class="bf-edit-row"><span>节点名称（长图标题）</span>' +
+        '<input type="text" data-edit="name" maxlength="20" value="' + esc(node.name || "") + '"></div>';
+      if (node.type === "news") {
+        html += '<div class="bf-edit-row"><span>条数 TOP N</span>' +
+          '<input type="number" data-edit="top_n" min="1" max="{{ max_top_n }}" value="' +
+          (node.top_n || 10) + '"></div>';
+        // 分类/主题/标签三组候选放进两栏网格：候选多时竖排太长（用户反馈）
+        html += '<div class="bf-edit-grid">' +
+          chipEditor("分类", "categories", node) +
+          chipEditor("主题", "topics", node) +
+          chipEditor("标签", "tags", node) + "</div>";
+        html += '<div class="bf-edit-row"><span>关键词<span class="bf-hint"> 逗号分隔</span></span>' +
+          '<input type="text" data-edit="keywords" value="' +
+          esc((node.keywords || []).join(", ")) + '" placeholder="如 芯片, Agent"></div>';
+      } else if (node.type === "text") {
+        html += '<div class="bf-edit-row"><span>卡片标题</span>' +
+          '<input type="text" data-edit="title" maxlength="80" value="' + esc(node.title || "") + '"></div>';
+        html += '<div class="bf-edit-row"><span>正文内容<span class="bf-hint"> 会原样排版进长图</span></span>' +
+          '<textarea data-edit="text" maxlength="800">' + esc(node.text || "") + "</textarea></div>";
+      } else {
+        html += '<div class="bf-edit-row"><span>城市<span class="bf-hint"> 可填多个，逗号分隔；天气、降水与穿衣提示自动生成（emoji 格式）</span></span>' +
+          '<input type="text" data-edit="cities" value="' +
+          esc((node.cities || []).join(", ")) + '" placeholder="如 上海, 北京, 深圳"></div>';
+        html += '<div class="bf-edit-row"><span>补充说明<span class="bf-hint"> 可选，会附在天气下方</span></span>' +
+          '<textarea data-edit="text" maxlength="800">' + esc(node.text || "") + "</textarea></div>";
+      }
+      html += '<div class="bf-edit-acts">' +
+        '<button type="button" class="mini" id="bf-edit-cancel">取消</button>' +
+        '<button type="button" class="btn-add" id="bf-edit-save">保存节点</button></div>';
+      editBody.innerHTML = html;
+      editMask.hidden = false;
+      var first = editBody.querySelector("input, textarea");
+      if (first) first.focus();
+    }
+
+    function collectEditor() {
+      var node = state[editIndex];
+      editBody.querySelectorAll("[data-edit]").forEach(function (el) {
+        var field = el.getAttribute("data-edit");
+        if (field === "top_n") node.top_n = Math.max(1, Math.min(50, +el.value || 10));
+        else if (field === "keywords") {
+          node.keywords = el.value.split(/[,，、]/).map(function (s) { return s.trim(); }).filter(Boolean);
+        } else if (field === "cities") {
+          node.cities = el.value.split(/[,，、]/).map(function (s) { return s.trim(); }).filter(Boolean);
+        } else node[field] = el.value;
+      });
+      // 重新收集 checkbox 组
+      ["categories", "topics", "tags"].forEach(function (field) {
+        if (!editBody.querySelector("[data-edit-field='" + field + "']")) return;
+        var checked = [];
+        editBody.querySelectorAll("[data-edit-field='" + field + "']:checked").forEach(function (el) {
+          checked.push(el.value);
+        });
+        node[field] = checked;
+      });
+    }
+
+    editBody.addEventListener("click", function (e) {
+      if (e.target.id === "bf-edit-save") {
+        collectEditor();
+        editMask.hidden = true;
+        renderFlow();
+        return;
+      }
+      if (e.target.id === "bf-edit-cancel") editMask.hidden = true;
+    });
+    // 顶栏「关闭」按钮（原来没有绑定，点了没反应）
+    document.getElementById("bf-edit-close").addEventListener("click", function () {
+      editMask.hidden = true;
+    });
+    editMask.addEventListener("click", function (e) { if (e.target === editMask) editMask.hidden = true; });
+
+    // 新增节点
+    function addNode(type) {
+      if (state.length >= MAX_SECTIONS) return;
+      var node = {type: type, name: "", enabled: true};
+      if (type === "news") { node.top_n = 10; node.categories = []; node.topics = []; node.tags = []; node.keywords = []; }
+      if (type === "text") { node.title = ""; node.text = ""; }
+      if (type === "weather") { node.cities = []; node.text = ""; }
+      state.push(node);
+      renderFlow();
+      openEditor(state.length - 1);
+    }
+    document.getElementById("bf-add-news").addEventListener("click", function () { addNode("news"); });
+    document.getElementById("bf-add-text").addEventListener("click", function () { addNode("text"); });
+    document.getElementById("bf-add-weather").addEventListener("click", function () { addNode("weather"); });
+
+    // 关注词一键填入（默认单节）
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest(".bf-kw");
+      if (!btn) return;
+      var target = btn.getAttribute("data-target");
+      var kw = btn.getAttribute("data-kw");
+      var input = document.querySelector("input[name='" + target + "']");
+      if (!input) return;
+      var parts = input.value.split(",").map(function (s) { return s.trim(); }).filter(Boolean);
+      if (parts.indexOf(kw) < 0) parts.push(kw);
+      input.value = parts.join(", ");
+    });
+
+    renderFlow();
+
+    // ── 保存（顶部按钮 / 表单提交） ────────────────────────────
+    document.getElementById("bf-save-top").addEventListener("click", function () {
+      document.getElementById("bf-form").submit();
+    });
+
+    // ── 立即生成 ───────────────────────────────────────────────
+    var genBtn = document.getElementById("bf-generate");
+    var genNote = document.getElementById("bf-gen-note");
+    genBtn.addEventListener("click", function () {
+      genBtn.disabled = true;
+      genNote.textContent = "正在生成…";
+      fetch("/api/brief/generate", {method: "POST", headers: {"X-Requested-With": "fetch"}})
+        .then(function (r) { return r.json(); })
+        .then(function (d) {
+          genNote.textContent = d.ok
+            ? "已生成 " + d.date + "（" + d.sections + " 节 / " + d.total + " 条），刷新页面可回看"
+            : "生成失败";
+          genBtn.disabled = false;
+        })
+        .catch(function () {
+          genNote.textContent = "生成失败，稍后再试";
+          genBtn.disabled = false;
+        });
+    });
+
+    // ── 复制成稿 ───────────────────────────────────────────────
+    var copy = document.getElementById("bf-copy");
+    copy.addEventListener("click", function () {
+      var done = function () {
+        copy.textContent = "已复制";
+        setTimeout(function () { copy.textContent = "复制成稿"; }, 1500);
+      };
+      fetch("/brief.txt").then(function (r) { return r.text(); }).then(function (text) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(text).then(done, function () { legacy(text, done); });
+        } else { legacy(text, done); }
+      });
+    });
+    function legacy(text, done) {
+      var ta = document.createElement("textarea");
+      ta.value = text; ta.style.position = "fixed"; ta.style.opacity = "0";
+      document.body.appendChild(ta); ta.select();
+      try { document.execCommand("copy"); done(); } catch (err) { /* 失败不打扰 */ }
+      document.body.removeChild(ta);
+    }
+
+    // ── 长图预览（Canvas 1080px，可翻页） ──────────────────────
+    var mask = document.getElementById("bf-mask");
+    var modalBody = document.getElementById("bf-modal-body");
+    var modalTitle = document.getElementById("bf-modal-title");
+    var prevBtn = document.getElementById("bf-prev");
+    var nextBtn = document.getElementById("bf-next");
+    var currentIndex = 0;
+    var currentCanvas = null;
+
+    // 断行：CJK 逐字可断；拉丁按词断（否则英文单词会被切一半，
+    // 实测「OpenAI」被切成「OpenA/I」）。做法：先按空格切成 token，
+    // 逐个 token 试探；单个 token 本身超宽（超长 URL/标识符）才逐字硬切。
+    function wrapText(ctx, text, maxWidth) {
+      var lines = [];
+      var paragraphs = String(text || "").split("\n");
+      paragraphs.forEach(function (para) {
+        var tokens = para.split(/(\s+)/); // 保留空格 token
+        var line = "";
+        function flush() {
+          if (line.trim()) lines.push(line.replace(/\s+$/, ""));
+          line = "";
+        }
+        tokens.forEach(function (token) {
+          if (!token) return;
+          // CJK 逐字追加；拉丁 token 整体追加
+          var chars = /[\u4e00-\u9fff\u3000-\u303f\uff00-\uffef]/.test(token)
+            ? token.split("") : [token];
+          chars.forEach(function (ch) {
+            var test = line + ch;
+            if (ctx.measureText(test).width > maxWidth && line) {
+              flush();
+              line = ch.trim() ? ch : "";
+            } else {
+              line = test;
+            }
+          });
+        });
+        flush();
+      });
+      return lines;
+    }
+
+    var FONT = "-apple-system, 'PingFang SC', 'Microsoft YaHei', 'Hiragino Sans GB', sans-serif";
+
+    function drawCard(canvas, section, title) {
+      var W = 1080, PAD = 64, contentW = W - PAD * 2;
+      // 卡片内文字可用宽度：卡片从 PAD 画到 PAD+contentW，文字起点 PAD+32，
+      // 右侧也要留 32px 内边距 —— 早先按 contentW 断行，文字最远画到
+      // PAD+32+contentW，比卡片右缘多出 32px（用户实测文字超出白卡）。
+      var innerW = contentW - 64;
+      var ctx = canvas.getContext("2d");
+      var F_TITLE = "bold 40px " + FONT;
+      var F_BODY = "30px " + FONT;
+      var F_META = "24px " + FONT;
+
+      var blocks = [];
+      var y = 170; // 头部
+      if (section.name) {
+        ctx.font = F_TITLE;
+        var secLines = wrapText(ctx, section.name, innerW);
+        blocks.push({type: "section", lines: secLines, h: 52 * secLines.length + 46});
+        y += 52 * secLines.length + 46;
+      }
+      // 筛选条件副标题（用户要求：不限时显示排序方式，选了条件就列出来）
+      var sub = (section.meta && section.meta.subtitle) || "";
+      if (sub && section.type === "news") {
+        ctx.font = "24px " + FONT;
+        var subLines = wrapText(ctx, sub, innerW);
+        blocks.push({type: "subtitle", lines: subLines, h: 38 * subLines.length + 18});
+        y += 38 * subLines.length + 18;
+      }
+      var entries = section.entries || [];
+      if (section.type && section.type !== "news") {
+        var m = section.meta || {};
+        var head = m.title || "";
+        ctx.font = "bold 38px " + FONT;
+        var headLines = head ? wrapText(ctx, head, innerW) : [];
+        ctx.font = F_BODY;
+        // 天气/文字节点内容是 Markdown（**加粗**、换行）：Canvas 不认标记，
+        // 渲染前把 ** 去掉（emoji 与 └ 保留，它们是内容的一部分）。
+        var plain = String(m.text || "").replace(/\*\*([^*]+)\*\*/g, "$1");
+        var textLines = wrapText(ctx, plain, innerW);
+        var h = 56 * headLines.length + 46 * textLines.length + 90;
+        blocks.push({type: "fixed", headLines: headLines, textLines: textLines, h: h});
+        y += h;
+      } else if (!entries.length) {
+        // 空节点：画一行「本节暂无内容」而不是一张空白卡片（导出图看着像坏了）
+        ctx.font = F_BODY;
+        var emptyLines = wrapText(ctx, "（本节暂无内容）", innerW);
+        var eh = 46 * emptyLines.length + 70;
+        blocks.push({type: "fixed", headLines: [], textLines: emptyLines, h: eh});
+        y += eh;
+      } else {
+        entries.forEach(function (item) {
+          ctx.font = "bold 36px " + FONT;
+          var tLines = wrapText(ctx, (item.starred ? "★ " : "") + item.title, innerW);
+          ctx.font = F_BODY;
+          var bLines = wrapText(ctx, item.brief, innerW);
+          ctx.font = F_META;
+          var meta = item.source + (item.category ? " · " + item.category : "") +
+                     (item.published ? " · " + item.published : "");
+          var mLines = wrapText(ctx, meta, innerW);
+          var itemH = 56 * tLines.length + 46 * bLines.length + 40 * mLines.length + 90;
+          blocks.push({type: "item", tLines: tLines, bLines: bLines, mLines: mLines, h: itemH});
+          y += itemH;
+        });
+      }
+      y += 120;
+
+      canvas.width = W;
+      canvas.height = Math.max(600, y);
+
+      ctx.fillStyle = "#f6f7f9";
+      ctx.fillRect(0, 0, W, canvas.height);
+      var g = ctx.createLinearGradient(0, 0, 0, 140);
+      g.addColorStop(0, "#176b75");
+      g.addColorStop(1, "#0d4a53");
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, W, 140);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.font = "bold 44px " + FONT;
+      ctx.fillText("早报", PAD, 72);
+      ctx.font = "28px " + FONT;
+      ctx.globalAlpha = 0.85;
+      ctx.fillText(title, PAD, 112);
+      ctx.globalAlpha = 1;
+      ctx.font = "26px " + FONT;
+      var brand = "Show Me the Money";
+      ctx.fillText(brand, W - PAD - ctx.measureText(brand).width, 100);
+
+      var cy = 200;
+      blocks.forEach(function (block) {
+        if (block.type === "section") {
+          ctx.fillStyle = "#176b75";
+          ctx.fillRect(PAD, cy - 4, 8, 52 * block.lines.length + 10);
+          ctx.fillStyle = "#202a30";
+          ctx.font = F_TITLE;
+          block.lines.forEach(function (line, i) {
+            ctx.fillText(line, PAD + 30, cy + 40 + i * 52);
+          });
+          cy += block.h;
+          return;
+        }
+        if (block.type === "subtitle") {
+          ctx.fillStyle = "#89979d";
+          ctx.font = "24px " + FONT;
+          block.lines.forEach(function (line, i) {
+            ctx.fillText(line, PAD + 30, cy + 24 + i * 38);
+          });
+          cy += block.h;
+          return;
+        }
+        if (block.type === "fixed") {
+          ctx.fillStyle = "#ffffff";
+          ctx.fillRect(PAD, cy, contentW, block.h - 24);
+          ctx.strokeStyle = "#dfe4e1";
+          ctx.lineWidth = 2;
+          ctx.strokeRect(PAD, cy, contentW, block.h - 24);
+          var fy = cy + 58;
+          ctx.fillStyle = "#202a30";
+          ctx.font = "bold 38px " + FONT;
+          block.headLines.forEach(function (line) {
+            ctx.fillText(line, PAD + 32, fy);
+            fy += 56;
+          });
+          ctx.font = F_BODY;
+          ctx.fillStyle = "#59656b";
+          block.textLines.forEach(function (line) {
+            ctx.fillText(line, PAD + 32, fy);
+            fy += 46;
+          });
+          cy += block.h;
+          return;
+        }
+        ctx.fillStyle = "#ffffff";
+        ctx.fillRect(PAD, cy, contentW, block.h - 24);
+        ctx.strokeStyle = "#dfe4e1";
+        ctx.lineWidth = 2;
+        ctx.strokeRect(PAD, cy, contentW, block.h - 24);
+        var ty = cy + 56;
+        ctx.fillStyle = "#202a30";
+        ctx.font = "bold 36px " + FONT;
+        block.tLines.forEach(function (line) {
+          ctx.fillText(line, PAD + 32, ty);
+          ty += 56;
+        });
+        ctx.font = F_BODY;
+        ctx.fillStyle = "#59656b";
+        block.bLines.forEach(function (line) {
+          ctx.fillText(line, PAD + 32, ty);
+          ty += 46;
+        });
+        ctx.font = F_META;
+        ctx.fillStyle = "#89979d";
+        block.mLines.forEach(function (line) {
+          ctx.fillText(line, PAD + 32, ty);
+          ty += 40;
+        });
+        cy += block.h;
+      });
+
+      ctx.fillStyle = "#89979d";
+      ctx.font = F_META;
+      ctx.fillText("—— Show Me the Money 自动生成", PAD, canvas.height - 48);
+    }
+
+    // 长图翻页只在「有长图」的节点之间走：天气节点是纯文本，没有长图。
+    function isImageSection(sec) { return !!sec && sec.type !== "weather"; }
+    function stepImage(from, dir) {
+      var i = from + dir;
+      while (i >= 0 && i < PREVIEW.length && !isImageSection(PREVIEW[i])) i += dir;
+      return (i >= 0 && i < PREVIEW.length) ? i : from;
+    }
+
+    function showImage(index) {
+      if (!PREVIEW.length || !isImageSection(PREVIEW[index])) return;
+      currentIndex = Math.max(0, Math.min(PREVIEW.length - 1, index));
+      var section = PREVIEW[currentIndex];
+      var canvas = document.createElement("canvas");
+      var dateStr = new Date().toISOString().slice(0, 10);
+      drawCard(canvas, section, dateStr);
+      currentCanvas = canvas;
+      var imageIdx = PREVIEW.filter(isImageSection);
+      var pos = imageIdx.indexOf(section) + 1;
+      modalTitle.textContent = "长图预览 · " + (section.name || "全部") +
+        "（" + pos + " / " + imageIdx.length + "）";
+      prevBtn.disabled = stepImage(currentIndex, -1) === currentIndex;
+      nextBtn.disabled = stepImage(currentIndex, 1) === currentIndex;
+      modalBody.innerHTML = "";
+      var img = new Image();
+      img.src = canvas.toDataURL("image/png");
+      modalBody.appendChild(img);
+    }
+
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest(".bf-img-btn");
+      if (!btn) return;
+      showImage(+btn.getAttribute("data-section"));
+      mask.hidden = false;
+    });
+
+    // 纯文本节点（天气）：「复制文字」——直接发手机/Hermes 的那段
+    document.addEventListener("click", function (e) {
+      var btn = e.target.closest(".bf-copy-sec");
+      if (!btn) return;
+      var sec = PREVIEW[+btn.getAttribute("data-section")] || {};
+      var text = sec.text || "";
+      var done = function () {
+        btn.textContent = "已复制";
+        setTimeout(function () { btn.textContent = "复制文字"; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(text).then(done, function () { legacy(text, done); });
+      } else { legacy(text, done); }
+    });
+    prevBtn.addEventListener("click", function () { showImage(stepImage(currentIndex, -1)); });
+    nextBtn.addEventListener("click", function () { showImage(stepImage(currentIndex, 1)); });
+    document.getElementById("bf-close").addEventListener("click", function () { mask.hidden = true; });
+    mask.addEventListener("click", function (e) { if (e.target === mask) mask.hidden = true; });
+    document.addEventListener("keydown", function (e) {
+      if (mask.hidden) return;
+      if (e.key === "Escape") mask.hidden = true;
+      if (e.key === "ArrowLeft") showImage(stepImage(currentIndex, -1));
+      if (e.key === "ArrowRight") showImage(stepImage(currentIndex, 1));
+    });
+    document.getElementById("bf-download").addEventListener("click", function () {
+      if (!currentCanvas) return;
+      var link = document.createElement("a");
+      var name = PREVIEW[currentIndex] && PREVIEW[currentIndex].name ? "-" + currentIndex : "";
+      link.download = "brief-" + new Date().toISOString().slice(0, 10) + name + ".png";
+      link.href = currentCanvas.toDataURL("image/png");
+      link.click();
+    });
+
+    // ── 历史成品弹窗（页内查看，站内风格；不再开新标签页） ──────
+    var issueMask = document.getElementById("bf-issue-mask");
+    var issueBody = document.getElementById("bf-issue-body");
+    var issueTitle = document.getElementById("bf-issue-title");
+    var issueText = "";
+
+    function renderIssue(data) {
+      var parts = ['<h2>' + esc(data.title || "早报") + '</h2>',
+                    '<div class="iss-meta">' + esc(data.date) +
+                    (data.created_at ? " · 生成于 " + esc(data.created_at) : "") +
+                    " · " + data.section_count + " 节 / " + data.article_count + " 条</div>"];
+      (data.sections || []).forEach(function (sec) {
+        var multi = (data.sections || []).length > 1;
+        if (multi && sec.name) parts.push("<h3>" + esc(sec.name) + "</h3>");
+        if (sec.type && sec.type !== "news") {
+          var m = sec.meta || {};
+          parts.push('<div class="iss-item"><p class="iss-b">' +
+                     miniMd(m.text || "（空）") + "</p></div>");
+          return;
+        }
+        (sec.entries || []).forEach(function (item, idx) {
+          parts.push('<div class="iss-item">' +
+            '<div class="iss-t">' + (idx + 1) + ". " +
+              (item.starred ? "★ " : "") + esc(item.title) + "</div>" +
+            '<p class="iss-b">' + esc(item.brief) + "</p>" +
+            '<div class="iss-m">' + esc(item.source) +
+              (item.category ? " · " + esc(item.category) : "") +
+              (item.published ? " · " + esc(item.published) : "") + "</div></div>");
+        });
+        if (!(sec.entries || []).length) {
+          parts.push('<div class="iss-item"><p class="iss-b">（本节暂无内容）</p></div>');
+        }
+      });
+      issueBody.innerHTML = parts.join("");
+    }
+
+    document.addEventListener("click", function (e) {
+      var card = e.target.closest(".bf-issue");
+      if (!card) return;
+      var date = card.getAttribute("data-issue");
+      fetch("/api/brief/issue?date=" + encodeURIComponent(date))
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          if (!data.ok) return;
+          issueText = data.text || "";
+          issueTitle.textContent = "历史早报 · " + data.date;
+          renderIssue(data);
+          issueMask.hidden = false;
+        });
+    });
+    document.getElementById("bf-issue-close").addEventListener("click", function () { issueMask.hidden = true; });
+    issueMask.addEventListener("click", function (e) { if (e.target === issueMask) issueMask.hidden = true; });
+    document.getElementById("bf-issue-copy").addEventListener("click", function () {
+      var btn = this;
+      var done = function () {
+        btn.textContent = "已复制";
+        setTimeout(function () { btn.textContent = "复制成稿"; }, 1500);
+      };
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(issueText).then(done, function () { legacy(issueText, done); });
+      } else { legacy(issueText, done); }
+    });
+
+    // ── 统一 Esc：关闭当前打开的最上层弹窗（编辑 > 历史 > 长图） ──
+    document.addEventListener("keydown", function (e) {
+      if (e.key !== "Escape") return;
+      if (!editMask.hidden) { editMask.hidden = true; return; }
+      if (!issueMask.hidden) { issueMask.hidden = true; return; }
+      if (!mask.hidden) { mask.hidden = true; }
+    });
+  })();
+</script>
+{% endblock %}

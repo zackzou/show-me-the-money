@@ -120,3 +120,25 @@ def test_llm_fallback_models_parsed_from_env():
     env = {**VALID, "LLM_FALLBACK_MODELS": "wb/hy3, ag/gemini-3-flash "}
     settings = load_settings(env=env, config_dir=CONFIG_DIR)
     assert settings.llm.fallback_models == ["wb/hy3", "ag/gemini-3-flash"]
+
+
+# ── SMTM_PUBLIC_URL（站点对外地址） ─────────────────────────────────────────
+# Hermes 提示词 / llms.txt / RSS 里的绝对地址。默认按浏览器访问的 Host
+# 自动推导（内网 IP 原样带上）；反代 https 终止、内外网分离时显式覆盖。
+
+
+def test_public_url_default_is_empty():
+    assert load_settings(env=VALID, config_dir=CONFIG_DIR).public_url == ""
+
+
+def test_public_url_parsed_and_trailing_slash_stripped():
+    env = {**VALID, "SMTM_PUBLIC_URL": "https://news.example.com/"}
+    settings = load_settings(env=env, config_dir=CONFIG_DIR)
+    assert settings.public_url == "https://news.example.com"
+
+
+@pytest.mark.parametrize("bad", ["not-a-url", "ftp://example.com", "example.com"])
+def test_public_url_rejects_bad_value(bad: str):
+    with pytest.raises(ConfigError) as excinfo:
+        load_settings(env={**VALID, "SMTM_PUBLIC_URL": bad}, config_dir=CONFIG_DIR)
+    assert "SMTM_PUBLIC_URL" in str(excinfo.value)

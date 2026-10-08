@@ -101,7 +101,7 @@
 
   .srclist { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:9px; }
   .srcrow { display:flex; gap:16px; justify-content:space-between; align-items:flex-start;
-            padding:13px 15px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+            padding:14px 16px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
   .srcrow.off { opacity:.62; }
   .srcrow.busy { opacity:.5; pointer-events:none; }
   .src-main { min-width:0; flex:1; }
@@ -135,9 +135,14 @@
   .tag-lang { font-size:11px; font-weight:600; color:var(--accent); background:var(--accent-soft);
               border-radius:5px; padding:2px 7px; }
   .tag-lang.auto { color:var(--muted); background:var(--chip); font-weight:500; }
-  .src-url { display:block; font-size:12px; color:var(--muted); word-break:break-all; margin-top:4px; }
+  .src-url { display:block; font-size:12px; color:var(--muted); word-break:break-all;
+             margin-top:7px; line-height:1.55; }
   .src-url:hover { color:var(--accent); }
-  .src-meta { font-size:11.5px; color:var(--faint); margin-top:5px; }
+  /* 元信息行（已产出 / 最近 / 添加于）：原来 margin-top:5px、行高默认 ——
+     在密集的信源列表里三行文字挤成一团（用户反馈「底部文字太过紧凑」）。
+     拉开行距与段距，并给数字加等宽，扫描时更容易对齐。 */
+  .src-meta { font-size:11.5px; color:var(--faint); margin-top:8px; line-height:1.7;
+              font-variant-numeric:tabular-nums; }
   .src-act { display:flex; gap:7px; flex-wrap:wrap; justify-content:flex-end; flex:none; }
   .src-act .inline { display:flex; }
   .mini { padding:6px 11px; border:1px solid var(--line); border-radius:7px; background:var(--chip);
@@ -254,7 +259,7 @@
       if (confirmText && !window.confirm(confirmText)) { e.preventDefault(); return; }
       e.preventDefault();
       var row = form.closest(".srcrow, .srow");
-      if (form.getAttribute("action", "").indexOf("/probe") >= 0) {
+      if ((form.getAttribute("action") || "").indexOf("/probe") >= 0) {
         probeFlow(form, row);
         return;
       }

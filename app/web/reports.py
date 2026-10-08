@@ -15,7 +15,7 @@
 from __future__ import annotations
 
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta
 from typing import Any
 
 from fastapi import APIRouter, Depends, Request
@@ -98,9 +98,15 @@ def collect_report(session: Session, days: int) -> dict[str, Any]:
         for key, val in by_day.items()
     ]
     peak = max((int(point["total"]) for point in series), default=0)
-    for point in series:
+    # X 轴标签密度：柱子窄（90 天时每根约 10px）时全画标签必然重叠成一团。
+    # 按范围挑步长，让标签数量稳定在 6~8 个（相邻标签间 ≥48px，标签本身
+    # 是 5 字符的 "MM-DD"、9px 字号下约 34px 宽）。
+    label_step = max(1, round(days / 7))
+    for index, point in enumerate(series):
         # 条形高度百分比：模板直接当 style 宽度/高度用
         point["pct"] = round(int(point["total"]) / peak * 100, 1) if peak else 0
+        # 从右往左数：保证最新一天一定有标签（读者最关心那天）
+        point["show_label"] = (len(series) - 1 - index) % label_step == 0
 
     # ── 分类分布 ─────────────────────────────────────────────
     cat_counter = Counter(a.category for a in rows if a.category)
@@ -177,9 +183,14 @@ def collect_report(session: Session, days: int) -> dict[str, Any]:
             .order_by(DailyReport.date.desc())
         ).scalars()
     )
-    report_rows = [
-        {"date": row.date, "count": row.article_count} for row in reports
-    ]
+    report_rows = []
+    weekdays = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+    for row in reports:
+        try:
+            weekday = weekdays[datetime.strptime(row.date, "%Y-%m-%d").weekday()]
+        except ValueError:
+            weekday = ""
+        report_rows.append({"date": row.date, "count": row.article_count, "weekday": weekday})
 
     return {
         "days": days,
@@ -231,8 +242,8 @@ def reports_page(
 # ── 下钻（breakdown） ────────────────────────────────────────
 
 
-def _breakdown_rows(session: Session, days: int, dimension: str, value: str) -> list[dict[str, Any]]:
-    """某个维度值下的文章明细（按时间倒序）。"""
+def _breakdown_rows(session: Session, days: int, dimension: str, value: str) -> list[Article]:
+    """某个维度值下的文章（按时间倒序）。返回 ORM 行，调用方转卡片。"""
     now = now_local()
     start = now - timedelta(days=days)
     statement = select(Article).where(*_visible(), Article.published_at >= start)
@@ -269,19 +280,11 @@ def _breakdown_rows(session: Session, days: int, dimension: str, value: str) -> 
         rows = [a for a in rows if a.published_at and a.published_at.strftime("%Y-%m-%d") == value]
     # dimension == "all"：不过滤
 
-    return [
-        {
-            "id": a.id,
-            "title": a.title_zh or a.title,
-            "source": None,
-            "published": a.published_at.strftime("%Y-%m-%d %H:%M") if a.published_at else "",
-            "category": a.category or "",
-            "score": a.score,
-            "starred": bool(a.starred),
-            "tags": split_tags(a.tags),
-        }
-        for a in rows
-    ]
+    # 特别关注的排最前（与首页/日报同一口径）
+    rows.sort(
+        key=lambda a: (0 if a.starred else 1, -(a.published_at.timestamp() if a.published_at else 0))
+    )
+    return rows
 
 
 @reports_router.get("/reports/breakdown", response_class=HTMLResponse)
@@ -292,21 +295,20 @@ def reports_breakdown(
     days: str = "30",
     session: Session = Depends(get_session),
 ) -> HTMLResponse:
-    """下钻页：从图表点进来的明细列表。"""
+    """下钻页：从图表点进来的明细列表。
+
+    呈现方式与首页/搜索结果**完全一致**（同一套时间轴卡片）：来源、标题、
+    速览、分类、标签、评分、推荐理由、时间、收藏按钮都在。早先这里是一个
+    精简的标题列表（只有标题/来源/分类/标签/时间/评分），读者下钻后看到的是
+    另一种版式，像是掉进了另一个站点（用户反馈）。
+    """
+    from app.web.routes import _attach_sources, _card, group_cards
+
     resolved = _range_days(days)
     rows = _breakdown_rows(session, resolved, dimension, value)
-    # 补来源名（一次查完，不做 N+1）
-    source_ids = {r["id"] for r in rows}
-    names: dict[int, str] = {}
-    if source_ids:
-        for article_id, source_name in session.execute(
-            select(Article.id, Source.name)
-            .outerjoin(Source, Article.source_id == Source.id)
-            .where(Article.id.in_(source_ids))
-        ).all():
-            names[article_id] = source_name or "未知来源"
-    for row in rows:
-        row["source"] = names.get(row["id"], "未知来源")
+    now = now_local()
+    cards = [_card(article, None, None, now) for article in rows]
+    cards = _attach_sources(session, rows, cards, now)
 
     labels = {
         "category": "分类",
@@ -329,7 +331,7 @@ def reports_breakdown(
             dimension_label=labels.get(dimension, dimension),
             value=value,
             days=resolved,
-            rows=rows,
-            total=len(rows),
+            groups=group_cards(cards),
+            total=len(cards),
         ),
     )

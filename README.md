@@ -7,14 +7,15 @@
 **页内就能读完，不用跳原站**：系统把原文正文抓回来，列表页给「速览 + 推荐理由 + 相关度评分」，
 点进单篇页是**完整正文**（左栏来源信息，右栏逐段正文）—— 刷完热点不用来回切标签页。
 
-![首页（AIHOT 皮肤）](docs/screenshots/home-aihot.png)
+![首页（科技风格）](docs/screenshots/home-aihot.png)
 
 - 必填配置只有 `LLM_API_*` + `RESEARCH_TOPIC`，其余全部内置默认值
 - 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
 - 不绑定 OpenAI：任意 OpenAI 兼容接口、本地 Ollama 都可以（含返回 SSE 流的网关）
 - 单机轻量：Python + FastAPI + SQLite，一个 `docker compose up -d` 跑起来
-- **两套外观**：默认风格 + 一键切换的 AIHOT 风格皮肤（布局/配色/动效，纯前端偏好）
+- **两套外观**：科技风格（默认）+ 一键切换的经典风格（布局/配色/动效，纯前端偏好）
 - **管理套件**：关键词屏蔽与特别关注、回收站（软删除可恢复）、数据报告（可下钻的趋势图）
+- **早报与 Agent 接入**：每天 06:00 自动制作的多分节早报（微信长图导出，零额外 LLM 成本）+ Skill / MCP / REST 三种 Agent 接入
 
 ---
 
@@ -23,11 +24,13 @@
 - [快速开始（Docker，推荐）](#快速开始docker推荐)
 - [本地运行（不用 Docker）](#本地运行不用-docker)
 - [配置](#配置)
-- [外观：默认风格与 AIHOT 皮肤](#外观默认风格与-aihot-皮肤)
+- [外观：科技风格（默认）与经典风格](#外观科技风格默认与经典风格)
 - [页面与语言策略](#页面与语言策略)
 - [关键词屏蔽与特别关注](#关键词屏蔽与特别关注)
 - [回收站](#回收站)
 - [数据报告](#数据报告)
+- [早报（精选 TOP N）](#早报精选-top-n)
+- [Agent 接入](#agent-接入)
 - [它是怎么跑的](#它是怎么跑的)
 - [接口一览](#接口一览)
 - [预览产出长什么样](#预览产出长什么样)
@@ -102,6 +105,9 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `CONFIG_DIR` | `config` | 默认配置文件目录 |
 | `DB_PATH` | `data/smtm.db` | SQLite 路径（相对路径按项目根解析） |
 | `SMTM_DISABLE_STARTUP_FETCH` | 未设置 | 设为 `1` 可关闭启动抓取，临时省一次 API 调用 |
+| `SMTM_PUBLIC_URL` | 未设置 | 站点对外地址（Hermes 提示词 / llms.txt / RSS 用）。不设时按浏览器访问的 Host 自动推导；反代 https 终止、或浏览器走内网而 Hermes 走公网时显式设置，如 `https://news.example.com` |
+| `LLM_FALLBACK_MODELS` | 未设置 | 备用模型，英文逗号分隔。主模型 429/503/401 时按顺序顺延，总尝试次数不变 |
+| `LLM_EXTRA_HEADERS` | 未设置 | 网关自定义请求头（JSON 对象字符串），如 `{"x-9router-token-saver":"off"}` |
 
 ### 配置文件（一般不用改）
 
@@ -119,6 +125,7 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | 配置项 | 默认 | 作用 |
 | --- | --- | --- |
 | `schedule.daily_report_time` | `08:00` | **前一日**日报的定稿时间 |
+| `schedule.brief_time` | `06:00` | 早报制作时间（按 `/brief` 的流水线配置精选并存档） |
 | `schedule.fetch_interval_hours` | `2` | 抓取 / 处理间隔（小时） |
 | `schedule.fetch_cron` / `process_cron` | 空 | 填了就改用 cron（如 `"0 7 * * *"`）每天固定时刻跑，留空则按间隔 |
 | `fetcher.max_age_days` | `14` | 只收最近 N 天发布的内容。挡掉「一次返回整个历史」的归档型 feed |
@@ -138,13 +145,14 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 ---
 
-## 外观：默认风格与 AIHOT 皮肤
+## 外观：科技风格（默认）与经典风格
 
-顶栏的 **✦** 按钮在**默认风格**与 **AIHOT 风格皮肤**之间切换，偏好存在浏览器
-`localStorage`，刷新与翻页都保持。AIHOT 皮肤下侧栏底部还有「换回默认风格」按钮，
-以及「深色 / 跟随系统 / 浅色」三态切换。
+顶栏的 **✦** 按钮在**科技风格**（默认）与**经典风格**之间切换，偏好存在浏览器
+`localStorage`（只存显式的 `classic`，未设置 = 科技风格），刷新与翻页都保持。
+科技风格下侧栏底部还有「换回经典风格」按钮，以及「深色 / 自适应 / 浅色」三态切换
+——**自适应为默认**：按电脑时间自动切换（19:00~07:00 深色，其余浅色）。
 
-| | 默认风格 | AIHOT 皮肤 |
+| | 经典风格 | 科技风格（默认） |
 | --- | --- | --- |
 | 桌面导航 | 顶部横栏 + 搜索框 | 左侧固定侧栏（180px），搜索框在内容区右上角 |
 | 移动端 | 顶栏 + 汉堡菜单 | 顶栏（48px）+ 底部标签栏 |
@@ -154,11 +162,11 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 两条硬性约束：
 
-- **默认皮肤零影响**：皮肤的全部 CSS 选择器都锁在 `html[data-skin="aihot"]` 下
+- **经典风格零影响**：科技风格的全部 CSS 选择器都锁在 `html[data-skin="aihot"]` 下
   （`app/web/templates/_skin_aihot.css`，走 `/skin/aihot.css` 强缓存），
-  新壳层元素默认 `display:none`；切换按钮对默认皮肤用户不可见、不加载皮肤样式之外的任何东西。
+  新壳层元素默认 `display:none`；经典风格不加载皮肤样式之外的任何东西。
 - **功能完全一致**：双语切换、早报浮层、重新获取、悬浮跳转条、收藏等全部照常，
-  皮肤只改样式不改行为。服务端不渲染 `data-skin`（测试与爬虫拿到的永远是默认皮肤）。
+  皮肤只改样式不改行为。服务端不渲染 `data-skin`（测试与爬虫拿到的永远是经典风格标记）。
 
 ---
 
@@ -170,7 +178,9 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
   **就地改名、启停、删除**（软删除，可在页面底部撤回，已入库文章的来源不会丢），全部走
   `fetch` 局部刷新，不整页重载。语言默认「**自适应**」，也可以对某个源固定中文 / 英文。
 - **`/settings` 模型设置**：先点厂商预设自动填 base 与模型，再粘 Key。Key 不进 HTML，
-  点眼睛才向 `/settings/key` 取明文。保存前会真发一次请求测连通性，不通不存。下方是
+  点眼睛才向 `/settings/key` 取明文。模型可点「**读取模型**」从 `{base}/models` 拉取
+  可用列表（带过滤，点一条填入）；网关不支持或读不到就手动输入。保存前会真发一次请求
+  测连通性（**主模型失败会自动试备用模型**），不通不存。下方是
   Token 用量（按天）与调用日志，都带分页。宽屏下两栏并排 + 日志区随视口伸缩，一屏放得下。
 - **`/rss-guide` RSS 说明**：订阅地址、复制按钮、订阅步骤与最近日报；顶栏的 `RSS` 指向它，
   `/rss` 仍提供原始 XML。
@@ -256,7 +266,7 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 `/reports` 用站点主题样式（两种皮肤都跟随）渲染聚合数据，**不引图表库** ——
 条形图/趋势柱/时段热力都是 CSS 画的，深浅色自动适配。时间范围可选近 7/14/30/90 天。
 
-![数据报告（AIHOT 皮肤）](docs/screenshots/reports-aihot.png)
+![数据报告（科技风格）](docs/screenshots/reports-aihot.png)
 
 - **KPI 卡**：收录文章 / 特别关注 / 日均条数 / 处理完成率 / 中文覆盖 / 平均评分
 - **每日收录趋势**：每天一根柱（金色柱 = 当天有特别关注命中），点柱看当天明细
@@ -265,6 +275,79 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 **每个元素都能下钻**：点分类条、标签、时段柱、评分档、趋势柱都会进入
 `/reports/breakdown`，按该维度列出文章明细（标题 / 来源 / 分类 / 标签 / 时间 / 评分，
 星标文章带 ★），明细里再点进文章正文。
+
+---
+
+## 早报（精选 TOP N · 每天 06:00 自动制作）
+
+`/brief` 是一条**流水线**：每个节点进产出，节点有类型：
+
+![早报配置（科技风格）](docs/screenshots/brief.png)
+
+- **新闻节点**：从文章流精选（条数 + 分类 / 主题 / 标签 / 关键词），产出长图；
+- **文字节点**：固定文字卡（标题 + 正文，如编者按），产出长图；
+- **天气节点**：填城市（可多个），自动拉取实时天气（Open-Meteo，免费无 Key），
+  生成 emoji + Markdown 文案：天气、温度区间、降水概率、穿衣提示、大风/台风提醒。
+  **纯文本推送**（早安问候 + 天气 + 穿衣建议直接发手机，不占一张图）——
+  预览区给「复制文字」，`/api/brief/image` 对它返回 404。
+
+节点可**拖动排序 / 上移下移 / 启用停用 / 删除**（停用的节点不进产出但保留
+配置），点击节点在弹窗里编辑（新闻节点两栏宽窗，候选不再一长条）；
+右侧预览用 tab 切换各节点，长图节点可「预览长图」并上一张 / 下一张翻页
+（翻页自动跳过天气节点）。空节点会给出
+**明确原因**（如「时间范围内有 34 篇已处理文章，但没有一篇同时满足本节点
+条件（分类：论文）」），不是一片空白。历史早报在页内弹窗查看（可复制成稿），
+所有弹窗支持 **Esc 关闭**。全局还有时间范围、排除词、只看特别关注、组内排序。
+**新闻内容直接继承每篇文章处理阶段写好的早报片段**（`Article.brief_zh`），
+拼装成稿不再调用模型 —— 零额外 LLM 成本。
+
+- **每天 06:00 自动制作并存档**（`schedule.brief_time`），成品在配置页
+  「历史早报」里按天回看；「立即生成早报」按钮可随时手动出一份；
+- **微信长图**：预览区每个长图节点一个「预览长图」按钮，Canvas 渲染 1080px 宽的
+  PNG（标题 36px / 正文 30px，微信里点开直接读），支持上/下一张与下载；
+  服务端同款渲染在 `/api/brief/image?section=N`（Hermes 直发用）；
+- 输出：`/brief.txt`（纯文本）、`/brief.md`（Markdown）、`/api/brief`
+  （JSON，每个节点带 `text` 单节成稿，`?date=` 读某天成品）、
+  `/api/brief/issue?date=`（成品存档）；
+- 配置存 `brief_config` 表（分节存 JSON），成品存 `brief_issues` 表；
+- 早报片段由处理流水线生成（`backfill_briefs`，素材不足时自动带上正文），
+  取值顺序：AI 片段 → 中文导读 → 推荐理由 → 正文节选 → 中文标题；
+  **没有可读片段的条目不进早报**（宁缺毋滥，不推占位符）。
+
+---
+
+## Agent 接入
+
+`/agent` 是接入说明页，四种方式读同一份数据（热点、日报、早报、搜索），
+**全部匿名只读，无需注册与 API Key**：
+
+![Agent 接入（科技风格）](docs/screenshots/agent.png)
+
+| 方式 | 入口 | 说明 |
+| --- | --- | --- |
+| Agent Skill | `/skill.md` | 支持 Agent Skills 的工具（Claude Code、Codex、Gemini CLI）把「请安装 …/skill.md」发给 Agent 即可 |
+| MCP | `scripts/smtm_mcp.py` | 零依赖 stdio MCP server，5 个工具：`get_brief` / `list_articles` / `get_article` / `get_daily_report` / `search_articles` |
+| REST | `/api/*` | `/api/brief`、`/api/articles`、`/api/search`、`/api/sources` 等，GET + JSON |
+| 早报 | `/brief.txt` `/brief.md` | 精选 TOP N 的成稿文本，Agent 问「今天有什么重要的事」时读它最快 |
+
+Hermes 推送提示词（`/agent` 页可整段复制）会把每个节点的 `text` 一节一条发到
+微信，长图节点再补一张 `/api/brief/image?section=N`；**天气节点只发文字不发图**。
+
+给大模型的站点说明书在 `/llms.txt`（llmstxt.org 约定格式）。
+
+MCP 配置示例（Claude Desktop / Claude Code / Cursor 等）：
+
+```json
+{
+  "mcpServers": {
+    "show-me-the-money": {
+      "command": "python3",
+      "args": ["/path/to/show-me-the-money/scripts/smtm_mcp.py"],
+      "env": { "SMTM_BASE": "http://localhost:8000" }
+    }
+  }
+}
+```
 
 ---
 
@@ -278,11 +361,13 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
               ├ 合并跨源重复（同题判定交给大模型）
               ├ 删掉站点通栏开头
               ├ 补译上一轮没译成的（先补标题与导读，再翻正文；限流失败的按重试次数少的优先轮换）
-              ├ 补封面图 + 补正文内联配图的位置
+              ├ 补封面图 + 补正文内联配图的位置（下载到本地 /img/）
               └ 刷新「今天」这份日报，首页实时可见
+每 30 分钟  补译任务独立轮转（不等整轮处理，积压清得更快）
+每天 06:00  按 /brief 的流水线配置制作早报并存档（零额外 LLM 调用）
 每天 08:00  定稿「昨天」的日报（昨天已不再变化，所以出的是完整版）
 启动时      补齐最近 7 天里缺失的日报（停机几天再起来也不会留空洞）
-每天 03:00  清理超过保留期（默认 30 天）的数据
+每天 03:00  清理超过保留期（默认 30 天）的数据 + 孤儿配图对账
 ```
 
 几个容易被忽略但很关键的设计：
@@ -357,7 +442,18 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `/trash` | 回收站：恢复 / 批量永久删除 / 清空；显示「为什么被删」 |
 | `/reports` | 数据报告：KPI + 趋势/分布图表（纯 CSS），每个元素可下钻 |
 | `/reports/breakdown?dimension=&value=&days=` | 报告下钻明细：分类/标签/来源/时段/评分档/日期/关注 |
-| `/settings` | 模型设置：厂商预设一键填、API Key 眼睛/复制、连通性测试、用量与调用日志分页 |
+| `/brief` | 早报配置：分节（每节一张微信长图）+ 分类/主题/标签/关键词，实时预览 + 历史成品 |
+| `/api/brief/generate` | POST：立即生成一份早报并存档 |
+| `/api/brief?date=` | 读某天的成品存档（不带 date 是实时预览） |
+| `/api/brief/issue?date=` | 成品存档 JSON |
+| `/brief.txt` `/brief.md` | 早报纯文本 / Markdown（推送、复制、Agent 直接用） |
+| `/api/brief` | 早报 JSON（配置 + 条目 + 两种渲染文本） |
+| `/agent` | Agent 接入页：Skill / MCP / REST / 早报 四种方式的安装说明 |
+| `/llms.txt` | 站点说明书（llmstxt.org 约定，给大模型读的接口清单） |
+| `/skill.md` | Agent Skill 说明文件（可安装到 Claude Code / Codex / Gemini CLI） |
+| `/api/search?q=&scope=` | 搜索 JSON（与站内搜索同一口径） |
+| `/api/sources` | 信源列表 JSON |
+| `/settings` | 模型设置：厂商预设一键填、API Key 眼睛/复制、**读取模型列表**、连通性测试（自动试备用模型）、用量与调用日志分页 |
 | `/rss` | 最新日报的 RSS，每篇文章一个条目；`?date=` 可指定某一天 |
 | `/rss-guide` | 站内 RSS 订阅说明（订阅地址、复制按钮、内容说明与最近日报） |
 | `/api/articles/{id}/refetch` | POST：重抓这篇原文并按当前配置重跑 AI 处理（后台任务，立刻返回 running） |
@@ -376,7 +472,7 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 
 - **顶部分类 tab**：全部 / 一手 / 模型 / 产品 / 行业 / 论文 / 教程 / 观点，
   定义在 `config/default_topics.yaml`，增删分类不用改代码。点 tab 走 `/?cat=xxx`。
-- **搜索**：右上角搜索框（默认风格在顶栏；AIHOT 皮肤在内容区右上角），
+- **搜索**：右上角搜索框（经典风格在顶栏；科技风格在内容区右上角），
   按 <kbd>/</kbd> 随时聚焦（自动挑当前可见的那个）。搜标题、摘要、速览、推荐理由、主题；
   搜索页可切「最新（标题与摘要）」/「全文相关」，分类 tab 与搜索范围互不覆盖。
   走 `/search?q=xxx`；**清空（×）回首页**，空关键词访问 `/search` 也重定向回首页。
@@ -468,7 +564,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 41 个文件零告警、418 个测试全绿。
+当前状态：`ruff` 无告警、`mypy` 47 个文件零告警（`app/config.py` 两处 pydantic-settings 存根误报除外）、490 个测试全绿。
 
 ---
 
@@ -481,8 +577,9 @@ ruff check . && mypy && pytest --cov=app
 - 文章标题/摘要来自第三方 RSS，在网页和 RSS 输出里都经过转义，不会造成 HTML 注入。
 - 搜索框输入会拼进 SQL `LIKE`，通配符已转义，不存在注入；搜索不出网关、不写任何数据。
 - 收藏只存在浏览器 localStorage，**不会上传**；清浏览器数据就没了。
-- **配图是原站外链**：页面用 `<img>` 直接引用第三方图片地址，浏览器会把 Referer 发给图片站。
-  介意的话用反向代理缓存图片，或设 `media.enabled: false` 彻底不取图。
+- **配图会本地化**：文章配图下载到 `data/img/`（按内容哈希命名），页面走自家 `/img/` 展示，
+  不再看原站脸色（防盗链 403 的站也能正常显示）；下载时带原文章页 Referer 过防盗链。
+  想彻底不取图可设 `media.enabled: false`。
 - 抓文章页取图时只发普通 GET、带明确 User-Agent、每轮限量 `media.batch_size` 篇；关掉
   `media.enabled` 就完全不请求。
 
@@ -545,6 +642,9 @@ python scripts/repair_telegraphic.py              # 清掉被压成电报体的�
 
 **「服务状态」点开是什么？**
 是站点样式的状态页 `/status`（版本、信源/文章/日报数、今日抓取与待处理、数据质量）。
+
+![服务状态（科技风格）](docs/screenshots/status-default.png)
+
 原来顶栏那个「⋯」指向 `/api/health` —— 浏览器会把它当 JSON 文件打开（一屏黑底），
 现在 JSON 接口保留给脚本与监控，人看的是 `/status`。
 
@@ -563,10 +663,11 @@ python scripts/repair_telegraphic.py              # 清掉被压成电报体的�
 | 换模型 | 网页 `/settings`（保存即生效，不用重启）；容器默认值仍看 `.env` 的 `LLM_MODEL` |
 | 改调度 | `config/settings.yaml` |
 | 改提示词（含速览写法） | `config/default_prompts.yaml` |
+| 早报分节与筛选 | 网页 `/brief`（流水线节点：新闻/文字/天气，存 `brief_config` 表） |
 | 报告加新维度 | `app/web/reports.py` 的 `collect_report` / `_breakdown_rows`，模板 `reports.html` |
 | 邮件推送 | 新增 `app/notify/email.py`，在 `app/scheduler.py` 挂任务 |
-| 事件聚类 | 新增 `app/ai/cluster.py`，在 `process_pending` 之后调用 |
-| MCP 接口 | 新增 `app/web/mcp.py` |
+| 事件聚类 | `app/ai/cluster.py`（已有；在 `process_pending` 之后由 `run_merge_job` 调用） |
+| MCP 接口 | `scripts/smtm_mcp.py`（已有；零依赖 stdio server，5 个工具） |
 
 扩展点都在边缘，不需要动核心抓取 / 处理 / 日报逻辑。
 
@@ -577,26 +678,34 @@ app/
   main.py          FastAPI 入口（工厂函数 create_app）
   config.py        配置加载与两项必填校验
   db.py            连接、建表、信源同步
-  models.py        Article / Source / DailyReport / KeywordRule · visible_article_conditions
+  models.py        Article / Source / DailyReport / KeywordRule / BriefConfig / BriefIssue
+                    · visible_article_conditions
   schemas.py       接口出参
   fetcher/         rss.py 抓取 · dedup.py 去重 · pipeline.py 主流程与过滤
                     content.py 正文全文抽取 · images.py og:image 补图
-                    keywords.py 关键词规则（屏蔽 / 特别关注）的匹配与执行
+                    media_store.py 配图本地化（下载 / 尺寸校验 / 孤儿对账）
+                    guard.py 元数据地址拦截 · keywords.py 关键词规则（屏蔽 / 特别关注）
   ai/              client.py 纯 HTTP 客户端 · prompts.py · processor.py 处理与降级
-  report/          generator.py 日报生成与时间窗口
+                    cluster.py 同题合并（跨源重复）
+  report/          generator.py 日报生成与时间窗口 · brief.py 早报精选与分节
+                    weather.py 天气文案（Open-Meteo）· longimage.py 服务端长图（Pillow）
   web/             routes.py 页面（热点流/单篇速览/归档/搜索/状态）· sources.py 信源管理
-                    settings.py 模型设置与用量 · api.py JSON（含重新获取任务）· rss.py 订阅
-                    keywords.py 关键词管理页与接口 · trash.py 回收站 · reports.py 数据报告
+                    settings.py 模型设置（含读取模型列表）与用量 · api.py JSON（含重新获取任务）
+                    rss.py 订阅 · keywords.py 关键词管理页与接口 · trash.py 回收站
+                    reports.py 数据报告 · brief.py 早报配置/输出 · agent.py llms.txt/skill.md/接入页
                     templates/ Jinja2；_skin_aihot.css 皮肤 · _icons.html 皮肤图标
+                    static/ 站点图标（Z 字母，svg/ico/png）
   utils/           logger.py · text.py（含 looks_telegraphic 质检）
   fetcher/lang.py  正文的语种判定（自适应语言用）
 config/            默认信源 / 分类 / 提示词 / 调度
 tests/             test_config · test_fetcher · test_ai · test_report · test_api
+                    test_brief（早报 / 天气 / 长图 / Agent 接入）
                     test_media（配图抽取）· test_content（正文抽取）
                     test_search（搜索与分类过滤）· test_migration（老库补列与自愈）
                     test_cluster（同题合并）· test_media_store · test_skin（皮肤）
                     test_manage（回收站 / 关键词 / 报告）
 scripts/           init_check.py 启动自检（--ping 测 LLM 与翻译质量、--fetch 跑一次抓取）
+                    smtm_mcp.py MCP server（零依赖 stdio）
                     cleanup_native_zh.py 中文原文的英译残留清理
                     repair_half_translated.py 半截译文的中文章节清理
                     repair_telegraphic.py 被网关压成电报体的文案/译文清理
