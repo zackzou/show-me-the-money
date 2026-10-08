@@ -3,11 +3,28 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from sqlalchemy import DateTime, ForeignKey, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 from app.utils.text import now_local
+
+
+def visible_article_conditions() -> tuple[Any, ...]:
+    """「能出现在列表/日报/搜索/RSS」的公共过滤条件。
+
+    抽出来是防漏：展示口径散在七八个查询里，加一列（如 ``deleted_at``）
+    时挨个补，漏一个就会让回收站里的文章从那个入口漏出来。
+    新查询一律从这里取，加新条件也只改一处。
+
+    刻意**不包含** ``relevance`` / 状态 / 时间窗 —— 那些各查询不同；
+    这里只管「这条内容该不该被读者看到」。
+    """
+    return (
+        Article.duplicate_of.is_(None),
+        Article.deleted_at.is_(None),
+    )
 
 
 class Base(DeclarativeBase):
@@ -102,9 +119,43 @@ class Article(Base):
     # 降级原因（LLM 不可用之类）。页面上要能说清「为什么这篇是英文」，
     # 排查时也要一眼看出是数据问题还是上游问题
     degraded_reason: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    # 特别关注：标题/摘要/正文命中「关注关键词」时置 1。列表页优先排序、
+    # 卡片上加「关注」标记；查询时是热路径（首页/日报/搜索都过这一列），
+    # 所以建索引。
+    starred: Mapped[int] = mapped_column(Integer, nullable=False, default=0, index=True)
+    # 软删除（回收站）：非空表示用户手动删过，列表/日报/搜索/RSS 都不再展示，
+    # 详情页仍可直达（和 duplicate_of 同一套展示口径）。保留行是为了让
+    # 「恢复」只是一次 UPDATE，不用在删除时把正文/译文整篇搬走。
+    deleted_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
 
     source: Mapped[Source | None] = relationship(back_populates="articles")
+
+
+class KeywordRule(Base):
+    """关键词规则：屏蔽（block）或特别关注（star）。
+
+    为什么不用配置文件：屏蔽词是**随热点演化**的（这周屏蔽 Muse，下周可能
+    换成别的），写进 YAML 每次都要重启才生效；而且用户希望看到每条规则的
+    「命中计数」，配置文件承载不了这种状态。
+
+    ``kind``：
+      - ``block``：抓取入库前拦截，标题/摘要命中即**不入库**（默认行为）；
+        正文命中在入库后判定（正文要抓回来才有），命中即软删到回收站。
+      - ``star``：入库后判定，标题/摘要/正文命中即置 ``Article.starred=1``，
+        列表优先排序并加标记。
+    ``hits`` 是累计命中计数（屏蔽+关注各算各的），页面用来展示「这条规则拦了
+    多少 / 标了多少」，也方便判断一条规则是不是写得太宽泛（拦了一大片）。
+    """
+
+    __tablename__ = "keyword_rules"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    keyword: Mapped[str] = mapped_column(String(100), nullable=False, index=True)
+    kind: Mapped[str] = mapped_column(String(10), nullable=False, default="block")
+    hits: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    enabled: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=now_local)
 
 
 class DailyReport(Base):

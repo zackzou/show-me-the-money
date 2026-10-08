@@ -7,11 +7,14 @@
 **页内就能读完，不用跳原站**：系统把原文正文抓回来，列表页给「速览 + 推荐理由 + 相关度评分」，
 点进单篇页是**完整正文**（左栏来源信息，右栏逐段正文）—— 刷完热点不用来回切标签页。
 
+![首页（AIHOT 皮肤）](docs/screenshots/home-aihot.png)
+
 - 必填配置只有 `LLM_API_*` + `RESEARCH_TOPIC`，其余全部内置默认值
 - 默认信源池、分类、提示词、调度、信源过滤规则都在 `config/*.yaml`，改配置不用改代码
 - 不绑定 OpenAI：任意 OpenAI 兼容接口、本地 Ollama 都可以（含返回 SSE 流的网关）
 - 单机轻量：Python + FastAPI + SQLite，一个 `docker compose up -d` 跑起来
 - **两套外观**：默认风格 + 一键切换的 AIHOT 风格皮肤（布局/配色/动效，纯前端偏好）
+- **管理套件**：关键词屏蔽与特别关注、回收站（软删除可恢复）、数据报告（可下钻的趋势图）
 
 ---
 
@@ -22,6 +25,9 @@
 - [配置](#配置)
 - [外观：默认风格与 AIHOT 皮肤](#外观默认风格与-aihot-皮肤)
 - [页面与语言策略](#页面与语言策略)
+- [关键词屏蔽与特别关注](#关键词屏蔽与特别关注)
+- [回收站](#回收站)
+- [数据报告](#数据报告)
 - [它是怎么跑的](#它是怎么跑的)
 - [接口一览](#接口一览)
 - [预览产出长什么样](#预览产出长什么样)
@@ -196,17 +202,77 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 - **重新获取**（AI 导读行右侧）：重抓原文 + 按当前 AI 配置重跑处理。导读没更新、译文缺了、
   或上次处理时 LLM 恰好限流，用它手动救回来。原文换了以后旧的摘要/译文/章节/标签会先作废，
   不会留下「新正文配旧导读」。过程有转圈与完成/失败提示，失败会给出原因。
+  **点击先弹确认**：这一步花 LLM 调用、且会作废已有内容，误点代价大。
+- **删除**（重新获取旁边）：把文章**移入回收站**（软删除，可恢复），同样先弹确认。
+  删除后文章从列表 / 日报 / 搜索 / RSS 全部消失，只出现在 `/trash`。
 - **阅读百分比与预计时长**：右侧悬浮条按**正文**位置算进度（不是整页），滚到底锁定 100%，
   免得懒加载图片加载完把百分比拽回去 92%。正文不足 1.4 屏时不显示这根条。
 - **段落横幅**：小标题做成 20px / 字重 700 / 实色底 / 6px 色条，明显大于 18px 的正文。
 
 ---
 
+## 关键词屏蔽与特别关注
+
+在 `/keywords` 页管理两类关键词规则，**改完即时生效，不用重启**：
+
+![关键词管理](docs/screenshots/keywords-default.png)
+
+| 类型 | 行为 | 生效时机 |
+| --- | --- | --- |
+| **屏蔽**（block） | 命中即**不收集** | 标题/摘要在入库前拦；只有正文才含关键词的，抓回正文后移入回收站 |
+| **特别关注**（star） | 命中即**加星标 + 列表优先排序** | 标题/摘要/正文任一命中（正文抓回后判定） |
+
+匹配口径：
+
+- **英文词按词边界**（`(?<![A-Za-z0-9])…(?![A-Za-z0-9])`）：屏蔽 `Muse` 不会误伤
+  `museum` / `amuse`；`AI` 能命中 `AI Agent`。大小写不敏感。
+- **中文直接包含匹配**（中文没有词边界概念）。
+- 中英双语文章两边都查：关键词出现在英文原标题里也算命中（读者看的是中文译文）。
+
+页面上有**统计卡**（规则数 / 已屏蔽文章 / 已关注文章 / 累计命中）与**每条规则的命中计数**
+（命中数倒序，拦得最多的排前面），方便判断一条规则是不是写得太宽泛。
+规则存在 `keyword_rules` 表里（网页可改），不是配置文件 —— 屏蔽词随热点演化，
+且「命中计数」这种状态配置文件承载不了。
+
+---
+
+## 回收站
+
+`/trash` 管理被删除的文章：
+
+- **单篇删除**：文章详情页的「删除」按钮（先确认），软删除（只打 `deleted_at` 时间戳，
+  不搬正文/译文/图片），**恢复**是一次 UPDATE。
+- **回收站页**：全选 / 恢复选中 / 永久删除选中 / 清空回收站；每条显示来源、分类、
+  **为什么被删**（手动删除 / 关键词屏蔽：xxx）与删除时间。
+- **永久删除**才真的 `DELETE` 行，并顺手做一次孤儿图对账（清掉不再被任何文章引用的本地图片）。
+
+删除后的可见性由 `models.visible_article_conditions()` 统一把关（列表 / 日报 / 搜索 / RSS
+共用同一组条件），加新展示入口时从这里取条件，不会漏。
+
+---
+
+## 数据报告
+
+`/reports` 用站点主题样式（两种皮肤都跟随）渲染聚合数据，**不引图表库** ——
+条形图/趋势柱/时段热力都是 CSS 画的，深浅色自动适配。时间范围可选近 7/14/30/90 天。
+
+![数据报告（AIHOT 皮肤）](docs/screenshots/reports-aihot.png)
+
+- **KPI 卡**：收录文章 / 特别关注 / 日均条数 / 处理完成率 / 中文覆盖 / 平均评分
+- **每日收录趋势**：每天一根柱（金色柱 = 当天有特别关注命中），点柱看当天明细
+- **分类分布 / 来源分布 / 评分分布 / 发布时段分布 / 标签 Top 20 / 关注命中 / 日报定稿**
+
+**每个元素都能下钻**：点分类条、标签、时段柱、评分档、趋势柱都会进入
+`/reports/breakdown`，按该维度列出文章明细（标题 / 来源 / 分类 / 标签 / 时间 / 评分，
+星标文章带 ★），明细里再点进文章正文。
+
+---
+
 ## 它是怎么跑的
 
 ```
-每 2 小时   抓取 RSS → 时间窗/条数过滤 → 抽正文配图 → 去重 → 入库（pending）
-每 2 小时   抓取正文全文（content_job，必须跑在处理之前）
+每 2 小时   抓取 RSS → 时间窗/条数过滤 → 抽正文配图 → 去重 → 关键词屏蔽拦截 → 入库（pending）
+每 2 小时   抓取正文全文（content_job，必须跑在处理之前）→ 应用关键词规则（正文级屏蔽/关注标记）
 每 2 小时   相关度判断+评分 → 中文摘要 → 速览 → 推荐理由 → 分类+主题 → 标签（失败降级）
               ├ 英文信源顺手存档中文版：中文标题 / 中文导读 / 中文正文
               ├ 合并跨源重复（同题判定交给大模型）
@@ -284,13 +350,22 @@ python -m app.main                            # 等价于 uvicorn app.main:creat
 | `/archive` | 历史日报列表 |
 | `/api/articles?date=YYYY-MM-DD` | 当天文章 JSON（默认北京时间今天） |
 | `/api/reports` `/api/reports/{date}` | 日报列表 / 指定日报（Markdown + HTML 全文） |
-| `/health` `/api/health` | 健康检查（含信源数、文章数、日报数、调研方向） |
+| `/health` `/api/health` | 健康检查 JSON（脚本与监控用）；人看的版本在 `/status` |
+| `/status` | 服务状态页（站点样式）：版本、信源/文章/日报数、今日抓取与待处理、数据质量 |
 | `/sources` | 信源管理：试抓并添加、就地改名、启停、软删除与撤回；启用中/已停用分 tab，每页 10 条 |
+| `/keywords` | 关键词管理：屏蔽（不收集）与特别关注（加星标 + 优先排序），带统计与命中计数 |
+| `/trash` | 回收站：恢复 / 批量永久删除 / 清空；显示「为什么被删」 |
+| `/reports` | 数据报告：KPI + 趋势/分布图表（纯 CSS），每个元素可下钻 |
+| `/reports/breakdown?dimension=&value=&days=` | 报告下钻明细：分类/标签/来源/时段/评分档/日期/关注 |
 | `/settings` | 模型设置：厂商预设一键填、API Key 眼睛/复制、连通性测试、用量与调用日志分页 |
 | `/rss` | 最新日报的 RSS，每篇文章一个条目；`?date=` 可指定某一天 |
 | `/rss-guide` | 站内 RSS 订阅说明（订阅地址、复制按钮、内容说明与最近日报） |
 | `/api/articles/{id}/refetch` | POST：重抓这篇原文并按当前配置重跑 AI 处理（后台任务，立刻返回 running） |
 | `/api/articles/{id}/refetch-status` | GET：上面那个任务的状态 `idle` / `running` / `ok` / `failed`（带原因） |
+| `/api/articles/{id}/delete` | POST：软删除（移入回收站） |
+| `/api/articles/{id}/restore` | POST：从回收站恢复 |
+| `/api/trash/purge` | POST：`ids` 为空清空回收站，否则永久删除选中的（含孤儿图对账） |
+| `/keywords` POST / `/keywords/{id}/toggle` / `/keywords/{id}/delete` | 关键词规则的增/启停/删 |
 | `/docs` | 自动生成的 OpenAPI 文档 |
 
 ---
@@ -393,7 +468,7 @@ pip install -r requirements-dev.txt   # 已包含 requirements.txt
 ruff check . && mypy && pytest --cov=app
 ```
 
-当前状态：`ruff` 无告警、`mypy` 37 个文件零告警、405 个测试全绿。
+当前状态：`ruff` 无告警、`mypy` 41 个文件零告警、418 个测试全绿。
 
 ---
 
@@ -455,6 +530,27 @@ python scripts/repair_telegraphic.py              # 清掉被压成电报体的�
 
 **想控制 API 花费**
 把 `ai.batch_size` 调小、调大 `fetch_interval_hours`、删掉 `config/default_sources.yaml` 里用不到的源。相关度判断是每篇 1 次调用，摘要 + 标签各 1 次。
+用 `/keywords` 的**屏蔽词**从源头拦掉不想收的内容，比收进来再处理省调用。
+
+**屏蔽词加上了，为什么还有相关内容？**
+三种可能：① 规则是在文章入库**之后**才加的，存量文章需要等下一轮 `content_job`
+（最多 2 小时，或重启服务立即触发）才会应用；② 命中的是**正文**里的词，
+正文抓回来才判定（标题/摘要级在入库时就拦了）；③ 词边界不匹配 ——
+英文按词边界匹配，`Muse` 不会命中 `museum`，如果你确实想连 `museum` 一起拦，
+把词写全（`museum`）或换用中文词。
+
+**关注的文章为什么没排在前面？**
+`starred` 只在**同一天内**优先排序（列表按天分组），跨天的顺序仍是时间倒序。
+另外关注规则同样只对「已抓正文」的文章生效。
+
+**「服务状态」点开是什么？**
+是站点样式的状态页 `/status`（版本、信源/文章/日报数、今日抓取与待处理、数据质量）。
+原来顶栏那个「⋯」指向 `/api/health` —— 浏览器会把它当 JSON 文件打开（一屏黑底），
+现在 JSON 接口保留给脚本与监控，人看的是 `/status`。
+
+**误删了文章怎么办？**
+去 `/trash`（回收站）点「恢复」。删除是软删除，正文/译文/图片都没动；
+只有「永久删除」和「清空回收站」才真的清掉。
 
 ---
 
@@ -463,9 +559,11 @@ python scripts/repair_telegraphic.py              # 清掉被压成电报体的�
 | 想做的事 | 改哪里 |
 | --- | --- |
 | 新增/停用信源 | 网页 `/sources`（推荐，改完即时生效）；批量默认值改 `config/default_sources.yaml` |
+| 屏蔽 / 关注关键词 | 网页 `/keywords`（推荐，即时生效）；规则存 `keyword_rules` 表 |
 | 换模型 | 网页 `/settings`（保存即生效，不用重启）；容器默认值仍看 `.env` 的 `LLM_MODEL` |
 | 改调度 | `config/settings.yaml` |
 | 改提示词（含速览写法） | `config/default_prompts.yaml` |
+| 报告加新维度 | `app/web/reports.py` 的 `collect_report` / `_breakdown_rows`，模板 `reports.html` |
 | 邮件推送 | 新增 `app/notify/email.py`，在 `app/scheduler.py` 挂任务 |
 | 事件聚类 | 新增 `app/ai/cluster.py`，在 `process_pending` 之后调用 |
 | MCP 接口 | 新增 `app/web/mcp.py` |
@@ -479,14 +577,16 @@ app/
   main.py          FastAPI 入口（工厂函数 create_app）
   config.py        配置加载与两项必填校验
   db.py            连接、建表、信源同步
-  models.py        Article / Source / DailyReport
+  models.py        Article / Source / DailyReport / KeywordRule · visible_article_conditions
   schemas.py       接口出参
   fetcher/         rss.py 抓取 · dedup.py 去重 · pipeline.py 主流程与过滤
                     content.py 正文全文抽取 · images.py og:image 补图
+                    keywords.py 关键词规则（屏蔽 / 特别关注）的匹配与执行
   ai/              client.py 纯 HTTP 客户端 · prompts.py · processor.py 处理与降级
   report/          generator.py 日报生成与时间窗口
-  web/             routes.py 页面（热点流/单篇速览/归档/搜索）· sources.py 信源管理
+  web/             routes.py 页面（热点流/单篇速览/归档/搜索/状态）· sources.py 信源管理
                     settings.py 模型设置与用量 · api.py JSON（含重新获取任务）· rss.py 订阅
+                    keywords.py 关键词管理页与接口 · trash.py 回收站 · reports.py 数据报告
                     templates/ Jinja2；_skin_aihot.css 皮肤 · _icons.html 皮肤图标
   utils/           logger.py · text.py（含 looks_telegraphic 质检）
   fetcher/lang.py  正文的语种判定（自适应语言用）
@@ -495,11 +595,12 @@ tests/             test_config · test_fetcher · test_ai · test_report · test
                     test_media（配图抽取）· test_content（正文抽取）
                     test_search（搜索与分类过滤）· test_migration（老库补列与自愈）
                     test_cluster（同题合并）· test_media_store · test_skin（皮肤）
+                    test_manage（回收站 / 关键词 / 报告）
 scripts/           init_check.py 启动自检（--ping 测 LLM 与翻译质量、--fetch 跑一次抓取）
                     cleanup_native_zh.py 中文原文的英译残留清理
                     repair_half_translated.py 半截译文的中文章节清理
                     repair_telegraphic.py 被网关压成电报体的文案/译文清理
-docs/              样例日报（Markdown / HTML）
+docs/              样例日报（Markdown / HTML）· screenshots/（README 截图）
 ```
 
 ## License

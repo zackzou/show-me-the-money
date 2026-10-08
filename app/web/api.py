@@ -19,7 +19,7 @@ from app.db import get_session, session_scope
 from app.fetcher.content import _store_body_anchors, count_with_full_text, fetch_article_document
 from app.fetcher.images import count_with_images
 from app.fetcher.media_store import media_dir_for
-from app.models import Article, DailyReport, Source
+from app.models import Article, DailyReport, Source, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.schemas import ArticleDetailOut, ArticleOut, HealthOut, ReportDetail, ReportOut
 from app.utils.text import BRIEF_DIGEST_CHARS as _BRIEF_DIGEST_CHARS
@@ -55,7 +55,7 @@ def list_articles(
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             Article.published_at >= start,
             Article.published_at < end,
         )

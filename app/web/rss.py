@@ -12,7 +12,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_session
-from app.models import Article, DailyReport
+from app.models import Article, DailyReport, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import LOCAL_TZ, now_local, split_tags, strip_markdown
 
@@ -48,7 +48,7 @@ def _day_items(session: Session, date_str: str) -> list[Article]:
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             Article.published_at >= start,
             Article.published_at < end,
         )
@@ -126,8 +126,19 @@ def rss(request: Request, date: str | None = None, session: Session = Depends(ge
                 _rfc822(article.published_at or updated),
             )
         )
-    if not parts:  # 当天没有文章时，至少给出日报本身，别让订阅端空着
-        parts.append(_item(f"日报 · {report.date}", f"{base}/daily/{report.date}", report.content_md, _rfc822(updated)))
+    if not parts:
+        # 当天没有可展示的文章（新的一天还没内容、或文章都被删/合并了）。
+        # 给一个**只含日期与链接**的条目，不要把 report.content_md 塞进来 ——
+        # 那是生成日报时的快照，里面的文章可能已经被移入回收站，塞进来等于
+        # 从 RSS 这个入口把删掉的文章又漏出去（实测）。
+        parts.append(
+            _item(
+                f"日报 · {report.date}",
+                f"{base}/daily/{report.date}",
+                f"这一天的报道可在站内查看：{base}/daily/{report.date}",
+                _rfc822(updated),
+            )
+        )
 
     xml = (
         '<?xml version="1.0" encoding="UTF-8"?>'

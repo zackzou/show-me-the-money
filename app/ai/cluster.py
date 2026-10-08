@@ -36,7 +36,7 @@ from sqlalchemy.orm import Session
 from app.ai.client import LLMClient, LLMError
 from app.ai.prompts import render_same_story_prompt
 from app.config import PromptsConfig, Settings
-from app.models import Article
+from app.models import Article, visible_article_conditions
 from app.utils.logger import get_logger
 from app.utils.text import now_local, strip_html
 
@@ -195,7 +195,7 @@ def _candidate_articles(session: Session, *, limit: int, window_days: int = PAIR
             .where(
                 Article.relevance == 1,
                 Article.status.in_(("processed", "failed")),
-                Article.duplicate_of.is_(None),
+                *visible_article_conditions(),
                 Article.link.notlike("http://localhost%"),
                 Article.published_at.isnot(None),
             )

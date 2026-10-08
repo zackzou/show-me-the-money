@@ -1,0 +1,225 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">KEYWORDS</div>
+  <h1>关键词</h1>
+  <p class="meta">
+    屏蔽词让命中内容<b>不再收集</b>；特别关注让命中内容<b>优先展示并加星标</b>。
+    改完即时生效，不用重启。
+  </p>
+</div>
+
+{% if notice and notice.text %}
+  <p class="notice {{ notice.kind }}">
+    <span class="ico" aria-hidden="true">{{ '✓' if notice.kind == 'ok' else '!' }}</span>{{ notice.text }}
+  </p>
+{% endif %}
+
+<div class="kw-stats">
+  <div class="kw-stat">
+    <b>{{ stats.block_rules }}</b><span>屏蔽规则</span>
+  </div>
+  <div class="kw-stat">
+    <b>{{ stats.star_rules }}</b><span>关注规则</span>
+  </div>
+  <div class="kw-stat">
+    <b>{{ stats.blocked_articles }}</b><span>已屏蔽文章</span>
+  </div>
+  <div class="kw-stat accent">
+    <b>{{ stats.starred_articles }}</b><span>已关注文章</span>
+  </div>
+  <div class="kw-stat">
+    <b>{{ stats.total_hits }}</b><span>累计命中</span>
+  </div>
+</div>
+
+{# ── 添加表单：两个输入框并排，选择类型后添加 ── #}
+<div class="kw-add">
+  <form class="kw-form" method="post" action="/keywords" id="kw-form">
+    <input type="text" name="keyword" id="kw-input" placeholder="输入关键词，如 Muse、OpenAI、芯片" maxlength="100" autocomplete="off">
+    <select name="kind" id="kw-kind" aria-label="规则类型">
+      <option value="block">屏蔽（不收集）</option>
+      <option value="star">特别关注（优先展示）</option>
+    </select>
+    <button type="submit" class="btn-add">添加</button>
+  </form>
+  <p class="kw-tip">
+    英文关键词按<b>词边界</b>匹配（屏蔽 <code>Muse</code> 不会误伤 <code>museum</code>）；
+    中文直接包含匹配。屏蔽在抓取入库前生效（标题+摘要），正文级命中会在抓回正文后移入回收站。
+  </p>
+</div>
+
+{# ── 屏蔽列表 ── #}
+<section class="sec">
+  <div class="sec-t plain">屏蔽列表
+    <span class="sec-h">命中即不收集（正文级命中会移入回收站）</span>
+  </div>
+  {% if block_rules %}
+    <ul class="kw-list">
+      {% for rule in block_rules %}
+        <li class="kw-row {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
+          <span class="kw-name">{{ rule.keyword }}</span>
+          <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
+          <span class="kw-when">{{ rule.created_at }}</span>
+          <span class="kw-actions">
+            <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
+              {{ '停用' if rule.enabled else '启用' }}
+            </button>
+            <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="empty small">还没有屏蔽词。<span class="empty-note">例：输入 <code>Muse</code> 可以把所有包含 Muse 的新闻拦在门外。</span></div>
+  {% endif %}
+</section>
+
+{# ── 关注列表 ── #}
+<section class="sec">
+  <div class="sec-t plain">特别关注
+    <span class="sec-h">命中即加星标，列表优先排序</span>
+  </div>
+  {% if star_rules %}
+    <ul class="kw-list">
+      {% for rule in star_rules %}
+        <li class="kw-row star {{ '' if rule.enabled else 'off' }}" data-id="{{ rule.id }}">
+          <span class="kw-name"><span class="kw-star" aria-hidden="true">★</span>{{ rule.keyword }}</span>
+          <span class="kw-hits"><b>{{ rule.hits }}</b> 次命中</span>
+          <span class="kw-when">{{ rule.created_at }}</span>
+          <span class="kw-actions">
+            <button type="button" class="mini kw-toggle" data-id="{{ rule.id }}" data-enabled="{{ '1' if rule.enabled else '0' }}">
+              {{ '停用' if rule.enabled else '启用' }}
+            </button>
+            <button type="button" class="mini danger kw-delete" data-id="{{ rule.id }}">删除</button>
+          </span>
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <div class="empty small">还没有关注词。<span class="empty-note">例：输入 <code>OpenAI</code>，相关新闻会在列表最前面并带星标。</span></div>
+  {% endif %}
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .notice { margin:16px 0 0; padding:12px 15px; border-radius:9px; font-size:13.5px;
+            line-height:1.7; border:1px solid var(--line); display:flex; gap:10px;
+            align-items:flex-start; }
+  .notice .ico { width:18px; height:18px; border-radius:50%; flex:none; margin-top:1px;
+                 display:grid; place-items:center; font-size:11px; font-weight:700; color:#fff; }
+  .notice.ok { border-color:rgba(31,138,90,.4); background:rgba(31,138,90,.06); }
+  .notice.ok .ico { background:#1f8a5a; }
+  .notice.warn { border-color:rgba(190,140,20,.45); background:rgba(190,140,20,.08); }
+  .notice.warn .ico { background:#b8873a; }
+
+  /* 统计卡 */
+  .kw-stats { display:grid; grid-template-columns:repeat(auto-fit,minmax(120px,1fr));
+              gap:9px; margin:16px 0 4px; }
+  .kw-stat { padding:12px 14px; border:1px solid var(--line); border-radius:11px;
+             background:var(--surface); }
+  .kw-stat b { display:block; font-size:21px; font-weight:700; letter-spacing:-.02em;
+               font-variant-numeric:tabular-nums; }
+  .kw-stat span { font-size:11.5px; color:var(--faint); }
+  .kw-stat.accent { border-color:var(--accent); background:var(--accent-soft); }
+  .kw-stat.accent b, .kw-stat.accent span { color:var(--accent); }
+
+  /* 添加表单 */
+  .kw-add { margin:16px 0 0; }
+  .kw-form { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+  .kw-form input { flex:1 1 300px; min-width:0; padding:10px 13px; font-size:13.5px;
+                   font-family:inherit; border:1px solid var(--line); border-radius:9px;
+                   background:var(--surface); color:var(--text); }
+  .kw-form input:focus { outline:none; border-color:var(--accent); }
+  .kw-form select { padding:10px 12px; font-size:13.5px; font-family:inherit;
+                    border:1px solid var(--line); border-radius:9px;
+                    background:var(--surface); color:var(--text); flex:none; }
+  .btn-add { padding:10px 20px; border:1px solid var(--accent); border-radius:9px;
+             background:var(--accent); color:#fff; font-size:13.5px; font-weight:600;
+             cursor:pointer; flex:none; font-family:inherit; }
+  .btn-add:hover { filter:brightness(1.07); }
+  .kw-tip { margin:10px 0 0; font-size:12px; color:var(--faint); line-height:1.7; }
+  .kw-tip code { background:var(--chip); padding:1px 5px; border-radius:4px; }
+
+  /* 列表 */
+  .sec-h { float:right; font-size:11.5px; font-weight:400; color:var(--faint);
+           letter-spacing:0; margin-top:2px; }
+  .kw-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:7px; }
+  .kw-row { display:flex; align-items:center; gap:14px; padding:10px 14px;
+            border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  .kw-row.off { opacity:.55; }
+  .kw-row.star { border-left:3px solid #b8873a; }
+  .kw-name { font-size:14px; font-weight:600; color:var(--text); flex:1 1 auto;
+             min-width:0; overflow-wrap:anywhere; }
+  .kw-star { color:#b8873a; margin-right:5px; }
+  .kw-hits { font-size:12px; color:var(--muted); flex:none;
+             font-variant-numeric:tabular-nums; }
+  .kw-hits b { color:var(--text); font-weight:650; }
+  .kw-when { font-size:11.5px; color:var(--faint); flex:none; }
+  .kw-actions { display:flex; gap:6px; flex:none; }
+  .mini { padding:6px 11px; border:1px solid var(--line); border-radius:7px;
+          background:var(--chip); color:var(--muted); font-size:12px;
+          font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .mini.danger:hover { color:#c0392b; border-color:#c0392b; }
+  .empty.small { padding:22px; font-size:13px; }
+  @media (max-width:640px) {
+    .kw-row { flex-wrap:wrap; }
+    .kw-when { display:none; }
+    .kw-actions { margin-left:auto; }
+  }
+</style>
+<script>
+  (function () {
+    // 添加成功后把输入框清空：表单是整页提交、页面重渲染后输入框会保留
+    // 提交值（浏览器行为），用户接着想加下一个词时得先手动删一遍。
+    // 用 sessionStorage 传一个「刚提交过」的标记，重渲染后清空并聚焦。
+    var input = document.getElementById("kw-input");
+    if (input && sessionStorage.getItem("smtm-kw-added")) {
+      sessionStorage.removeItem("smtm-kw-added");
+      input.value = "";
+    }
+    var form = document.getElementById("kw-form");
+    if (form) form.addEventListener("submit", function () {
+      sessionStorage.setItem("smtm-kw-added", "1");
+    });
+
+    function post(url) {
+      return fetch(url, { method: "POST", headers: { "X-Requested-With": "fetch" } })
+        .then(function (r) { return r.json(); });
+    }
+    document.addEventListener("click", function (e) {
+      var toggle = e.target.closest(".kw-toggle");
+      if (toggle) {
+        post("/keywords/" + toggle.getAttribute("data-id") + "/toggle").then(function (d) {
+          if (!d.ok) return;
+          var row = toggle.closest(".kw-row");
+          var nowOn = d.enabled;
+          row.classList.toggle("off", !nowOn);
+          toggle.textContent = nowOn ? "停用" : "启用";
+          toggle.setAttribute("data-enabled", nowOn ? "1" : "0");
+        });
+        return;
+      }
+      var del = e.target.closest(".kw-delete");
+      if (del) {
+        var row = del.closest(".kw-row");
+        var name = row.querySelector(".kw-name").textContent.trim();
+        if (!confirm("删除关键词「" + name + "」？")) return;
+        post("/keywords/" + del.getAttribute("data-id") + "/delete").then(function (d) {
+          if (d.ok) {
+            row.remove();
+            // 顺手收掉「已添加」提示：它引用的正是刚删掉的那个词，
+            // 留着会让用户以为删除没生效（实测踩过）。
+            var notice = document.querySelector(".notice");
+            if (notice) notice.remove();
+          }
+        });
+      }
+    });
+  })();
+</script>
+{% endblock %}

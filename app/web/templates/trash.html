@@ -1,0 +1,165 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">TRASH</div>
+  <h1>回收站</h1>
+  <p class="meta">
+    被删除的文章保留在这里，<b>可以恢复</b>；「永久删除」才会真正清掉。
+    共 <b>{{ total }}</b> 篇。
+  </p>
+</div>
+
+{% if rows %}
+  <div class="trash-bar">
+    <label class="chk"><input type="checkbox" id="trash-all"> 全选</label>
+    <span class="trash-sel" id="trash-sel">已选 0 篇</span>
+    <span class="trash-actions">
+      <button type="button" class="mini" id="trash-restore">恢复选中</button>
+      <button type="button" class="mini danger" id="trash-purge">永久删除选中</button>
+      <button type="button" class="mini danger" id="trash-empty">清空回收站</button>
+    </span>
+  </div>
+
+  <ul class="trash-list" id="trash-list">
+    {% for row in rows %}
+      <li class="trash-row" data-id="{{ row.id }}">
+        <label class="chk"><input type="checkbox" class="trash-check" value="{{ row.id }}"></label>
+        <div class="trash-main">
+          <a class="trash-title" href="/story/{{ row.id }}">{{ row.title }}</a>
+          <div class="trash-meta">
+            <span>{{ row.source }}</span>
+            {% if row.category %}<span class="tag-lite">{{ row.category }}</span>{% endif %}
+            {% if row.reason != '手动删除' %}<span class="tag-blocked">{{ row.reason }}</span>{% endif %}
+            <span class="dim">发布于 {{ row.published or '—' }}</span>
+            <span class="dim">删除于 {{ row.deleted_at }}</span>
+          </div>
+        </div>
+        <div class="trash-row-actions">
+          <button type="button" class="mini trash-restore-one" data-id="{{ row.id }}">恢复</button>
+          <button type="button" class="mini danger trash-purge-one" data-id="{{ row.id }}">永久删除</button>
+        </div>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="empty">
+    回收站是空的。
+    <span class="empty-note">在文章详情页点「删除」会把文章移到这里，之后可以随时恢复。</span>
+  </div>
+{% endif %}
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .trash-bar { display:flex; align-items:center; gap:14px; flex-wrap:wrap;
+               padding:12px 14px; margin:14px 0 12px;
+               border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  .chk { display:inline-flex; align-items:center; gap:7px; font-size:13px; color:var(--muted); }
+  .trash-sel { font-size:12.5px; color:var(--faint); font-variant-numeric:tabular-nums; }
+  .trash-actions { margin-left:auto; display:flex; gap:8px; flex-wrap:wrap; }
+  .mini { padding:7px 13px; border:1px solid var(--line); border-radius:8px;
+          background:var(--chip); color:var(--muted); font-size:12.5px;
+          font-family:inherit; cursor:pointer; white-space:nowrap; }
+  .mini:hover { color:var(--accent); border-color:var(--accent); }
+  .mini.danger:hover { color:#c0392b; border-color:#c0392b; }
+  .trash-list { list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:8px; }
+  .trash-row { display:flex; gap:12px; align-items:flex-start; padding:12px 14px;
+               border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  .trash-main { flex:1; min-width:0; }
+  .trash-title { font-size:14px; font-weight:600; color:var(--text); display:block;
+                 overflow-wrap:anywhere; }
+  .trash-title:hover { color:var(--accent); }
+  .trash-meta { display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:5px;
+                font-size:11.5px; color:var(--faint); }
+  .trash-meta .dim { color:var(--faint); }
+  .tag-lite { padding:1px 8px; border-radius:5px; background:var(--chip); color:var(--muted); }
+  .tag-blocked { padding:1px 8px; border-radius:5px; background:#fdf2e3; color:#8a6420; }
+  html.dark .tag-blocked { background:rgba(211,178,106,.15); color:#d3b26a; }
+  .trash-row-actions { display:flex; gap:7px; flex:none; }
+  @media (max-width:640px) {
+    .trash-row { flex-direction:column; }
+    .trash-row-actions { width:100%; justify-content:flex-end; }
+  }
+</style>
+<script>
+  (function () {
+    var list = document.getElementById("trash-list");
+    if (!list) return;
+    var all = document.getElementById("trash-all");
+    var selCount = document.getElementById("trash-sel");
+
+    function checks() { return Array.prototype.slice.call(list.querySelectorAll(".trash-check")); }
+    function selected() { return checks().filter(function (c) { return c.checked; }).map(function (c) { return c.value; }); }
+    function refresh() {
+      var n = selected().length;
+      selCount.textContent = "已选 " + n + " 篇";
+      if (all) all.checked = n > 0 && n === checks().length;
+    }
+    if (all) all.addEventListener("change", function () {
+      checks().forEach(function (c) { c.checked = all.checked; });
+      refresh();
+    });
+    list.addEventListener("change", refresh);
+    refresh();
+
+    function post(url, body) {
+      return fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Requested-With": "fetch" },
+        body: JSON.stringify(body || {})
+      }).then(function (r) { return r.json().then(function (d) { return { ok: r.ok && d.ok, data: d }; }); });
+    }
+    function removeRows(ids) {
+      ids.forEach(function (id) {
+        var row = list.querySelector('.trash-row[data-id="' + id + '"]');
+        if (row) row.remove();
+      });
+      if (!list.querySelector(".trash-row")) location.reload();
+      refresh();
+    }
+
+    // 恢复选中
+    var restore = document.getElementById("trash-restore");
+    if (restore) restore.addEventListener("click", function () {
+      var ids = selected();
+      if (!ids.length) { alert("先勾选要恢复的文章"); return; }
+      Promise.all(ids.map(function (id) { return post("/api/articles/" + id + "/restore"); }))
+        .then(function () { location.reload(); });
+    });
+
+    // 永久删除选中
+    var purge = document.getElementById("trash-purge");
+    if (purge) purge.addEventListener("click", function () {
+      var ids = selected();
+      if (!ids.length) { alert("先勾选要删除的文章"); return; }
+      if (!confirm("永久删除选中的 " + ids.length + " 篇？此操作不可恢复。")) return;
+      post("/api/trash/purge", { ids: ids.join(",") }).then(function () { location.reload(); });
+    });
+
+    // 清空回收站
+    var empty = document.getElementById("trash-empty");
+    if (empty) empty.addEventListener("click", function () {
+      if (!confirm("清空回收站？所有文章将被永久删除，不可恢复。")) return;
+      post("/api/trash/purge", {}).then(function () { location.reload(); });
+    });
+
+    // 单行恢复 / 永久删除
+    list.addEventListener("click", function (e) {
+      var one = e.target.closest(".trash-restore-one");
+      if (one) {
+        post("/api/articles/" + one.getAttribute("data-id") + "/restore")
+          .then(function () { location.reload(); });
+        return;
+      }
+      var purgeOne = e.target.closest(".trash-purge-one");
+      if (purgeOne) {
+        if (!confirm("永久删除这篇？不可恢复。")) return;
+        post("/api/trash/purge", { ids: purgeOne.getAttribute("data-id") })
+          .then(function () { removeRows([purgeOne.getAttribute("data-id")]); });
+      }
+    });
+  })();
+</script>
+{% endblock %}

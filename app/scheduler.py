@@ -32,7 +32,7 @@ from app.fetcher.content import (
 from app.fetcher.images import backfill_images, localize_missing_covers
 from app.fetcher.media_store import media_dir_for
 from app.fetcher.pipeline import run_fetch_pipeline
-from app.models import Article, DailyReport
+from app.models import Article, DailyReport, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE, day_window, generate_daily_report
 from app.utils.logger import get_logger, setup_logging
 from app.utils.text import now_local
@@ -179,13 +179,55 @@ def run_content_job(settings: Settings) -> dict[str, Any]:
     if not settings.content.enabled:
         return {"candidates": 0, "filled": 0, "short": 0, "failed": 0}
     with session_scope() as session:
-        return backfill_content(
+        stats = backfill_content(
             session,
             limit=settings.content.batch_size,
             timeout=settings.content.timeout_seconds,
             min_chars=settings.content.min_chars,
             media_dir=media_dir_for(settings.db_file),
         )
+        # 正文抓回来后应用关键词规则：正文级屏蔽（软删到回收站）与特别关注标记。
+        # 标题/摘要级的屏蔽在入库时就拦了（见 pipeline.block_hit），这里补的是
+        # 「只有正文里才出现该关键词」的那部分。
+        stats["rules"] = apply_keyword_rules(session)
+        return stats
+
+
+def apply_keyword_rules(session: Session) -> dict[str, int]:
+    """对「已抓正文、还没被规则处理过」的文章应用屏蔽/关注规则。
+
+    只扫 ``content_full`` 刚填上、且还没标记过的行：``starred`` 已经是 1 的
+    跳过（关注不重复计数），``deleted_at`` 非空的跳过（已删的不用再判）。
+    """
+    from app.fetcher.keywords import KIND_BLOCK, KIND_STAR, apply_rules, load_rules
+
+    block_rules = load_rules(session, kind=KIND_BLOCK)
+    star_rules = load_rules(session, kind=KIND_STAR)
+    if not block_rules and not star_rules:
+        return {"checked": 0, "blocked": 0, "starred": 0}
+    rows = list(
+        session.execute(
+            select(Article).where(
+                Article.content_full.isnot(None),
+                Article.deleted_at.is_(None),
+                Article.starred == 0,
+                Article.link.notlike("http://localhost%"),
+            )
+        ).scalars()
+    )
+    stats = {"checked": len(rows), "blocked": 0, "starred": 0}
+    for article in rows:
+        result = apply_rules(
+            session, article, block_rules=block_rules, star_rules=star_rules
+        )
+        if result == "block":
+            stats["blocked"] += 1
+        elif result == "star":
+            stats["starred"] += 1
+    if stats["blocked"] or stats["starred"]:
+        log.info("关键词规则：屏蔽 %d 篇、关注 %d 篇（检查 %d 篇）",
+                 stats["blocked"], stats["starred"], stats["checked"])
+    return stats
 
 
 def run_media_job(settings: Settings) -> dict[str, Any]:
@@ -371,7 +413,7 @@ def _reportable_count(date_str: str) -> int:
                 select(func.count(Article.id)).where(
                     Article.relevance == 1,
                     Article.status.in_(STATUS_REPORTABLE),
-                    Article.duplicate_of.is_(None),
+                    *visible_article_conditions(),
                     Article.published_at >= start,
                     Article.published_at < end,
                 )

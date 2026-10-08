@@ -18,9 +18,12 @@
   <div class="row">
     <div class="tl-time">{{ item.time_hm }}</div>
     <div class="tl-main">
-      <article class="item">
+      <article class="item{{ ' is-starred' if item.starred else '' }}">
         <div class="i-head">
           <span class="src">{{ item.source }}</span>
+          {# 特别关注：命中「关注关键词」自动标记。排在来源后面第一位，
+             读者扫一眼就知道「这条是我关心的」。 #}
+          {% if item.starred %}<span class="star-badge" title="特别关注：命中你设置的关键词">★ 关注</span>{% endif %}
           {% if item.degraded %}<span class="warn">降级摘要</span>{% endif %}
           <span style="flex:1"></span>
           {% if item.score is not none %}

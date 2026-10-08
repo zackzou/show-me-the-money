@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">BREAKDOWN</div>
+  <h1>{{ dimension_label }}{% if value %} · {{ value }}{% endif %}</h1>
+  <p class="meta">
+    近 <b>{{ days }}</b> 天 · 共 <b>{{ total }}</b> 篇
+    · <a href="/reports?days={{ days }}" style="color:var(--accent)">← 返回报告</a>
+  </p>
+</div>
+
+{% if rows %}
+  <ul class="bd-list">
+    {% for row in rows %}
+      <li class="bd-row">
+        <div class="bd-main">
+          <a class="bd-title" href="/story/{{ row.id }}">
+            {% if row.starred %}<span class="bd-star" title="特别关注">★</span>{% endif %}{{ row.title }}
+          </a>
+          <div class="bd-meta">
+            <span>{{ row.source }}</span>
+            {% if row.category %}<span class="bd-cat">{{ row.category }}</span>{% endif %}
+            {% for tag in row.tags[:4] %}<span class="bd-tag">#{{ tag }}</span>{% endfor %}
+            <span class="bd-time">{{ row.published }}</span>
+          </div>
+        </div>
+        {% if row.score is not none %}
+          <span class="bd-score {{ 'hot' if row.score >= 85 else ('strong' if row.score >= 70 else '') }}">{{ row.score }}</span>
+        {% endif %}
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <div class="empty">这个维度下没有数据。</div>
+{% endif %}
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .bd-list { list-style:none; margin:14px 0 40px; padding:0;
+             display:flex; flex-direction:column; gap:8px; }
+  .bd-row { display:flex; align-items:center; gap:12px; padding:12px 15px;
+            border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+  .bd-main { flex:1; min-width:0; }
+  .bd-title { font-size:14px; font-weight:600; color:var(--text); display:block;
+              overflow-wrap:anywhere; }
+  .bd-title:hover { color:var(--accent); }
+  .bd-star { color:#b8873a; margin-right:4px; }
+  .bd-meta { display:flex; flex-wrap:wrap; gap:5px 10px; margin-top:5px;
+             font-size:11.5px; color:var(--faint); }
+  .bd-cat { padding:1px 8px; border-radius:5px; background:var(--chip); color:var(--muted); }
+  .bd-tag { color:var(--faint); }
+  .bd-score { flex:none; display:inline-flex; align-items:center; justify-content:center;
+              min-width:34px; height:22px; padding:0 8px; border-radius:999px;
+              font-size:12px; font-weight:700; font-variant-numeric:tabular-nums;
+              color:var(--faint); box-shadow:inset 0 0 0 1px var(--line-soft); }
+  .bd-score.strong { background:var(--accent-soft); color:var(--accent); box-shadow:none; }
+  .bd-score.hot { background:rgba(179,64,42,.08); color:#b3402a; box-shadow:none; }
+  html.dark .bd-score.hot { background:rgba(216,106,82,.12); color:#d86a52; }
+</style>
+{% endblock %}

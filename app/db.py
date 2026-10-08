@@ -71,6 +71,10 @@ _COLUMN_MIGRATIONS: dict[str, str] = {
     # 信源停用原因/时间（见 models.Source 字段说明）
     "sources.disabled_reason": "TEXT",
     "sources.disabled_at": "TEXT",
+    # 特别关注标记（命中关注关键词）
+    "articles.starred": "INTEGER NOT NULL DEFAULT 0",
+    # 软删除（回收站）
+    "articles.deleted_at": "DATETIME",
 }
 
 # 索引迁移表：跟 _COLUMN_MIGRATIONS 同一个理由，但补的是索引。
@@ -91,6 +95,15 @@ _INDEX_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
         "articles", "ix_articles_source_id",
         "CREATE INDEX IF NOT EXISTS ix_articles_source_id "
         "ON articles (source_id, published_at DESC)",
+    ),
+    # 回收站 / 特别关注都是「按标记筛最近的文章」，各补一个索引
+    (
+        "articles", "ix_articles_deleted_at",
+        "CREATE INDEX IF NOT EXISTS ix_articles_deleted_at ON articles (deleted_at)",
+    ),
+    (
+        "articles", "ix_articles_starred",
+        "CREATE INDEX IF NOT EXISTS ix_articles_starred ON articles (starred)",
     ),
 )
 

@@ -139,6 +139,12 @@
     .i-head { display:flex; align-items:center; gap:8px; font-size:12.5px; color:var(--muted); }
     .i-head .src { font-weight:600; color:var(--text); }
     .badge { background:#fef3c7; color:#92400e; border-radius:4px; padding:1px 7px; font-size:11px; }
+    /* 特别关注徽标：金色，与「降级」的琥珀色区分开（降级是警示，关注是标记） */
+    .star-badge { background:#fdf3e0; color:#8a6420; border-radius:4px; padding:1px 7px;
+                  font-size:11px; font-weight:600; }
+    html.dark .star-badge { background:rgba(211,178,106,.16); color:#d3b26a; }
+    /* 关注卡片的左侧金边：在列表里一眼能扫出来（不抢眼但可辨识） */
+    .item.is-starred { border-left:3px solid #d3a94f; }
     .score { margin-left:auto; display:inline-flex; align-items:center; gap:5px; font-size:11.5px;
              color:var(--muted); background:var(--chip); border-radius:999px; padding:2px 9px;
              font-variant-numeric:tabular-nums; }
@@ -613,8 +619,11 @@
          「搜索 "关键词"」，永远匹配不上，于是搜索时导航一个都不亮。 #}
       <a href="/" class="{{ 'on' if nav == 'home' else '' }}">热点资讯</a>
       <a href="/archive" class="{{ 'on' if nav == 'archive' else '' }}">历史日报</a>
+      <a href="/reports" class="{{ 'on' if nav == 'reports' else '' }}">报告</a>
       <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
       <a href="/sources" class="{{ 'on' if nav == 'sources' else '' }}">信源</a>
+      <a href="/keywords" class="{{ 'on' if nav == 'keywords' else '' }}">关键词</a>
+      <a href="/trash" class="{{ 'on' if nav == 'trash' else '' }}">回收站</a>
       <a href="/settings" class="{{ 'on' if nav == 'settings' else '' }}">设置</a>
       <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
     </nav>
@@ -635,7 +644,9 @@
     <div class="tools">
       <button class="ico" id="theme" title="切换深浅色" aria-label="切换深浅色">◐</button>
       <button class="ico" id="skin" title="切换外观风格（默认 / AIHOT）" aria-label="切换外观风格">✦</button>
-      <a class="ico" href="/api/health" title="状态" aria-label="服务状态">⋯</a>
+      {# 原来是 /api/health —— 点开是浏览器里一屏黑底 JSON，与全站风格割裂。
+         改成 /status 页面（同一份数据，站点样式渲染）。 #}
+      <a class="ico" href="/status" title="服务状态" aria-label="服务状态">⋯</a>
       <button class="ico nav-tg" id="nav-tg" aria-expanded="false" aria-controls="m-nav" aria-label="站内导航菜单">☰</button>
     </div>
   </div>
@@ -645,10 +656,14 @@
   <nav class="m-nav" id="m-nav" aria-label="站内导航">
     <a href="/" class="{{ 'on' if nav == 'home' else '' }}">热点资讯</a>
     <a href="/archive" class="{{ 'on' if nav == 'archive' else '' }}">历史日报</a>
+    <a href="/reports" class="{{ 'on' if nav == 'reports' else '' }}">报告</a>
     <a href="/saved" class="{{ 'on' if nav == 'saved' else '' }}">收藏</a>
     <a href="/sources" class="{{ 'on' if nav == 'sources' else '' }}">信源</a>
+    <a href="/keywords" class="{{ 'on' if nav == 'keywords' else '' }}">关键词</a>
+    <a href="/trash" class="{{ 'on' if nav == 'trash' else '' }}">回收站</a>
     <a href="/settings" class="{{ 'on' if nav == 'settings' else '' }}">设置</a>
     <a href="/rss-guide" class="{{ 'on' if nav == 'rss' else '' }}">RSS</a>
+    <a href="/status" class="{{ 'on' if nav == 'status' else '' }}">服务状态</a>
   </nav>
 </header>
 
@@ -661,9 +676,12 @@
     <div class="sk-sec-t">内容</div>
     <a class="sk-link {{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home') }}热点资讯</a>
     <a class="sk-link {{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive') }}历史日报</a>
+    <a class="sk-link {{ 'on' if nav == 'reports' else '' }}" href="/reports">{{ ic('chart') }}数据报告</a>
     <a class="sk-link {{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved') }}收藏</a>
-    <div class="sk-sec-t">更多</div>
+    <div class="sk-sec-t">管理</div>
     <a class="sk-link {{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources') }}信源</a>
+    <a class="sk-link {{ 'on' if nav == 'keywords' else '' }}" href="/keywords">{{ ic('filter') }}关键词</a>
+    <a class="sk-link {{ 'on' if nav == 'trash' else '' }}" href="/trash">{{ ic('trash') }}回收站</a>
     <a class="sk-link {{ 'on' if nav == 'settings' else '' }}" href="/settings">{{ ic('settings') }}设置</a>
     <a class="sk-link {{ 'on' if nav == 'rss' else '' }}" href="/rss-guide">{{ ic('rss') }}RSS 订阅</a>
   </nav>
@@ -675,16 +693,18 @@
       <button type="button" data-sk-theme="light" role="radio" title="浅色" aria-label="浅色">{{ ic('sun', 14) }}</button>
     </div>
     <button type="button" class="sk-skin-toggle" id="sk-back">换回默认风格</button>
-    <a class="sk-status" href="/api/health">服务状态</a>
+    {# 原来指向 /api/health（裸 JSON）；改成站内状态页，风格与全站一致 #}
+    <a class="sk-status" href="/status">服务状态</a>
   </div>
 </aside>
 <nav class="sk-tabbar" aria-label="底部导航">
   <a class="{{ 'on' if nav == 'home' else '' }}" href="/">{{ ic('home', 22) }}热点</a>
   <a class="{{ 'on' if nav == 'archive' else '' }}" href="/archive">{{ ic('archive', 22) }}日报</a>
+  <a class="{{ 'on' if nav == 'reports' else '' }}" href="/reports">{{ ic('chart', 22) }}报告</a>
   <a class="{{ 'on' if nav == 'saved' else '' }}" href="/saved">{{ ic('saved', 22) }}收藏</a>
   <a class="{{ 'on' if nav == 'sources' else '' }}" href="/sources">{{ ic('sources', 22) }}信源</a>
+  <a class="{{ 'on' if nav == 'keywords' else '' }}" href="/keywords">{{ ic('filter', 22) }}关键词</a>
   <a class="{{ 'on' if nav == 'settings' else '' }}" href="/settings">{{ ic('settings', 22) }}设置</a>
-  <a class="{{ 'on' if nav == 'rss' else '' }}" href="/rss-guide">{{ ic('rss', 22) }}RSS</a>
 </nav>
 
 <main class="wrap{% block container_extra %}{% endblock %}">

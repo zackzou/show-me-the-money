@@ -32,10 +32,13 @@ from app.scheduler import (
 )
 from app.utils.logger import get_logger, setup_logging
 from app.web.api import api_router
+from app.web.keywords import keywords_router
+from app.web.reports import reports_router
 from app.web.routes import page_router
 from app.web.rss import rss_router
 from app.web.settings import apply_stored, load_stored, settings_router
 from app.web.sources import sources_router
+from app.web.trash import trash_router
 
 log = get_logger(__name__)
 
@@ -160,6 +163,9 @@ def create_app(settings: Settings | None = None, *, bootstrap: bool = True) -> F
     app.include_router(rss_router)
     app.include_router(sources_router)
     app.include_router(settings_router)
+    app.include_router(trash_router)
+    app.include_router(keywords_router)
+    app.include_router(reports_router)
     return app
 
 

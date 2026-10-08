@@ -295,15 +295,13 @@ def _user_settings(env: dict[str, str] | None) -> UserSettings:
     「默认值为空」的断言在一台配了 `LLM_EXTRA_HEADERS` 的机器上必然失败，
     而 CI 上又通过，成了看机器脸色的测试。注入即完全隔离。
 
-    （``_env_file`` 是 pydantic-settings 的运行时参数、``**dict`` 展开也超出
-    类型存根的参数列表，两处都需要绕过类型检查。）
+    （``_env_file`` 是 pydantic-settings 的运行时参数：类型存根里没有，
+    mypy 在某些版本上会报 call-arg —— 但升级后的 mypy 认得它，加了
+    ``type: ignore`` 反而报 unused-ignore。以当前锁定的 mypy 版本为准，不加。）
     """
     if env is None:
         return UserSettings()
-    return UserSettings(
-        _env_file=None,  # type: ignore[call-arg]
-        **{k.lower(): v for k, v in env.items()},  # type: ignore[arg-type]
-    )
+    return UserSettings(_env_file=None, **{k.lower(): v for k, v in env.items()})
 
 
 def load_settings(

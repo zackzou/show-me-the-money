@@ -7,14 +7,15 @@ from collections.abc import Callable
 from datetime import datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.db import session_scope
 from app.fetcher.dedup import is_duplicate
+from app.fetcher.keywords import KIND_BLOCK, block_hit, load_rules
 from app.fetcher.rss import fetch_feed
-from app.models import Article, Source
+from app.models import Article, KeywordRule, Source
 from app.utils.logger import get_logger
 from app.utils.text import extract_images, now_local, strip_html, truncate, unescape_text
 
@@ -135,6 +136,7 @@ def run_fetch_pipeline(
         "no_date": 0,
         "future": 0,
         "bad_link": 0,
+        "blocked": 0,
         "failed": 0,
         "empty_sources": 0,
         "details": [],
@@ -142,6 +144,9 @@ def run_fetch_pipeline(
 
     def _work(session: Session) -> None:
         now = now_local()
+        # 关键词屏蔽规则：一次读入、循环内复用（规则少，编译正则的开销可忽略）。
+        # 入库前只看标题+摘要 —— 拦在源头，不花正文抓取和 AI 处理的钱。
+        block_rules = load_rules(session, kind=KIND_BLOCK)
         for source in _enabled_sources(session):
             kwargs: dict[str, Any] = {"timeout": timeout, "retries": retries}
             if user_agent:
@@ -183,6 +188,18 @@ def run_fetch_pipeline(
                     continue
                 if is_duplicate(session, link, title, window=dedup_window):
                     stats["duplicated"] += 1
+                    continue
+                # 关键词屏蔽（标题+摘要）：命中即不入库。计数在这里累加、
+                # 随本批事务一起提交 —— 与文章入库同一次落库，不会对不上。
+                blocked = block_hit(title, str(item.get("summary") or ""), block_rules)
+                if blocked is not None:
+                    stats["blocked"] += 1
+                    session.execute(
+                        update(KeywordRule)
+                        .where(KeywordRule.id == blocked.id)
+                        .values(hits=KeywordRule.hits + 1)
+                    )
+                    log.info("关键词屏蔽：%r 命中，不入库（%s）", blocked.keyword, title[:50])
                     continue
                 # 用 savepoint 兜住唯一约束冲突：link 撞车（定时任务和手动抓取同时插同一条）
                 # 只该丢这一条，不该把整批回滚掉。

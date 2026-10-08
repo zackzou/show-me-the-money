@@ -25,7 +25,7 @@ from app.config import Settings
 from app.db import get_session
 from app.fetcher.content import is_real_body
 from app.fetcher.media_store import is_safe_image_name, media_dir_for, read_media_map
-from app.models import Article, DailyReport, Source
+from app.models import Article, DailyReport, Source, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE, day_window
 from app.utils.text import is_chinese_text, now_local, split_tags, strip_markdown, truncate
 from app.utils.text import looks_english as is_english
@@ -299,11 +299,14 @@ def _day_statement(date_str: str):
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             Article.published_at >= start,
             Article.published_at < end,
         )
-        .order_by(Article.published_at.desc(), Article.id.desc())
+        # 特别关注的排最前（同日按时间倒序）。starred 是 0/1 整数列，
+        # DESC 让 1 在前；这是「优先显示」的唯一实现点 —— 列表、日报、
+        # 归档都走这条语句，不用每处各写一遍排序。
+        .order_by(Article.starred.desc(), Article.published_at.desc(), Article.id.desc())
     )
 
 
@@ -327,7 +330,7 @@ def counts_by_day(session: Session, dates: list[str]) -> dict[str, int]:
                 select(func.count(Article.id)).where(
                     Article.relevance == 1,
                     Article.status.in_(STATUS_REPORTABLE),
-                    Article.duplicate_of.is_(None),
+                    *visible_article_conditions(),
                     Article.published_at >= start,
                     Article.published_at < end,
                 )
@@ -426,6 +429,8 @@ def _card(article: Article, source_name: str | None, source_url: str | None, now
         # 补译次数：让「中文版还在生成」的提示带上真实的重试计数
         "i18n_attempts": article.i18n_attempts or 0,
         "attempts": article.process_attempts or 0,
+        # 特别关注：列表优先排序 + 卡片上的星标（命中「关注关键词」自动置位）
+        "starred": bool(article.starred),
     }
 
 
@@ -807,6 +812,75 @@ def saved_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request, "saved.html", _ctx(request, nav="saved", title="我的收藏"))
 
 
+@page_router.get("/status", response_class=HTMLResponse)
+def status_page(request: Request, session: Session = Depends(get_session)) -> HTMLResponse:
+    """服务状态页（站点样式）。
+
+    原来顶栏的「⋯」直接指向 ``/api/health`` —— 点开是浏览器默认渲染的
+    一屏黑底 JSON，与全站风格完全割裂，读者以为点进了什么坏掉的页面。
+    这里用同一份数据渲染一个正常的页面；``/api/health`` 保留给脚本与监控。
+    """
+    from app import __version__
+    from app.fetcher.content import count_with_full_text
+    from app.fetcher.images import count_with_images
+
+    settings = getattr(request.app.state, "settings", None)
+    now = now_local()
+    today = now.strftime("%Y-%m-%d")
+    # 今天的抓取/处理情况：让「服务正常但没内容」一眼可见
+    today_total = int(
+        session.execute(
+            select(func.count(Article.id)).where(
+                func.date(Article.published_at) == today
+            )
+        ).scalar_one()
+    )
+    today_relevant = int(
+        session.execute(
+            select(func.count(Article.id)).where(
+                func.date(Article.published_at) == today, Article.relevance == 1
+            )
+        ).scalar_one()
+    )
+    today_pending = int(
+        session.execute(
+            select(func.count(Article.id)).where(
+                func.date(Article.published_at) == today, Article.status == "pending"
+            )
+        ).scalar_one()
+    )
+    deleted = int(
+        session.execute(
+            select(func.count(Article.id)).where(Article.deleted_at.isnot(None))
+        ).scalar_one()
+    )
+    starred = int(
+        session.execute(
+            select(func.count(Article.id)).where(Article.starred == 1, Article.deleted_at.is_(None))
+        ).scalar_one()
+    )
+    stats = {
+        "version": __version__,
+        "sources": session.query(Source).count(),
+        "articles": session.query(Article).count(),
+        "with_images": count_with_images(session),
+        "with_full_text": count_with_full_text(session),
+        "reports": session.query(DailyReport).count(),
+        "deleted": deleted,
+        "starred": starred,
+        "today_total": today_total,
+        "today_relevant": today_relevant,
+        "today_pending": today_pending,
+        "topics": list(getattr(settings, "research_topics", []) or []),
+        "model": getattr(getattr(settings, "llm", None), "model", "") or "—",
+        "api_base": getattr(getattr(settings, "llm", None), "api_base", "") or "—",
+        "now": now,
+    }
+    return templates.TemplateResponse(
+        request, "status.html", _ctx(request, nav="status", title="服务状态", stats=stats)
+    )
+
+
 @page_router.get("/daily/{date}", response_class=HTMLResponse)
 def daily(
     request: Request,
@@ -983,7 +1057,7 @@ def _related(session: Session, article: Article, now: datetime, *, limit: int = 
                 Article.id != article.id,
                 Article.relevance == 1,
                 Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             )
             .order_by(Article.published_at.desc(), Article.id.desc())
             .limit(120)

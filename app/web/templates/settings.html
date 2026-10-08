@@ -328,7 +328,11 @@
   #k-copy { right:38px; }
   #k-eye { right:6px; }
 
-  .btns { display:flex; gap:10px; flex-wrap:wrap; margin-top:2px; }
+  /* 按钮区：与上方字段拉开距离（原来 margin-top:2px，按钮紧贴输入框，
+     和下面那条页脚说明挤在一起，看着「没做完」）。加一条分隔线 + 留白，
+     让「保存」这一组在视觉上自成一段。 */
+  .btns { display:flex; gap:10px; flex-wrap:wrap;
+          margin-top:10px; padding-top:20px; border-top:1px solid var(--line-soft); }
   .btns button { padding:11px 22px; border-radius:10px; font-size:13.5px; font-family:inherit;
                  font-weight:600; cursor:pointer; transition:filter .15s, transform .12s; }
   .btns button:active { transform:scale(.98); }

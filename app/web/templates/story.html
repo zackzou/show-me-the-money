@@ -67,15 +67,24 @@
         <div class="sec-t">AI 导读{% if item.digest_missing_zh %}<span class="t-note">原文为英文，中文导读还在翻译队列里</span>{% endif %}</div>
         <div class="sec-ops">
           {# 重新获取：重抓原文 + 按当前 AI 配置重跑处理。导读没更新、译文缺了
-             或者上次处理时 LLM 恰好限流，都可以在这里手动救回来，不用等调度轮。 #}
+             或者上次处理时 LLM 恰好限流，都可以在这里手动救回来，不用等调度轮。
+             点按钮**先弹确认**（见 extra 里的 JS）—— 它要花 LLM 调用，误点一次
+             就是真金白银，而且会把这篇已有的译文/导读全部作废重来。 #}
           <span class="refetch" id="refetch"
                 data-article-id="{{ item.id }}"
                 data-idle-label="重新获取">
-            <button type="button" class="rf-btn" id="refetch-btn" title="重新抓取原文，并按当前 AI 配置重新生成导读、译文与标签">
+            <button type="button" class="rf-btn" id="refetch-btn" title="重新抓取原文，并按当前 AI 配置重新生成导读、译文与标签（点击后会先确认）">
               <span class="rf-ico" aria-hidden="true">⟳</span><span class="rf-txt">重新获取</span>
             </button>
             <span class="rf-note" id="refetch-note" hidden></span>
           </span>
+          {# 删除：移入回收站（软删除，可恢复）。同样先确认 —— 删了就不在列表
+             /日报/搜索里了，误点的代价比重新获取还大。 #}
+          <button type="button" class="del-btn" id="delete-btn"
+                  data-article-id="{{ item.id }}"
+                  title="把这篇文章移入回收站（可恢复）">
+            <span aria-hidden="true">🗑</span>删除
+          </button>
           {% if 'en' in langs %}
             {# 英文信源：中文 / 英文 / 双语三选一；译文没到齐时也能切，缺的一版由 bi() 用原文顶上 #}
             <div class="lang" id="lang" role="group" aria-label="语言">
@@ -266,7 +275,18 @@
 </div>
 {% endif %}
 
-{# ── 早报片段浮层：手机竖屏日报样式，点「复制文字」直接拿去做微信早报 ── #}
+{# ── 通用确认弹层：重新获取 / 删除共用。按钮触发前先弹这里，避免误点。 ── #}
+<div class="cf-mask" id="cf-mask" hidden>
+  <div class="cf" role="dialog" aria-modal="true" aria-labelledby="cf-title">
+    <h3 id="cf-title"></h3>
+    <p id="cf-text"></p>
+    <div class="cf-actions">
+      <button type="button" class="cf-cancel" id="cf-cancel">取消</button>
+      <button type="button" class="cf-ok" id="cf-ok">确认</button>
+    </div>
+  </div>
+</div>
+
 <div class="dg-mask" id="dg-mask" hidden>
   <div class="dg" role="dialog" aria-modal="true" aria-label="早报片段">
     <div class="dg-bar">
@@ -314,6 +334,37 @@
   .rf-btn:hover { color:var(--accent); border-color:var(--accent); }
   .rf-btn:disabled { cursor:default; opacity:.75; }
   .rf-ico { display:inline-block; font-size:13px; line-height:1; }
+  /* 删除按钮：与重新获取同高同造型，hover 才泛红（平时不喧宾夺主） */
+  .del-btn { display:inline-flex; align-items:center; gap:5px; padding:5px 11px;
+             border:1px solid var(--line); border-radius:999px; background:var(--surface);
+             color:var(--muted); font-size:12px; font-family:inherit; line-height:1.5;
+             cursor:pointer; white-space:nowrap; transition:color .15s, border-color .15s; }
+  .del-btn:hover { color:#c0392b; border-color:#c0392b; }
+  .del-btn:disabled { cursor:default; opacity:.75; }
+
+  /* 通用确认弹层（重新获取 / 删除共用）：站点风格，不用浏览器原生 confirm ——
+     原生弹窗在深色模式下是一块刺眼的白，而且没法带细节说明。 */
+  .cf-mask { position:fixed; inset:0; z-index:95; display:grid; place-items:center;
+             padding:24px 16px; background:rgba(16,24,40,.45); backdrop-filter:blur(3px);
+             animation:cf-fade .16s ease; }
+  .cf-mask[hidden] { display:none; }
+  @keyframes cf-fade { from { opacity:0; } }
+  .cf { width:100%; max-width:400px; background:var(--bg); border:1px solid var(--line);
+        border-radius:14px; padding:20px 20px 16px;
+        box-shadow:0 30px 70px -20px rgba(16,24,40,.5);
+        animation:cf-pop .2s cubic-bezier(.2,.9,.3,1.15); }
+  @keyframes cf-pop { from { opacity:0; transform:translateY(12px) scale(.97); } }
+  @media (prefers-reduced-motion:reduce) { .cf, .cf-mask { animation:none; } }
+  .cf h3 { margin:0 0 8px; font-size:16px; font-weight:700; }
+  .cf p { margin:0 0 16px; font-size:13px; line-height:1.75; color:var(--muted); }
+  .cf-actions { display:flex; justify-content:flex-end; gap:9px; }
+  .cf-actions button { padding:8px 16px; border-radius:9px; font-size:13px;
+                       font-family:inherit; font-weight:600; cursor:pointer; }
+  .cf-cancel { border:1px solid var(--line); background:var(--surface); color:var(--muted); }
+  .cf-cancel:hover { color:var(--text); border-color:var(--faint); }
+  .cf-ok { border:1px solid var(--accent); background:var(--accent); color:#fff; }
+  .cf-ok:hover { filter:brightness(1.08); }
+  .cf-ok.danger { border-color:#c0392b; background:#c0392b; }
   /* 获取中：图标转圈。转的是 .rf-ico 而不是整个按钮 —— 按钮里还有文字，
      文字跟着转就读不了。prefers-reduced-motion 下保持静止（见下）。 */
   .refetch.running .rf-ico { animation:rf-spin 1s linear infinite; }
@@ -671,6 +722,40 @@
   })();
 </script>
 <script>
+  // 通用确认弹层：window.smtmConfirm({title, text, ok, danger}) → Promise<boolean>。
+  // 重新获取 / 删除都先过这里。用站点风格而不是浏览器 confirm：
+  // 原生弹窗在深色模式是一块刺眼的白、没法排版细节说明，也拦不住误点。
+  window.smtmConfirm = (function () {
+    var mask = document.getElementById("cf-mask");
+    var title = document.getElementById("cf-title");
+    var text = document.getElementById("cf-text");
+    var ok = document.getElementById("cf-ok");
+    var cancel = document.getElementById("cf-cancel");
+    if (!mask) return function () { return Promise.resolve(true); };
+    var resolveFn = null;
+    function close(value) {
+      mask.hidden = true;
+      document.documentElement.classList.remove("cf-open");
+      if (resolveFn) { resolveFn(value); resolveFn = null; }
+    }
+    ok.addEventListener("click", function () { close(true); });
+    cancel.addEventListener("click", function () { close(false); });
+    mask.addEventListener("click", function (e) { if (e.target === mask) close(false); });
+    document.addEventListener("keydown", function (e) {
+      if (e.key === "Escape" && !mask.hidden) close(false);
+    });
+    return function (opts) {
+      title.textContent = (opts && opts.title) || "确认操作？";
+      text.textContent = (opts && opts.text) || "";
+      ok.textContent = (opts && opts.ok) || "确认";
+      ok.classList.toggle("danger", !!(opts && opts.danger));
+      mask.hidden = false;
+      document.documentElement.classList.add("cf-open");
+      ok.focus();
+      return new Promise(function (resolve) { resolveFn = resolve; });
+    };
+  })();
+
   // 重新获取：POST 后每 2 秒轮询一次状态，四态 —— 待机 / 获取中（转圈）/
   // 成功（✓ 后刷新页面，让新导读、新译文直接可见）/ 失败（✕ + 原因）。
   (function () {
@@ -742,20 +827,61 @@
 
     btn.addEventListener("click", function () {
       if (btn.disabled) return;
-      setUI("running");
-      polls = 0;
-      fetch("/api/articles/" + id + "/refetch", { method: "POST" })
-        .then(function (r) {
-          if (!r.ok) return r.json().then(function (b) {
-            throw new Error(b.detail || ("HTTP " + r.status));
-          }, function () { throw new Error("HTTP " + r.status); });
-          return r.json();
-        })
-        .then(function (s) {
-          if (s.state === "running") { timer = setInterval(poll, 2000); return; }
-          setUI("idle");
-        })
-        .catch(function (err) { setUI("failed", String(err.message || err)); });
+      // 先确认：这一步要花 LLM 调用，且会把这篇已有的导读/译文/标签全部
+      // 作废重来 —— 误点的代价远大于多一次点击。
+      window.smtmConfirm({
+        title: "重新获取这篇文章？",
+        text: "将重新抓取原文，并按当前 AI 配置重新生成导读、译文与标签。" +
+              "原有内容会先作废，会消耗若干次模型调用。",
+        ok: "重新获取"
+      }).then(function (yes) {
+        if (!yes) return;
+        setUI("running");
+        polls = 0;
+        fetch("/api/articles/" + id + "/refetch", { method: "POST" })
+          .then(function (r) {
+            if (!r.ok) return r.json().then(function (b) {
+              throw new Error(b.detail || ("HTTP " + r.status));
+            }, function () { throw new Error("HTTP " + r.status); });
+            return r.json();
+          })
+          .then(function (s) {
+            if (s.state === "running") { timer = setInterval(poll, 2000); return; }
+            setUI("idle");
+          })
+          .catch(function (err) { setUI("failed", String(err.message || err)); });
+      });
+    });
+  })();
+
+  // 删除：移入回收站（软删除）。同样先确认 —— 删掉的文章会从列表/日报/
+  // 搜索里立刻消失（可去回收站恢复），误点代价比重新获取还大。
+  (function () {
+    var btn = document.getElementById("delete-btn");
+    if (!btn) return;
+    btn.addEventListener("click", function () {
+      if (btn.disabled) return;
+      var id = btn.getAttribute("data-article-id");
+      window.smtmConfirm({
+        title: "删除这篇文章？",
+        text: "文章会被移入回收站，从列表、日报与搜索里消失；" +
+              "随时可以在「回收站」里恢复。",
+        ok: "移入回收站",
+        danger: true
+      }).then(function (yes) {
+        if (!yes) return;
+        btn.disabled = true;
+        fetch("/api/articles/" + id + "/delete", { method: "POST" })
+          .then(function (r) { return r.json().then(function (b) {
+            if (!r.ok || !b.ok) throw new Error((b && b.detail) || ("HTTP " + r.status));
+            return b;
+          }); })
+          .then(function () { location.assign("/"); })
+          .catch(function (err) {
+            btn.disabled = false;
+            alert("删除失败：" + String(err.message || err));
+          });
+      });
     });
   })();
 </script>

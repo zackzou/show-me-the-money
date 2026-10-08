@@ -17,7 +17,7 @@ from sqlalchemy.orm import Session
 
 from app.config import Settings
 from app.db import session_scope
-from app.models import Article, DailyReport
+from app.models import Article, DailyReport, visible_article_conditions
 from app.utils.logger import get_logger
 from app.utils.text import now_local, split_tags, strip_markdown
 
@@ -81,7 +81,7 @@ def _report_items(session: Session, date_str: str, *, until: datetime | None = N
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             Article.published_at >= start,
             Article.published_at < end,
         )

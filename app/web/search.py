@@ -14,7 +14,7 @@ from typing import Any
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models import Article
+from app.models import Article, visible_article_conditions
 from app.report.generator import STATUS_REPORTABLE
 
 # 搜索框旁边的快捷键提示
@@ -100,7 +100,7 @@ def search_articles(
         .where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             or_(*conditions),
         )
         .order_by(Article.published_at.desc(), Article.id.desc())
@@ -137,7 +137,7 @@ def count_by_category(session: Session, term: str, *, scope: str = SCOPE_META,
         select(Article.id, Article.category, Article.tags).where(
             Article.relevance == 1,
             Article.status.in_(STATUS_REPORTABLE),
-            Article.duplicate_of.is_(None),
+            *visible_article_conditions(),
             or_(*conditions),
         )
     ).all()

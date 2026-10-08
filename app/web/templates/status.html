@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">STATUS</div>
+  <h1>服务状态</h1>
+  <p class="meta">数据来自运行时统计 · 更新于 {{ stats.now.strftime('%Y-%m-%d %H:%M:%S') }}</p>
+</div>
+
+<section class="sec">
+  <div class="stat-grid">
+    <div class="stat-card ok">
+      <span class="stat-label">服务</span>
+      <b class="stat-value">运行中</b>
+      <span class="stat-sub">v{{ stats.version }}</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">信源</span>
+      <b class="stat-value">{{ stats.sources }}</b>
+      <span class="stat-sub">已配置</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">文章</span>
+      <b class="stat-value">{{ stats.articles }}</b>
+      <span class="stat-sub">全库</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">日报</span>
+      <b class="stat-value">{{ stats.reports }}</b>
+      <span class="stat-sub">份</span>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sec-t plain">今天</div>
+  <div class="stat-grid">
+    <div class="stat-card">
+      <span class="stat-label">抓取</span>
+      <b class="stat-value">{{ stats.today_total }}</b>
+      <span class="stat-sub">条（含未处理）</span>
+    </div>
+    <div class="stat-card accent">
+      <span class="stat-label">相关</span>
+      <b class="stat-value">{{ stats.today_relevant }}</b>
+      <span class="stat-sub">条已入选</span>
+    </div>
+    <div class="stat-card {{ 'warn' if stats.today_pending else '' }}">
+      <span class="stat-label">待处理</span>
+      <b class="stat-value">{{ stats.today_pending }}</b>
+      <span class="stat-sub">条</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">特别关注</span>
+      <b class="stat-value">{{ stats.starred }}</b>
+      <span class="stat-sub">篇已标记</span>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sec-t plain">数据质量</div>
+  <div class="stat-grid">
+    <div class="stat-card">
+      <span class="stat-label">有正文</span>
+      <b class="stat-value">{{ stats.with_full_text }}</b>
+      <span class="stat-sub">篇</span>
+    </div>
+    <div class="stat-card">
+      <span class="stat-label">有配图</span>
+      <b class="stat-value">{{ stats.with_images }}</b>
+      <span class="stat-sub">篇</span>
+    </div>
+    <div class="stat-card {{ 'warn' if stats.deleted else '' }}">
+      <span class="stat-label">回收站</span>
+      <b class="stat-value">{{ stats.deleted }}</b>
+      <span class="stat-sub">篇（可恢复）</span>
+    </div>
+  </div>
+</section>
+
+<section class="sec">
+  <div class="sec-t plain">配置</div>
+  <dl class="kv">
+    <dt>模型</dt><dd>{{ stats.model }}</dd>
+    <dt>接口</dt><dd class="mono">{{ stats.api_base }}</dd>
+    <dt>调研方向</dt>
+    <dd>
+      {% for topic in stats.topics %}<span class="tag">{{ topic }}</span>{% endfor %}
+      {% if not stats.topics %}—{% endif %}
+    </dd>
+  </dl>
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .stat-grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+               gap:10px; }
+  .stat-card { display:flex; flex-direction:column; gap:3px;
+               padding:14px 16px; border:1px solid var(--line); border-radius:12px;
+               background:var(--surface); }
+  .stat-card.ok { border-color:color-mix(in srgb, #2f7d5c 45%, var(--line)); }
+  .stat-card.ok .stat-value { color:#2f7d5c; }
+  .stat-card.accent { border-color:var(--accent); background:var(--accent-soft); }
+  .stat-card.accent .stat-value, .stat-card.accent .stat-label { color:var(--accent); }
+  .stat-card.warn { border-color:color-mix(in srgb, #b8873a 45%, var(--line)); }
+  .stat-card.warn .stat-value { color:#8a6420; }
+  .stat-label { font-size:11.5px; color:var(--faint); }
+  .stat-value { font-size:23px; font-weight:700; letter-spacing:-.02em;
+                font-variant-numeric:tabular-nums; line-height:1.2; }
+  .stat-sub { font-size:11.5px; color:var(--faint); }
+  .kv { margin:0; }
+  .kv dt { font-size:11.5px; color:var(--faint); margin-top:14px; }
+  .kv dd { margin:5px 0 0; font-size:13.5px; color:var(--text); }
+  .kv .mono { font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
+              word-break:break-all; font-size:12.5px; }
+  .kv .tag { display:inline-block; margin:0 6px 6px 0; padding:3px 10px;
+             border-radius:999px; background:var(--accent-soft); color:var(--accent);
+             font-size:12px; }
+</style>
+{% endblock %}

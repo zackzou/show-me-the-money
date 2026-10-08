@@ -1,0 +1,280 @@
+{% extends "base.html" %}
+{% block container_extra %} wide{% endblock %}
+{% block content %}
+
+<div class="lead">
+  <div class="kicker">REPORTS</div>
+  <h1>数据报告</h1>
+  <p class="meta">
+    最近 <b>{{ days }}</b> 天 · 生成于 {{ generated_at.strftime('%Y-%m-%d %H:%M') }}
+    · 每个数字都能点开看明细
+  </p>
+</div>
+
+<nav class="rp-range" aria-label="时间范围">
+  {% for choice in range_choices %}
+    <a class="{{ 'on' if choice == days else '' }}" href="/reports?days={{ choice }}">近 {{ choice }} 天</a>
+  {% endfor %}
+</nav>
+
+{# ── KPI 卡：点击进明细 ── #}
+<div class="rp-kpis">
+  <a class="rp-kpi" href="/reports/breakdown?dimension=all&days={{ days }}">
+    <b>{{ kpi.total }}</b><span>收录文章</span>
+  </a>
+  <a class="rp-kpi accent" href="/reports/breakdown?dimension=starred&days={{ days }}">
+    <b>{{ kpi.starred }}</b><span>特别关注</span>
+  </a>
+  <a class="rp-kpi" href="/reports/breakdown?dimension=all&days={{ days }}">
+    <b>{{ kpi.avg_per_day }}</b><span>日均条数</span>
+  </a>
+  <div class="rp-kpi">
+    <b>{{ kpi.processed_pct }}%</b><span>处理完成率</span>
+  </div>
+  <div class="rp-kpi">
+    <b>{{ kpi.translated_pct }}%</b><span>中文覆盖</span>
+  </div>
+  <div class="rp-kpi">
+    <b>{{ kpi.avg_score }}</b><span>平均评分</span>
+  </div>
+</div>
+
+{# ── 趋势图：每天一根柱，点击下钻当天 ── #}
+<section class="rp-card">
+  <div class="rp-head">
+    <h2>每日收录趋势</h2>
+    <span class="rp-hint">点柱看当天明细</span>
+  </div>
+  <div class="rp-trend">
+    {% for point in series %}
+      <a class="rp-col" href="/reports/breakdown?dimension=date&value={{ point.date }}&days={{ days }}"
+         title="{{ point.date }} · {{ point.total }} 条{% if point.starred %}（关注 {{ point.starred }}）{% endif %}">
+        <span class="rp-bar-wrap">
+          {% if point.starred %}
+            <i class="rp-bar star" style="height:{{ point.pct }}%"></i>
+          {% else %}
+            <i class="rp-bar" style="height:{{ point.pct }}%"></i>
+          {% endif %}
+        </span>
+        <span class="rp-col-label">{{ point.label }}</span>
+      </a>
+    {% endfor %}
+  </div>
+</section>
+
+<div class="rp-grid">
+  {# ── 分类分布 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>分类分布</h2><span class="rp-hint">{{ categories|length }} 类</span></div>
+    {% if categories %}
+      <ul class="rp-bars">
+        {% for cat in categories %}
+          <li>
+            <a href="/reports/breakdown?dimension=category&value={{ cat.name|urlencode }}&days={{ days }}">
+              <span class="rp-bar-label">{{ cat.name }}</span>
+              <span class="rp-bar-track"><i style="width:{{ cat.pct }}%"></i></span>
+              <span class="rp-bar-num">{{ cat.count }}</span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}<p class="rp-empty">这段时间没有分类数据。</p>{% endif %}
+  </section>
+
+  {# ── 来源分布 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>来源分布</h2><span class="rp-hint">前 12</span></div>
+    {% if sources %}
+      <ul class="rp-bars">
+        {% for src in sources %}
+          <li>
+            <a href="/reports/breakdown?dimension=source&value={{ src.name|urlencode }}&days={{ days }}">
+              <span class="rp-bar-label">{{ src.name }}</span>
+              <span class="rp-bar-track"><i style="width:{{ src.pct }}%"></i></span>
+              <span class="rp-bar-num">{{ src.count }}</span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}<p class="rp-empty">这段时间没有来源数据。</p>{% endif %}
+  </section>
+</div>
+
+<div class="rp-grid">
+  {# ── 评分分布 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>评分分布</h2><span class="rp-hint">点档看明细</span></div>
+    <ul class="rp-bars">
+      {% for bucket in score_dist %}
+        <li>
+          <a href="/reports/breakdown?dimension=score&value={{ bucket.label }}&days={{ days }}">
+            <span class="rp-bar-label">{{ bucket.label }}</span>
+            <span class="rp-bar-track"><i class="score-{{ loop.index }}" style="width:{{ bucket.pct }}%"></i></span>
+            <span class="rp-bar-num">{{ bucket.count }}</span>
+          </a>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+
+  {# ── 发布时段热力 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>发布时段分布</h2><span class="rp-hint">北京时间 · 点柱下钻</span></div>
+    <div class="rp-hours">
+      {% for h in hours %}
+        <a class="rp-hour" href="/reports/breakdown?dimension=hour&value={{ h.hour }}&days={{ days }}"
+           title="{{ '%02d'|format(h.hour) }}:00 · {{ h.count }} 条">
+          <i style="height:{{ h.pct if h.pct > 3 else 3 }}%"></i>
+          <span>{{ '%02d'|format(h.hour) }}</span>
+        </a>
+      {% endfor %}
+    </div>
+  </section>
+</div>
+
+<div class="rp-grid">
+  {# ── 标签 Top ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>标签 Top 20</h2><span class="rp-hint">点标签看明细</span></div>
+    {% if tags %}
+      <div class="rp-tags">
+        {% for tag in tags %}
+          <a class="rp-tag" href="/reports/breakdown?dimension=tag&value={{ tag.name|urlencode }}&days={{ days }}">
+            #{{ tag.name }} <b>{{ tag.count }}</b>
+          </a>
+        {% endfor %}
+      </div>
+    {% else %}<p class="rp-empty">这段时间没有标签数据。</p>{% endif %}
+  </section>
+
+  {# ── 关注命中 ── #}
+  <section class="rp-card">
+    <div class="rp-head"><h2>特别关注命中</h2><span class="rp-hint">关注词累计</span></div>
+    {% if watch %}
+      <ul class="rp-bars">
+        {% for rule in watch %}
+          <li>
+            <a href="/reports/breakdown?dimension=starred&days={{ days }}">
+              <span class="rp-bar-label"><span class="rp-star">★</span>{{ rule.keyword }}</span>
+              <span class="rp-bar-track star"><i style="width:{{ 100 if loop.first else (rule.hits * 100 // watch[0].hits) }}%"></i></span>
+              <span class="rp-bar-num">{{ rule.hits }}</span>
+            </a>
+          </li>
+        {% endfor %}
+      </ul>
+    {% else %}<p class="rp-empty">还没有特别关注词。去「关键词」页添加，命中会自动统计。</p>{% endif %}
+  </section>
+</div>
+
+{# ── 日报定稿情况 ── #}
+<section class="rp-card">
+  <div class="rp-head"><h2>日报定稿</h2><span class="rp-hint">这段时间出的日报</span></div>
+  {% if reports %}
+    <div class="rp-reports">
+      {% for row in reports %}
+        <a class="rp-report" href="/daily/{{ row.date }}">
+          <b>{{ row.date }}</b><span>{{ row.count }} 篇</span>
+        </a>
+      {% endfor %}
+    </div>
+  {% else %}<p class="rp-empty">这段时间没有日报。</p>{% endif %}
+</section>
+
+{% endblock %}
+
+{% block extra %}
+<style>
+  .rp-range { display:flex; gap:6px; margin:14px 0 0; flex-wrap:wrap; }
+  .rp-range a { padding:6px 14px; border:1px solid var(--line); border-radius:999px;
+                font-size:12.5px; color:var(--muted); background:var(--surface); }
+  .rp-range a.on { border-color:var(--accent); background:var(--accent-soft);
+                   color:var(--accent); font-weight:600; }
+
+  .rp-kpis { display:grid; grid-template-columns:repeat(auto-fit,minmax(130px,1fr));
+             gap:9px; margin:16px 0 0; }
+  .rp-kpi { display:flex; flex-direction:column; gap:3px; padding:13px 15px;
+            border:1px solid var(--line); border-radius:11px; background:var(--surface);
+            color:inherit; }
+  a.rp-kpi:hover { border-color:var(--accent); }
+  .rp-kpi b { font-size:23px; font-weight:700; letter-spacing:-.02em;
+              font-variant-numeric:tabular-nums; line-height:1.2; }
+  .rp-kpi span { font-size:11.5px; color:var(--faint); }
+  .rp-kpi.accent { border-color:var(--accent); background:var(--accent-soft); }
+  .rp-kpi.accent b, .rp-kpi.accent span { color:var(--accent); }
+
+  .rp-card { margin:14px 0 0; padding:16px 18px; border:1px solid var(--line);
+             border-radius:13px; background:var(--surface); }
+  .rp-head { display:flex; align-items:baseline; justify-content:space-between;
+             gap:10px; margin-bottom:14px; }
+  .rp-head h2 { margin:0; font-size:14.5px; font-weight:650; }
+  .rp-hint { font-size:11.5px; color:var(--faint); }
+  .rp-empty { margin:0; font-size:12.5px; color:var(--faint); }
+
+  /* 趋势柱状图（纯 CSS） */
+  .rp-trend { display:flex; align-items:flex-end; gap:2px; height:140px;
+              overflow-x:auto; padding-bottom:2px; }
+  .rp-col { flex:1 0 10px; min-width:10px; display:flex; flex-direction:column;
+            align-items:center; justify-content:flex-end; height:100%; gap:4px; }
+  .rp-bar-wrap { width:100%; height:100%; display:flex; align-items:flex-end; }
+  .rp-bar { display:block; width:100%; min-height:2px; border-radius:3px 3px 0 0;
+            background:var(--accent); opacity:.75; transition:opacity .12s; }
+  .rp-bar.star { background:#b8873a; opacity:1; }
+  .rp-col:hover .rp-bar { opacity:1; }
+  .rp-col-label { font-size:9px; color:var(--faint); writing-mode:horizontal-tb;
+                  white-space:nowrap; transform:rotate(-45deg); transform-origin:center;
+                  height:14px; }
+  .rp-trend { margin-bottom:14px; }
+
+  /* 横向条形 */
+  .rp-bars { list-style:none; margin:0; padding:0; display:flex;
+             flex-direction:column; gap:7px; }
+  .rp-bars a { display:flex; align-items:center; gap:10px; padding:3px 0; color:inherit; }
+  .rp-bars a:hover .rp-bar-label { color:var(--accent); }
+  .rp-bar-label { flex:0 0 96px; font-size:12.5px; color:var(--muted);
+                  white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .rp-bar-track { flex:1 1 auto; height:8px; border-radius:999px;
+                  background:var(--line-soft); overflow:hidden; min-width:40px; }
+  .rp-bar-track i { display:block; height:100%; border-radius:999px;
+                    background:var(--accent); opacity:.8; }
+  .rp-bar-track.star i { background:#b8873a; opacity:1; }
+  .rp-bar-track .score-1 { background:#b3402a; }
+  .rp-bar-track .score-2 { background:var(--accent); }
+  .rp-bar-num { flex:0 0 44px; text-align:right; font-size:12px; color:var(--muted);
+                font-variant-numeric:tabular-nums; }
+  .rp-star { color:#b8873a; margin-right:4px; }
+
+  /* 时段柱 */
+  .rp-hours { display:flex; align-items:flex-end; gap:3px; height:110px; }
+  .rp-hour { flex:1; display:flex; flex-direction:column; align-items:center;
+             justify-content:flex-end; height:100%; gap:3px; }
+  .rp-hour i { display:block; width:100%; border-radius:2px 2px 0 0;
+               background:var(--accent); opacity:.55; transition:opacity .12s; }
+  .rp-hour:hover i { opacity:1; }
+  .rp-hour span { font-size:8.5px; color:var(--faint); font-variant-numeric:tabular-nums; }
+
+  /* 标签云 */
+  .rp-tags { display:flex; flex-wrap:wrap; gap:7px; }
+  .rp-tag { padding:4px 11px; border-radius:999px; background:var(--chip);
+            color:var(--muted); font-size:12px; }
+  .rp-tag b { color:var(--text); margin-left:3px; font-variant-numeric:tabular-nums; }
+  .rp-tag:hover { background:var(--accent-soft); color:var(--accent); }
+  .rp-tag:hover b { color:var(--accent); }
+
+  /* 日报 */
+  .rp-reports { display:flex; flex-wrap:wrap; gap:8px; }
+  .rp-report { display:flex; flex-direction:column; gap:2px; padding:9px 14px;
+               border:1px solid var(--line); border-radius:10px; color:inherit; }
+  .rp-report b { font-size:13px; font-variant-numeric:tabular-nums; }
+  .rp-report span { font-size:11px; color:var(--faint); }
+  .rp-report:hover { border-color:var(--accent); }
+  .rp-report:hover b { color:var(--accent); }
+
+  .rp-grid { display:grid; grid-template-columns:1fr 1fr; gap:14px; margin-top:14px; }
+  .rp-grid .rp-card { margin:0; }
+  @media (max-width:900px) { .rp-grid { grid-template-columns:1fr; } }
+  @media (max-width:640px) {
+    .rp-bar-label { flex-basis:74px; font-size:12px; }
+    .rp-trend { height:110px; }
+  }
+</style>
+{% endblock %}

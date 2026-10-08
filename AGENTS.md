@@ -48,13 +48,33 @@ python -m app.main
 
 其余可选：`FETCH_ON_STARTUP` / `CONFIG_DIR` / `DB_PATH`（默认 `config`、`data/smtm.db`）。
 
-## 配完之后：三个网页是主要入口
+## 配完之后：这些网页是主要入口
 
 - `/sources` —— 加信源（填地址 → 试抓 → 添加）、就地改名、启停、软删除与撤回
+- `/keywords` —— 屏蔽词（不收集）与特别关注词（加星标 + 优先排序），即时生效
+- `/trash` —— 回收站：恢复 / 批量永久删除 / 清空
+- `/reports` —— 数据报告：KPI、趋势与分布图表，每个元素可下钻明细
 - `/settings` —— 换模型、填 Key（点眼睛才取明文）、测连通性、看 Token 用量与调用日志
+- `/status` —— 服务状态（人看）；`/api/health` 是给脚本的 JSON
 - `/rss-guide` —— RSS 订阅说明页
 
 命令行也能改信源（批量默认值）：`config/default_sources.yaml`。
+
+## 管理功能的数据口径（改代码前必读）
+
+- **可见性只有一个开关**：`models.visible_article_conditions()`（`duplicate_of IS NULL`
+  + `deleted_at IS NULL`）。列表 / 日报 / 搜索 / RSS / 报告都从这里取条件，
+  **新加展示入口也必须用它**，否则回收站里的文章会从那个口子漏出来。
+- **删除是软删除**：`Article.deleted_at` 打时间戳，恢复是一次 UPDATE；
+  只有 `/api/trash/purge` 才真 DELETE（并做孤儿图对账）。
+- **关键词规则**在 `app/fetcher/keywords.py`：
+  - 屏蔽：入库前看标题+摘要（`pipeline.block_hit`）；正文级命中在
+    `scheduler.apply_keyword_rules`（content_job 尾部）软删到回收站；
+  - 关注：同一处置 `Article.starred=1`，排序在 `routes._day_statement`（`starred DESC`）；
+  - 英文按**词边界**匹配（`Muse` 不命中 `museum`），中文裸包含；改匹配逻辑先看
+    `tests/test_manage.py::test_keyword_matches_latin_word_boundary`。
+- **报告页纯服务端聚合 + CSS 图表**（`app/web/reports.py`），不引图表库；
+  下钻统一走 `/reports/breakdown?dimension=&value=`。
 
 ## 外观：两套皮肤
 
@@ -74,7 +94,7 @@ python -m app.main
 ```bash
 ruff check app tests scripts
 mypy app scripts
-pytest                      # 当前基线：405 passed
+pytest                      # 当前基线：418 passed
 ```
 
 ## 会让你踩坑的几件事
@@ -122,14 +142,15 @@ python scripts/repair_telegraphic.py         # 被网关风格注入压成「电
 app/main.py          create_app 工厂 + 中间件
 app/config.py        .env / config/*.yaml 加载与校验
 app/db.py            引擎、WAL、启动自愈迁移
-app/models.py        Article / Source / DailyReport
-app/scheduler.py     APScheduler 任务编排
+app/models.py        Article / Source / DailyReport / KeywordRule · visible_article_conditions
+app/scheduler.py     APScheduler 任务编排 · apply_keyword_rules（正文级关键词规则）
 app/fetcher/         rss 抓取 · content 正文抽取 · images 配图 · lang 语种判定
                      guard 元数据拦截 · dedup 去重 · media_store 图片本地化 · pipeline 主流程
+                     keywords 关键词规则（匹配口径与执行）
 app/ai/              client（HTTP+降级）· prompts · processor 处理流水线 · cluster 同题合并
 app/report/          generator 日报生成与时间窗口
 app/web/             routes 页面 · sources 信源管理 · settings 设置 · api JSON（含重新获取）
-                     search · rss 订阅
+                     search · rss 订阅 · keywords 关键词管理 · trash 回收站 · reports 数据报告
 app/web/templates/   Jinja2；base.html 持有全站 CSS 与公共 JS
                      _skin_aihot.css AIHOT 皮肤（/skin/aihot.css）· _icons.html 皮肤图标
 config/              可直接改的默认配置（挂载进容器，改完重启即生效）
